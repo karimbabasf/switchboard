@@ -86,6 +86,22 @@ create table callback_actions (
   created_at timestamptz not null default now()
 );
 
+-- Who a call can ring, and in what order. Replaces Google Voice "linked numbers"
+-- and goes past it: same ring_order means those legs ring simultaneously, higher
+-- ring_order means a later wave, so simulring and cascade are the same table.
+-- Also the escalation target when the voice agent hands a live call to a human.
+create table responders (
+  id               uuid primary key default gen_random_uuid(),
+  name             text not null,
+  phone            text not null unique,           -- E.164
+  ring_order       integer not null default 0,
+  active           boolean not null default true,
+  telegram_user_id bigint,                         -- so a Telegram reply is attributable
+  created_at       timestamptz not null default now()
+);
+
+create index responders_ring_idx on responders (ring_order) where active;
+
 create or replace function touch_updated_at() returns trigger
 language plpgsql as $$
 begin
@@ -106,3 +122,4 @@ alter table messages         enable row level security;
 alter table calls            enable row level security;
 alter table outbox           enable row level security;
 alter table callback_actions enable row level security;
+alter table responders       enable row level security;
