@@ -48,6 +48,7 @@ import { POST } from '../app/api/qbo-sync/route';
 
 afterEach(() => {
   vi.resetAllMocks();
+  vi.unstubAllEnvs();
 });
 
 // ---------------------------------------------------------------------------
@@ -240,6 +241,45 @@ describe('syncInvoices', () => {
   });
 });
 
+describe('runQboSync gate', () => {
+  // runQboSync itself is mocked out above so the route tests can drive
+  // route.ts's own copy of the check without a real sync run. This block goes
+  // around that mock via importActual to cover the gate INSIDE runQboSync,
+  // which matters for any future caller that is not route.ts.
+  async function realRunQboSync() {
+    const actual = await vi.importActual<typeof import('../lib/qbo/sync')>('../lib/qbo/sync');
+    return actual.runQboSync;
+  }
+
+  it('does nothing, and touches neither qboClient nor the mirror tables, when disabled', async () => {
+    useFakeDb();
+    vi.stubEnv('QBO_SYNC_ENABLED', 'false');
+    const run = await realRunQboSync();
+
+    const result = await run();
+
+    expect(result).toEqual({ enabled: false });
+    expect(qboClient.listItemsPage).not.toHaveBeenCalled();
+    expect(qboClient.listInvoicesPage).not.toHaveBeenCalled();
+  });
+
+  it('runs both syncs once explicitly enabled', async () => {
+    useFakeDb();
+    vi.stubEnv('QBO_SYNC_ENABLED', 'true');
+    vi.mocked(qboClient.listItemsPage).mockResolvedValueOnce([]);
+    vi.mocked(qboClient.listInvoicesPage).mockResolvedValueOnce([]);
+    const run = await realRunQboSync();
+
+    const result = await run();
+
+    expect(result.enabled).toBe(true);
+    if (result.enabled) {
+      expect(result.items.ok).toBe(true);
+      expect(result.invoices.ok).toBe(true);
+    }
+  });
+});
+
 describe('findItems', () => {
   it('sanitizes the term and maps rows to the lookup shape', async () => {
     const rows = [{ name: 'Packing Tape', sku: 'TAPE-1', unit_price_cents: 599, qty_on_hand: 12 }];
@@ -346,6 +386,9 @@ describe('POST /api/qbo-sync', () => {
   // still be a no-op unless someone deliberately turned the sync on, because
   // this is the one component that can reach Akme's production token store.
   it('skips the sync when QBO_SYNC_ENABLED is not set, even with a valid token', async () => {
+    // Explicit 'false' rather than relying on it being unset: the real shell
+    // this suite runs in is not this test's business either way.
+    vi.stubEnv('QBO_SYNC_ENABLED', 'false');
     const req = new Request('http://localhost/api/qbo-sync', {
       method: 'POST',
       headers: { authorization: 'Bearer test-worker-secret-value' },

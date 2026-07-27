@@ -132,7 +132,11 @@ const checks: Check[] = [
     group: 'Supabase',
     name: 'migration has been applied',
     run: async () => {
-      const tables = ['contacts', 'messages', 'calls', 'outbox', 'callback_actions'];
+      const tables = [
+        'contacts', 'messages', 'calls', 'outbox', 'callback_actions', 'responders',
+        'telnyx_events', 'call_flow', 'call_legs',
+        'qbo_items', 'qbo_invoices', 'qbo_sync_state',
+      ];
       const missing: string[] = [];
       for (const t of tables) {
         const res = await fetch(`${env('SUPABASE_URL')}/rest/v1/${t}?select=*&limit=0`, {
@@ -164,6 +168,32 @@ const checks: Check[] = [
       return b.public
         ? fail(`bucket "${bucket}" is PUBLIC. Call recordings must be private`)
         : pass(`"${bucket}" exists and is private`);
+    },
+  },
+
+  {
+    group: 'Supabase',
+    name: 'ring group has at least one active responder',
+    run: async () => {
+      // An empty responders table is not an error anywhere in the code, it just
+      // means every call rings nobody and goes straight to voicemail. That looks
+      // like a broken phone system and produces no error to chase.
+      const res = await fetch(
+        `${env('SUPABASE_URL')}/rest/v1/responders?select=name,phone,ring_order&active=is.true&order=ring_order`,
+        {
+          headers: {
+            apikey: env('SUPABASE_SERVICE_ROLE_KEY'),
+            authorization: `Bearer ${env('SUPABASE_SERVICE_ROLE_KEY')}`,
+          },
+        },
+      );
+      if (!res.ok) return fail(`HTTP ${res.status}`);
+      const rows = (await res.json()) as { name: string; ring_order: number }[];
+      if (rows.length === 0) {
+        return fail('no active responders, so every call rings nobody and drops to voicemail');
+      }
+      const waves = [...new Set(rows.map((r) => r.ring_order))].length;
+      return pass(`${rows.length} responder(s) across ${waves} wave(s): ${rows.map((r) => r.name).join(', ')}`);
     },
   },
 
