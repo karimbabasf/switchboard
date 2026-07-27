@@ -52,6 +52,13 @@ export async function contactByThreadId(threadId: number): Promise<Contact | nul
   return (res.data as Contact | null) ?? null;
 }
 
+/** Plain lookup, no create. Used by card renderers that want a display name but must not race resolveTopic's own upsert. */
+export async function getContact(phone: string): Promise<Contact | null> {
+  const res = await db().from('contacts').select('*').eq('phone', phone).maybeSingle();
+  if (res.error) throw new Error(`getContact(${phone}): ${res.error.message}`);
+  return (res.data as Contact | null) ?? null;
+}
+
 async function getOrCreateContact(phone: string): Promise<Contact> {
   // Upsert-then-select rather than insert-then-catch: two concurrent first
   // contacts for the same phone would otherwise race on the primary key.

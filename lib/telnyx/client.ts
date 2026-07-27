@@ -43,7 +43,7 @@ interface TelnyxErrorBody {
   errors?: { code?: string | number; title?: string; detail?: string }[];
 }
 
-async function post<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
+async function post<T>(path: string, body: object = {}): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
     headers: {

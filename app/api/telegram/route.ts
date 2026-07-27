@@ -13,17 +13,17 @@ import type { CallbackAction, Message } from '../../../lib/types';
  * that would help an attacker tell "wrong secret" from "wrong chat" apart.
  */
 
-interface TelegramUser {
+export interface TelegramUser {
   id: number;
   is_bot: boolean;
 }
 
-interface TelegramChat {
+export interface TelegramChat {
   id: number;
   type: string;
 }
 
-interface TelegramMessage {
+export interface TelegramMessage {
   message_id: number;
   message_thread_id?: number;
   chat: TelegramChat;
@@ -40,13 +40,13 @@ interface TelegramMessage {
   pinned_message?: unknown;
 }
 
-interface TelegramCallbackQuery {
+export interface TelegramCallbackQuery {
   id: string;
   data?: string;
   message?: TelegramMessage;
 }
 
-interface TelegramUpdate {
+export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;

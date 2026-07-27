@@ -1,6 +1,6 @@
 import { db, unwrap } from '../db';
-import type { CallSummary, MediaItem } from '../types';
-import { formatPhoneForDisplay } from './topics';
+import type { Call, CallSummary, MediaItem, OutboxKind } from '../types';
+import { formatPhoneForDisplay, getContact, resolveTopic } from './topics';
 
 /**
  * Renderers that turn domain events into outbox payloads. Nothing here calls
