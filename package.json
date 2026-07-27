@@ -10,7 +10,6 @@
     "preflight": "node --env-file=.env.local scripts/preflight.mts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.115.0",
     "@supabase/supabase-js": "^2.110.9",
     "assemblyai": "^4.36.4",
     "next": "16.2.12",

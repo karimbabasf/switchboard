@@ -303,16 +303,25 @@ const checks: Check[] = [
     },
   },
   {
-    group: 'Anthropic',
-    name: 'API key is valid',
+    group: 'NEAR AI Cloud',
+    name: 'API key is valid and the model exists',
     run: async () => {
-      const res = await fetch('https://api.anthropic.com/v1/models?limit=1', {
-        headers: {
-          'x-api-key': env('ANTHROPIC_API_KEY'),
-          'anthropic-version': '2023-06-01',
-        },
+      const base = (process.env.NEAR_AI_BASE_URL?.trim() || 'https://cloud-api.near.ai/v1').replace(/\/$/, '');
+      const want = process.env.NEAR_AI_MODEL?.trim() || 'openai/gpt-oss-120b';
+      const res = await fetch(`${base}/models`, {
+        headers: { authorization: `Bearer ${env('NEAR_AI_API_KEY')}` },
       });
-      return res.ok ? pass('models endpoint reachable') : fail(`HTTP ${res.status}`);
+      if (res.status === 401) return fail('401, key rejected');
+      if (!res.ok) return fail(`HTTP ${res.status} from ${base}`);
+      const j = (await res.json()) as { data?: { id: string }[] };
+      const ids = (j.data ?? []).map((m) => m.id);
+      // Checking the model exists, not just that the key works: a typo'd model
+      // name authenticates fine and only fails on the first real call, which is
+      // after a call has already been recorded and cannot be replayed.
+      if (ids.length > 0 && !ids.includes(want)) {
+        return fail(`model "${want}" not in the ${ids.length} models this key can reach`);
+      }
+      return pass(`${want} reachable`);
     },
   },
 

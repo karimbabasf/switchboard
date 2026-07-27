@@ -7,7 +7,8 @@ supergroup, one forum topic per contact, two-way.
 
 Calls and SMS run on Telnyx. State lives in the shared `akme-dev` Supabase
 database. Recordings go to private Supabase Storage, transcripts to AssemblyAI,
-summaries to Claude Haiku 4.5.
+summaries to NEAR AI Cloud (OpenAI-compatible), the default LLM provider across
+Karim's projects.
 
 ## Run it
 

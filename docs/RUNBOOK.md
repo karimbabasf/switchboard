@@ -21,7 +21,7 @@ whatever is broken instead of failing as one blob.
 | Var | Where |
 |---|---|
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase dashboard, akme-dev, Project Settings > API keys |
-| `ANTHROPIC_API_KEY` | console.anthropic.com |
+| `NEAR_AI_API_KEY` | NEAR AI Cloud. Same key Akme's email classifier uses, so you may already have it |
 | `ASSEMBLYAI_API_KEY` | assemblyai.com, free tier is fine for testing |
 | `FORWARD_TO_NUMBER` | your cell, E.164, e.g. +1415... |
 

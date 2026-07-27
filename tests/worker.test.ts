@@ -11,7 +11,9 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
 process.env.SUPABASE_STORAGE_BUCKET = 'recordings';
 process.env.ASSEMBLYAI_API_KEY = 'test-assemblyai-key';
 process.env.ASSEMBLYAI_MODEL = 'universal-2';
-process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+process.env.NEAR_AI_API_KEY = 'test-near-ai-key';
+process.env.NEAR_AI_BASE_URL = 'https://cloud-api.near.ai/v1';
+process.env.NEAR_AI_MODEL = 'openai/gpt-oss-120b';
 process.env.WORKER_SECRET = 'a'.repeat(32);
 
 // ---------------------------------------------------------------------------
@@ -317,44 +319,74 @@ describe('summarize.ts: validateCallSummary', () => {
   });
 });
 
-const anthropicBox = vi.hoisted(() => ({ create: null as unknown }));
-vi.mock('@anthropic-ai/sdk', () => ({
-  // A class, not vi.fn().mockImplementation(arrow): summarize.ts calls
-  // `new Anthropic(...)`, and an arrow function cannot be invoked with `new`.
-  default: class {
-    messages = {
-      create: (...args: unknown[]) => (anthropicBox.create as (...a: unknown[]) => unknown)(...args),
-    };
-  },
-}));
+// NEAR AI Cloud is an OpenAI-compatible HTTP endpoint, so there is no SDK to
+// mock: stubbing fetch tests the actual wire format we send and parse.
+function nearAiResponse(toolArguments: string, name = 'record_call_summary') {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ choices: [{ message: { tool_calls: [{ function: { name, arguments: toolArguments } }] } }] }),
+    text: async () => '',
+  };
+}
 
 describe('summarize.ts: summarizeCall', () => {
+  const summary = {
+    headline: 'Caller asked about box pricing',
+    caller_wanted: 'A quote',
+    commitments: [],
+    action_items: [],
+    needs_followup: false,
+    sentiment: 'neutral',
+  };
+
   it('forces the tool call and validates the returned shape', async () => {
     const { summarizeCall } = await import('../lib/worker/summarize');
-    const summary = {
-      headline: 'Caller asked about box pricing',
-      caller_wanted: 'A quote',
-      commitments: [],
-      action_items: [],
-      needs_followup: false,
-      sentiment: 'neutral',
-    };
-    anthropicBox.create = vi.fn(async () => ({
-      content: [{ type: 'tool_use', name: 'record_call_summary', input: summary }],
-    }));
+    const fetchSpy = vi.fn(async () => nearAiResponse(JSON.stringify(summary)));
+    vi.stubGlobal('fetch', fetchSpy);
 
     const result = await summarizeCall(makeCall({ transcript: 'Speaker 1: hi\nSpeaker 2: hello' }));
     expect(result).toEqual(summary);
-    expect(anthropicBox.create).toHaveBeenCalledWith(
-      expect.objectContaining({ tool_choice: { type: 'tool', name: 'record_call_summary' } }),
-    );
+
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, { body: string; headers: Record<string, string> }];
+    expect(url).toBe('https://cloud-api.near.ai/v1/chat/completions');
+    expect(init.headers.authorization).toBe('Bearer test-near-ai-key');
+    const body = JSON.parse(init.body);
+    expect(body.model).toBe('openai/gpt-oss-120b');
+    expect(body.tool_choice).toEqual({ type: 'function', function: { name: 'record_call_summary' } });
+    vi.unstubAllGlobals();
   });
 
-  it('throws MalformedSummaryError when no tool_use block is returned', async () => {
+  it('throws MalformedSummaryError when the model returns no tool call', async () => {
     const { summarizeCall, MalformedSummaryError } = await import('../lib/worker/summarize');
-    anthropicBox.create = vi.fn(async () => ({ content: [{ type: 'text', text: 'sorry, I cannot do that' }] }));
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ choices: [{ message: { content: 'sorry, I cannot do that' } }] }),
+      text: async () => '',
+    })));
 
     await expect(summarizeCall(makeCall({ transcript: 'hi' }))).rejects.toBeInstanceOf(MalformedSummaryError);
+    vi.unstubAllGlobals();
+  });
+
+  // Tool arguments arrive as a JSON STRING here, unlike Anthropic's already
+  // parsed object. Invalid JSON must be a retryable error, not a crash.
+  it('throws MalformedSummaryError when the tool arguments are not valid JSON', async () => {
+    const { summarizeCall, MalformedSummaryError } = await import('../lib/worker/summarize');
+    vi.stubGlobal('fetch', vi.fn(async () => nearAiResponse('{not valid json')));
+
+    await expect(summarizeCall(makeCall({ transcript: 'hi' }))).rejects.toBeInstanceOf(MalformedSummaryError);
+    vi.unstubAllGlobals();
+  });
+
+  it('surfaces a non-2xx from the provider as a retryable error', async () => {
+    const { summarizeCall } = await import('../lib/worker/summarize');
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 503, json: async () => ({}), text: async () => 'upstream unavailable',
+    })));
+
+    await expect(summarizeCall(makeCall({ transcript: 'hi' }))).rejects.toThrow(/503/);
+    vi.unstubAllGlobals();
   });
 });
 
