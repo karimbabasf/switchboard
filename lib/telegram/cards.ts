@@ -102,6 +102,43 @@ export async function completedCallCard(input: CompletedCallCardInput): Promise<
   return { text: lines.join('\n'), reply_markup: { inline_keyboard: [[callBack, markHandled]] } };
 }
 
+export interface OutboxPayload {
+  thread_id: number | null;
+  kind: OutboxKind;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Entry point the post-call worker (lib/worker/run.ts) calls once a call
+ * reaches 'summarizing'. Async because it has to: resolving the contact's
+ * topic (creating one if this is a first contact) and creating the button's
+ * `callback_actions` rows are both real DB round trips, so this can never be
+ * a synchronous function no matter how it is called.
+ */
+export async function callCard(call: Call): Promise<OutboxPayload[]> {
+  const threadId = await resolveTopic(call.contact_phone);
+
+  if (!call.summary) {
+    // Shouldn't happen once the pipeline reaches 'summarizing', but a call
+    // must never be silently dropped just because a summary is missing.
+    const duration = formatDuration(call.duration_sec);
+    const text = `<b>Call ${call.was_answered ? 'ended' : 'went to voicemail'}</b>\n${escapeHtml(formatPhoneForDisplay(call.contact_phone))} · ${duration}\n\n<i>No summary available.</i>`;
+    const fallback: TextCardPayload = { text };
+    return [{ thread_id: threadId, kind: 'text', payload: fallback as unknown as Record<string, unknown> }];
+  }
+
+  const contact = await getContact(call.contact_phone);
+  const payload = await completedCallCard({
+    callId: call.id,
+    contactPhone: call.contact_phone,
+    displayName: contact?.display_name ?? null,
+    durationSec: call.duration_sec,
+    summary: call.summary,
+  });
+
+  return [{ thread_id: threadId, kind: 'text', payload: payload as unknown as Record<string, unknown> }];
+}
+
 async function makeCallbackButton(
   text: string,
   action: CallbackActionName,

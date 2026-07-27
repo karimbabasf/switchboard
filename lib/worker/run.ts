@@ -16,19 +16,22 @@
  */
 
 import { db } from '../db';
-import type { Call, CallStatus, OutboxKind } from '../types';
+import { env } from '../env';
+import type { Call, CallStatus } from '../types';
 import { fetchRecording, RecordingExpiredError } from './recording';
 import { transcribeCall } from './transcribe';
 import { summarizeCall } from './summarize';
+import type { AudioCardPayload, OutboxPayload } from '../telegram/cards';
 
-/** Mirrors what lib/telegram/cards.ts (owned by another agent) returns from callCard(). */
-export interface OutboxPayload {
-  thread_id: number | null;
-  kind: OutboxKind;
-  payload: Record<string, unknown>;
-}
+/** Generous headroom for the outbox drain's own backoff retries, well past the ~seconds it takes to actually send. */
+const OUTBOX_AUDIO_URL_TTL_SECONDS = 60 * 60 * 24;
 
-export type CallCardFn = (call: Call) => OutboxPayload[];
+// The card is assembled lazily rather than imported at module scope: that
+// keeps this file resilient to lib/telegram/cards.ts and lib/telegram/topics.ts
+// being edited or momentarily unavailable while they're owned by another
+// agent in a concurrently building repo, and lets tests inject a fake via
+// RunWorkerOptions.callCard without needing the real modules to exist on disk.
+export type CallCardFn = (call: Call) => Promise<OutboxPayload[]>;
 
 export interface RunWorkerOptions {
   /** Injectable for tests; production default lazily imports lib/telegram/cards.ts. */
@@ -113,7 +116,7 @@ async function runStep(call: Call, now: Date, options: RunWorkerOptions): Promis
       }
       case 'summarizing': {
         const callCard = options.callCard ?? (await loadCallCard());
-        const payloads = callCard(call);
+        const payloads = await callCard(call);
         await enqueueOutbox(payloads);
         await advance(call, 'posted', {});
         return 'posted';
@@ -138,9 +141,49 @@ async function runStep(call: Call, now: Date, options: RunWorkerOptions): Promis
   }
 }
 
+/**
+ * Builds the two outbox rows a finished call produces: the recording (audio)
+ * and the summary (text). Both go to the contact's existing topic if it has
+ * one, or thread_id null if it doesn't yet, since resolving/creating a topic
+ * is the Telegram drain's job, not this worker's.
+ */
 async function loadCallCard(): Promise<CallCardFn> {
-  const mod = await import('../telegram/cards');
-  return mod.callCard;
+  const [{ completedCallCard }, { getContact }] = await Promise.all([
+    import('../telegram/cards'),
+    import('../telegram/topics'),
+  ]);
+
+  return async (call: Call): Promise<OutboxPayload[]> => {
+    if (!call.storage_path) {
+      throw new Error(`call ${call.id} has no storage_path; cannot attach the recording to the outbox card`);
+    }
+    if (!call.summary) {
+      throw new Error(`call ${call.id} has no summary; cannot build the completed-call card`);
+    }
+
+    const contact = await getContact(call.contact_phone);
+    const threadId = contact?.telegram_topic_id ?? null;
+
+    const bucket = env('SUPABASE_STORAGE_BUCKET');
+    const { data, error } = await db().storage.from(bucket).createSignedUrl(call.storage_path, OUTBOX_AUDIO_URL_TTL_SECONDS);
+    if (error || !data) {
+      throw new Error(`could not sign the recording for the outbox: ${error?.message ?? 'no data returned'}`);
+    }
+    const audio: AudioCardPayload = { audio_url: data.signedUrl };
+
+    const text = await completedCallCard({
+      callId: call.id,
+      contactPhone: call.contact_phone,
+      displayName: contact?.display_name ?? null,
+      durationSec: call.duration_sec,
+      summary: call.summary,
+    });
+
+    return [
+      { thread_id: threadId, kind: 'audio', payload: audio as unknown as Record<string, unknown> },
+      { thread_id: threadId, kind: 'text', payload: text as unknown as Record<string, unknown> },
+    ];
+  };
 }
 
 /** Advancing resets attempts: each pipeline step gets its own retry budget. */

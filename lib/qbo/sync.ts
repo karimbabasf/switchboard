@@ -1,4 +1,5 @@
 import { db } from '../db';
+import { optionalEnv } from '../env';
 import { qboClient, type QboItemRaw, type QboInvoiceRaw } from './client';
 import type { QboItem, QboInvoice } from '../types';
 
@@ -187,8 +188,21 @@ async function syncInvoices(): Promise<SyncResult> {
 
 export { syncItems, syncInvoices };
 
-export async function runQboSync(): Promise<{ items: SyncResult; invoices: SyncResult }> {
+export type QboSyncRunResult = { enabled: false } | { enabled: true; items: SyncResult; invoices: SyncResult };
+
+/**
+ * QBO_SYNC_ENABLED is a hard, off-by-default kill switch (see .env.example).
+ * The token store here is the SAME qbo_credentials row Akme's production
+ * connection rotates through; a bug that fires this before Karim deliberately
+ * turns it on does not just degrade switchboard, it can knock Akme off
+ * QuickBooks. The check lives here, not only in the route, so any future
+ * caller of runQboSync gets the same guarantee for free.
+ */
+export async function runQboSync(): Promise<QboSyncRunResult> {
+  if (optionalEnv('QBO_SYNC_ENABLED', 'false') !== 'true') {
+    return { enabled: false };
+  }
   const items = await syncItems();
   const invoices = await syncInvoices();
-  return { items, invoices };
+  return { enabled: true, items, invoices };
 }

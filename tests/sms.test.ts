@@ -26,7 +26,17 @@ const ok = (data: unknown) => ({ data, error: null });
 
 vi.mock('../lib/db', () => ({ db: vi.fn() }));
 
+// Mocked at the boundary rather than driven through the db fake: resolveTopic
+// has its own db conversation and its own tests in tests/telegram.test.ts, and
+// threading it through this file's exact-sequence fake would make these tests
+// fail whenever unrelated topic logic changed.
+vi.mock('../lib/telegram/topics', () => ({ resolveTopic: vi.fn(async () => 42) }));
+vi.mock('../lib/telegram/cards', () => ({
+  inboundSmsCard: vi.fn((input: { body: string | null }) => ({ text: input.body ?? '(empty)' })),
+}));
+
 import { db } from '../lib/db';
+import { resolveTopic } from '../lib/telegram/topics';
 import { handleTelnyxSmsEvent, sendSms, type TelnyxWebhookBody } from '../lib/telnyx/sms';
 
 const mockedDb = vi.mocked(db);
@@ -95,6 +105,45 @@ describe('handleTelnyxSmsEvent: dedupe', () => {
     queueFrom([makeChain(ok([]))]); // upsert().select('id') -> empty rows = already claimed
     await handleTelnyxSmsEvent(inboundEvent());
     expect(fromCalls()).toEqual(['telnyx_events']);
+  });
+});
+
+describe('handleTelnyxSmsEvent: topic routing', () => {
+  // Regression guard. This shipped broken once: the outbox row took thread_id
+  // straight from contact.telegram_topic_id, which is null for every first-time
+  // sender. A null thread_id is not "unknown", it means General, and the drain
+  // cannot repair it because an outbox row carries no phone number. So every new
+  // number's first text landed in the General topic instead of opening its own,
+  // which is the single behaviour this whole design exists to produce.
+  it('routes a brand new sender into a resolved topic, never General', async () => {
+    const outboxChain = makeChain(ok(null));
+    queueFrom([
+      makeChain(ok([{ id: 'evt_1' }])), // telnyx_events upsert: new
+      makeChain(ok(null)), // contacts select: not found
+      makeChain(ok(null)), // customers select: no match
+      makeChain(
+        ok({
+          phone: '+14155550111',
+          display_name: null,
+          customer_id: null,
+          telegram_topic_id: null, // the trap: no topic yet
+          topic_created_at: null,
+          created_at: 'now',
+          updated_at: 'now',
+        }),
+      ), // contacts insert
+      makeChain(ok(null)), // messages insert
+      outboxChain, // outbox insert
+    ]);
+
+    await handleTelnyxSmsEvent(inboundEvent());
+
+    expect(vi.mocked(resolveTopic)).toHaveBeenCalledWith('+14155550111');
+
+    const inserted = (outboxChain.insert as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
+      thread_id: number | null;
+    };
+    expect(inserted.thread_id).toBe(42); // the resolved topic, not null
   });
 });
 

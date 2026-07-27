@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { env } from '../../../lib/env';
+import { env, optionalEnv } from '../../../lib/env';
 import { runQboSync } from '../../../lib/qbo/sync';
 
 /**
@@ -33,7 +33,11 @@ export async function POST(request: Request): Promise<Response> {
   // store is in production and drives real invoicing, so a bug in this sync
   // does not degrade switchboard, it kills Akme's ability to invoice anyone.
   // That is Karim's call to make deliberately, not a default to inherit.
-  if (process.env.QBO_SYNC_ENABLED !== 'true') {
+  //
+  // runQboSync() carries the same check internally, so any other caller gets
+  // it for free; this one returns a clearer message for cron logs without a
+  // QBO or database round trip.
+  if (optionalEnv('QBO_SYNC_ENABLED', 'false') !== 'true') {
     return Response.json(
       { skipped: 'QBO_SYNC_ENABLED is not true', reason: 'shares a rotating token with Akme production' },
       { status: 200 },
@@ -42,6 +46,9 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     const result = await runQboSync();
+    if (!result.enabled) {
+      return Response.json(result, { status: 200 });
+    }
     const ok = result.items.ok && result.invoices.ok;
     return Response.json(result, { status: ok ? 200 : 502 });
   } catch (err) {

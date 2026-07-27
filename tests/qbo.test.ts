@@ -26,7 +26,11 @@ vi.mock('../lib/env', () => ({
     if (name === 'WORKER_SECRET') return 'test-worker-secret-value';
     throw new Error(`unexpected env var in test: ${name}`);
   },
-  optionalEnv: (_name: string, fallback: string) => fallback,
+  // Reads the real process.env so vi.stubEnv can drive the QBO_SYNC_ENABLED
+  // kill switch. Returning the fallback unconditionally made the off-by-default
+  // path the ONLY reachable path, which silently passed the skip test while
+  // making the enabled test untestable.
+  optionalEnv: (name: string, fallback: string) => process.env[name]?.trim() || fallback,
 }));
 
 // Real syncItems/syncInvoices/deriveInvoiceStatus, mocked runQboSync only, so
@@ -318,8 +322,10 @@ describe('POST /api/qbo-sync', () => {
     expect(runQboSync).not.toHaveBeenCalled();
   });
 
-  it('runs the sync for the correct bearer token', async () => {
+  it('runs the sync for the correct bearer token when explicitly enabled', async () => {
+    vi.stubEnv('QBO_SYNC_ENABLED', 'true');
     vi.mocked(runQboSync).mockResolvedValueOnce({
+      enabled: true,
       items: { entity: 'items', ok: true },
       invoices: { entity: 'invoices', ok: true },
     });
@@ -333,5 +339,23 @@ describe('POST /api/qbo-sync', () => {
 
     expect(res.status).toBe(200);
     expect(body.items.ok).toBe(true);
+    vi.unstubAllEnvs();
+  });
+
+  // The default matters more than the enabled path: an authorized caller must
+  // still be a no-op unless someone deliberately turned the sync on, because
+  // this is the one component that can reach Akme's production token store.
+  it('skips the sync when QBO_SYNC_ENABLED is not set, even with a valid token', async () => {
+    const req = new Request('http://localhost/api/qbo-sync', {
+      method: 'POST',
+      headers: { authorization: 'Bearer test-worker-secret-value' },
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.skipped).toBeDefined();
+    expect(runQboSync).not.toHaveBeenCalled();
   });
 });

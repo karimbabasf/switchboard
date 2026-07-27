@@ -216,11 +216,13 @@ describe('recording.ts: presigned URL expiry', () => {
 // ---------------------------------------------------------------------------
 const assemblyBox = vi.hoisted(() => ({ transcribe: null as unknown }));
 vi.mock('assemblyai', () => ({
-  AssemblyAI: vi.fn().mockImplementation(() => ({
-    transcripts: {
+  // A class, not vi.fn().mockImplementation(arrow): transcribe.ts calls
+  // `new AssemblyAI(...)`, and an arrow function cannot be invoked with `new`.
+  AssemblyAI: class {
+    transcripts = {
       transcribe: (...args: unknown[]) => (assemblyBox.transcribe as (...a: unknown[]) => unknown)(...args),
-    },
-  })),
+    };
+  },
 }));
 
 describe('transcribe.ts', () => {
@@ -317,11 +319,13 @@ describe('summarize.ts: validateCallSummary', () => {
 
 const anthropicBox = vi.hoisted(() => ({ create: null as unknown }));
 vi.mock('@anthropic-ai/sdk', () => ({
-  default: vi.fn().mockImplementation(() => ({
-    messages: {
+  // A class, not vi.fn().mockImplementation(arrow): summarize.ts calls
+  // `new Anthropic(...)`, and an arrow function cannot be invoked with `new`.
+  default: class {
+    messages = {
       create: (...args: unknown[]) => (anthropicBox.create as (...a: unknown[]) => unknown)(...args),
-    },
-  })),
+    };
+  },
 }));
 
 describe('summarize.ts: summarizeCall', () => {
@@ -356,6 +360,12 @@ describe('summarize.ts: summarizeCall', () => {
 
 // ---------------------------------------------------------------------------
 // run.ts: the state machine
+//
+// These three modules stay mocked for the whole file (vi.mock is file-scoped),
+// but the recording.ts / transcribe.ts / summarize.ts describe blocks above
+// exercise the real implementations. So each proxy falls back to the actual
+// export whenever the run.ts tests haven't pointed the box at a test double
+// (the box starts, and is reset to, null).
 // ---------------------------------------------------------------------------
 const stepsBox = vi.hoisted(() => ({
   fetchRecording: null as unknown,
@@ -367,22 +377,37 @@ vi.mock('../lib/worker/recording', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/worker/recording')>();
   return {
     ...actual,
-    fetchRecording: (...args: unknown[]) => (stepsBox.fetchRecording as (...a: unknown[]) => unknown)(...args),
+    fetchRecording: (...args: unknown[]) =>
+      stepsBox.fetchRecording
+        ? (stepsBox.fetchRecording as (...a: unknown[]) => unknown)(...args)
+        : actual.fetchRecording(...(args as Parameters<typeof actual.fetchRecording>)),
   };
 });
-vi.mock('../lib/worker/transcribe', () => ({
-  transcribeCall: (...args: unknown[]) => (stepsBox.transcribeCall as (...a: unknown[]) => unknown)(...args),
-}));
+vi.mock('../lib/worker/transcribe', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/worker/transcribe')>();
+  return {
+    ...actual,
+    transcribeCall: (...args: unknown[]) =>
+      stepsBox.transcribeCall
+        ? (stepsBox.transcribeCall as (...a: unknown[]) => unknown)(...args)
+        : actual.transcribeCall(...(args as Parameters<typeof actual.transcribeCall>)),
+  };
+});
 vi.mock('../lib/worker/summarize', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/worker/summarize')>();
   return {
     ...actual,
-    summarizeCall: (...args: unknown[]) => (stepsBox.summarizeCall as (...a: unknown[]) => unknown)(...args),
+    summarizeCall: (...args: unknown[]) =>
+      stepsBox.summarizeCall
+        ? (stepsBox.summarizeCall as (...a: unknown[]) => unknown)(...args)
+        : actual.summarizeCall(...(args as Parameters<typeof actual.summarizeCall>)),
   };
 });
 
 const FIXED_NOW = () => new Date('2026-07-27T10:02:30.000Z');
-const testCallCard = vi.fn(() => [{ thread_id: 42, kind: 'text' as const, payload: { text: 'card' } }]);
+// callCard is async in the real lib/telegram/cards.ts (it resolves a Telegram
+// topic and writes callback_actions rows), so the injected fake matches that.
+const testCallCard = vi.fn(async () => [{ thread_id: 42, kind: 'text' as const, payload: { text: 'card' } }]);
 
 describe('run.ts: state machine advances one step per call', () => {
   beforeEach(() => {

@@ -1,13 +1,16 @@
 import { db } from '../db';
 import { env, assertE164, toE164 } from '../env';
+import { resolveTopic } from '../telegram/topics';
+import { inboundSmsCard } from '../telegram/cards';
 import type { Contact, Message, MediaItem } from '../types';
 
 /**
  * Telnyx SMS/MMS: inbound webhook processing and outbound sends.
  *
- * This module never talks to Telegram. Inbound messages land in the `outbox`
+ * This module never SENDS to Telegram. Inbound messages land in the `outbox`
  * table and are drained elsewhere, because the Bot API caps a group at ~20
- * messages/minute shared across every topic.
+ * messages/minute shared across every topic. It does resolve the destination
+ * topic, since only this module knows which contact the message belongs to.
  *
  * `lib/telnyx/client.ts` only wraps Call Control (voice commands); it has no
  * messaging support, so sending is a small self-contained POST here rather
@@ -130,13 +133,6 @@ async function resolveContact(phone: string): Promise<Contact> {
   return inserted.data as Contact;
 }
 
-function formatInboundForOutbox(contact: Contact, text: string | null, media: MediaItem[]): string {
-  const who = contact.display_name ?? contact.phone;
-  const lines = [`${who}: ${text ?? '(no text)'}`];
-  for (const item of media) lines.push(item.url);
-  return lines.join('\n');
-}
-
 async function handleMessageReceived(payload: TelnyxMessagePayload): Promise<void> {
   const fromRaw = payload.from.phone_number;
   const fromPhone = toE164(fromRaw) ?? assertE164(fromRaw, 'inbound from');
@@ -154,12 +150,19 @@ async function handleMessageReceived(payload: TelnyxMessagePayload): Promise<voi
   });
   if (insertError) throw new Error(`handleMessageReceived insert: ${insertError.message}`);
 
+  // Resolve the topic HERE, not in the drain. A null thread_id is not "unknown",
+  // it is a deliberate instruction to post in General, and the outbox row carries
+  // no phone number, so the drain has no way to turn null into the right topic.
+  // Without this every new number's first text lands in General instead of
+  // opening its thread, which is the one thing this whole design exists to do.
+  const threadId = await resolveTopic(contact.phone);
+
   const { error: outboxError } = await db()
     .from('outbox')
     .insert({
-      thread_id: contact.telegram_topic_id,
+      thread_id: threadId,
       kind: 'text',
-      payload: { text: formatInboundForOutbox(contact, payload.text, media) },
+      payload: inboundSmsCard({ body: payload.text ?? null, media }),
     });
   if (outboxError) throw new Error(`handleMessageReceived outbox: ${outboxError.message}`);
 }
