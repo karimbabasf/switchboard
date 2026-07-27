@@ -36,6 +36,18 @@ async function tg(method: string, body: Record<string, unknown> = {}) {
   return json.result;
 }
 
+async function telnyx(path: string) {
+  const res = await fetch(`https://api.telnyx.com/v2/${path}`, {
+    headers: { authorization: `Bearer ${env('TELNYX_API_KEY')}` },
+  });
+  const json = (await res.json()) as { data?: any; errors?: { detail?: string; title?: string }[] };
+  if (!res.ok) {
+    const e = json.errors?.[0];
+    throw new Error(`${path}: ${e?.detail ?? e?.title ?? `HTTP ${res.status}`}`);
+  }
+  return json.data;
+}
+
 const checks: Check[] = [
   // --- Telegram ----------------------------------------------------------
   {
@@ -156,16 +168,108 @@ const checks: Check[] = [
   },
 
   // --- Transcription and summaries --------------------------------------
+  // --- Telnyx ------------------------------------------------------------
   {
-    group: 'Deepgram',
+    group: 'Telnyx',
+    name: 'API key is valid and account is funded',
+    run: async () => {
+      const bal = await telnyx('balance');
+      const amount = Number(bal.balance);
+      if (!Number.isFinite(amount)) return fail('balance did not parse');
+      return amount > 0
+        ? pass(`${bal.currency} ${bal.balance} available`)
+        : fail(`balance is ${bal.currency} ${bal.balance}, calls and SMS will be rejected`);
+    },
+  },
+  {
+    group: 'Telnyx',
+    name: 'webhook public key is present',
+    run: async () => {
+      // Ed25519 over `timestamp|rawBody`. Without this key every inbound webhook
+      // is unauthenticated, which means anyone who learns the URL can forge calls.
+      const k = env('TELNYX_PUBLIC_KEY');
+      return pass(shape(k));
+    },
+  },
+  {
+    group: 'Telnyx',
+    name: 'number is owned by this account',
+    run: async () => {
+      const num = env('TELNYX_NUMBER');
+      if (!/^\+[1-9]\d{7,14}$/.test(num)) return fail(`"${num}" is not E.164, expected +1XXXXXXXXXX`);
+      const list = await telnyx(`phone_numbers?filter[phone_number]=${encodeURIComponent(num)}`);
+      if (!Array.isArray(list) || list.length === 0) return fail(`${num} not found on this account`);
+      return pass(`${num} (${list[0].status})`);
+    },
+  },
+  {
+    group: 'Telnyx',
+    name: 'number is routed to the Call Control app',
+    run: async () => {
+      // The high-value check. Owning the number and having an app both succeed
+      // independently while inbound calls go nowhere, because the number was
+      // never assigned to the connection. Silent, and only visible on a test call.
+      const app = await telnyx(`call_control_applications/${env('TELNYX_CONNECTION_ID')}`);
+      const list = await telnyx(
+        `phone_numbers?filter[phone_number]=${encodeURIComponent(env('TELNYX_NUMBER'))}`,
+      );
+      const assigned = list?.[0]?.connection_id;
+      if (String(assigned) !== String(env('TELNYX_CONNECTION_ID'))) {
+        return fail(`number points at connection ${assigned ?? 'none'}, not "${app.application_name}"`);
+      }
+      return pass(`-> "${app.application_name}"`);
+    },
+  },
+  {
+    group: 'Telnyx',
+    name: 'number is on the messaging profile',
+    run: async () => {
+      const profile = await telnyx(`messaging_profiles/${env('TELNYX_MESSAGING_PROFILE_ID')}`);
+      const list = await telnyx(
+        `phone_numbers?filter[phone_number]=${encodeURIComponent(env('TELNYX_NUMBER'))}`,
+      );
+      const assigned = list?.[0]?.messaging_profile_id;
+      if (String(assigned) !== String(env('TELNYX_MESSAGING_PROFILE_ID'))) {
+        return fail(`number is on profile ${assigned ?? 'none'}, not "${profile.name}"`);
+      }
+      return pass(`-> "${profile.name}"`);
+    },
+  },
+  {
+    group: 'Telnyx',
+    name: 'forward-to number is E.164',
+    run: async () => {
+      const n = env('FORWARD_TO_NUMBER');
+      return /^\+[1-9]\d{7,14}$/.test(n)
+        ? pass(`bridges to ${n}`)
+        : fail(`"${n}" is not E.164, expected +1XXXXXXXXXX`);
+    },
+  },
+  {
+    group: 'Telnyx',
+    name: 'recording disclosure is set',
+    run: async () => {
+      // California is all-party consent. An empty disclosure is not a cosmetic
+      // problem, it is the difference between a legal recording and a crime.
+      const d = process.env.RECORDING_DISCLOSURE?.trim().replace(/^"|"$/g, '') ?? '';
+      return d.length >= 10
+        ? pass(`"${d}"`)
+        : fail('empty or too short. CA is all-party consent, this must be spoken before recording');
+    },
+  },
+
+  {
+    group: 'AssemblyAI',
     name: 'API key is valid',
     run: async () => {
-      const res = await fetch('https://api.deepgram.com/v1/projects', {
-        headers: { authorization: `Token ${env('DEEPGRAM_API_KEY')}` },
+      // No plain "list projects" endpoint; asking for zero transcripts is the
+      // cheapest authenticated call that proves the key works.
+      const res = await fetch('https://api.assemblyai.com/v2/transcript?limit=1', {
+        headers: { authorization: env('ASSEMBLYAI_API_KEY') },
       });
+      if (res.status === 401) return fail('401, key rejected');
       if (!res.ok) return fail(`HTTP ${res.status}`);
-      const j = (await res.json()) as { projects: unknown[] };
-      return pass(`${j.projects.length} project(s)`);
+      return pass(`authenticated, model ${process.env.ASSEMBLYAI_MODEL ?? 'universal-2'}`);
     },
   },
   {
