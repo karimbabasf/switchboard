@@ -1,6 +1,11 @@
 -- switchboard: calls and SMS on one number, routed into Telegram forum topics.
 -- Supabase is the book of record. Telegram topics are a view that can be deleted
 -- by any group admin with no recovery path, so nothing lives only in Telegram.
+--
+-- OWNERSHIP: this migration runs against the SHARED akme-dev database, which the
+-- Akme repo also migrates. switchboard owns exactly the tables created here plus
+-- the qbo_* mirror tables, and never alters a Akme table. Anything needed from
+-- Akme's side is read through a foreign key, never copied.
 
 create extension if not exists pgcrypto;
 
@@ -10,11 +15,17 @@ create extension if not exists pgcrypto;
 create table contacts (
   phone             text primary key,               -- E.164, e.g. +14155550123
   display_name      text,
+  -- Links a phone number to the real Akme customer when one matches, so an
+  -- inbound call resolves to a name, order history and invoices BEFORE the
+  -- agent speaks. Nullable: most first-time callers are strangers.
+  customer_id       uuid references customers(id) on delete set null,
   telegram_topic_id bigint unique,
   topic_created_at  timestamptz,
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now()
 );
+
+create index contacts_customer_idx on contacts (customer_id) where customer_id is not null;
 
 create table messages (
   id                 uuid primary key default gen_random_uuid(),
@@ -102,8 +113,15 @@ create table responders (
 
 create index responders_ring_idx on responders (ring_order) where active;
 
-create or replace function touch_updated_at() returns trigger
-language plpgsql as $$
+-- Deliberately NOT named touch_updated_at(): Akme owns a function by that name
+-- in this shared database and pinned its search_path in an earlier migration.
+-- A create-or-replace on their object would silently undo that hardening.
+-- search_path is pinned here for the same reason it was pinned there.
+create or replace function switchboard_touch_updated_at() returns trigger
+language plpgsql
+security invoker
+set search_path = ''
+as $$
 begin
   new.updated_at = now();
   return new;
@@ -111,9 +129,9 @@ end;
 $$;
 
 create trigger contacts_touch before update on contacts
-  for each row execute function touch_updated_at();
+  for each row execute function switchboard_touch_updated_at();
 create trigger calls_touch before update on calls
-  for each row execute function touch_updated_at();
+  for each row execute function switchboard_touch_updated_at();
 
 -- Every table is service-role only. There is no client app and no anon access:
 -- RLS on with zero policies denies everything except the service role key.
