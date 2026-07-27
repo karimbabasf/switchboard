@@ -413,9 +413,10 @@ vi.mock('../lib/telegram/cards', () => ({
   completedCallCard: (...args: unknown[]) => (cardsBox.completedCallCard as (...a: unknown[]) => unknown)(...args),
 }));
 
-const topicsBox = vi.hoisted(() => ({ getContact: null as unknown }));
+const topicsBox = vi.hoisted(() => ({ getContact: null as unknown, resolveTopic: null as unknown }));
 vi.mock('../lib/telegram/topics', () => ({
   getContact: (...args: unknown[]) => (topicsBox.getContact as (...a: unknown[]) => unknown)(...args),
+  resolveTopic: (...args: unknown[]) => (topicsBox.resolveTopic as (...a: unknown[]) => unknown)(...args),
 }));
 
 const FIXED_NOW = () => new Date('2026-07-27T10:02:30.000Z');
@@ -559,6 +560,7 @@ describe('run.ts: loadCallCard (the production default, no injected callCard)', 
   it('enqueues an audio row plus a text row, both to the contact\'s topic', async () => {
     cardsBox.completedCallCard = vi.fn(async () => ({ text: '<b>Caller asked about box pricing</b>' }));
     topicsBox.getContact = vi.fn(async () => ({ display_name: 'Jane', telegram_topic_id: 77 }));
+    topicsBox.resolveTopic = vi.fn(async () => 77);
 
     const fake = useFakeDb([
       makeCall({ status: 'summarizing', storage_path: 'call-1.mp3', summary }),
@@ -580,21 +582,31 @@ describe('run.ts: loadCallCard (the production default, no injected callCard)', 
     expect(fake.storageApi.createSignedUrl).toHaveBeenCalledWith('call-1.mp3', 60 * 60 * 24);
   });
 
-  it('uses thread_id null when the contact has no topic yet, leaving it for the drain to resolve', async () => {
+  // Regression guard. This test previously asserted the OPPOSITE, because the
+  // brief it was written from was wrong: it said a contact with no topic should
+  // get thread_id null and let the drain resolve it. The drain cannot. An outbox
+  // row carries no phone number, so null is not "unknown", it means the General
+  // topic. A first-time caller has no topic, so deferring put their call card in
+  // General instead of opening their thread.
+  it('resolves a topic for a first-time caller rather than defaulting to General', async () => {
     cardsBox.completedCallCard = vi.fn(async () => ({ text: 'card' }));
     topicsBox.getContact = vi.fn(async () => ({ display_name: null, telegram_topic_id: null }));
+    topicsBox.resolveTopic = vi.fn(async () => 91);
 
     const fake = useFakeDb([makeCall({ status: 'summarizing', storage_path: 'call-1.mp3', summary })]);
 
     const { runWorker } = await import('../lib/worker/run');
     await runWorker(10, { now: FIXED_NOW });
 
-    expect(fake.state.outbox.map((r) => r.thread_id)).toEqual([null, null]);
+    expect(topicsBox.resolveTopic).toHaveBeenCalledWith('+14155550100');
+    expect(fake.state.outbox.map((r) => r.thread_id)).toEqual([91, 91]);
+    expect(fake.state.outbox.map((r) => r.thread_id)).not.toContain(null);
   });
 
   it('retries rather than posting when the call has no storage_path to attach', async () => {
     cardsBox.completedCallCard = vi.fn();
     topicsBox.getContact = vi.fn(async () => ({ display_name: null, telegram_topic_id: null }));
+    topicsBox.resolveTopic = vi.fn(async () => 91);
 
     const fake = useFakeDb([makeCall({ status: 'summarizing', storage_path: null, summary })]);
 

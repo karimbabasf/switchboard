@@ -143,12 +143,16 @@ async function runStep(call: Call, now: Date, options: RunWorkerOptions): Promis
 
 /**
  * Builds the two outbox rows a finished call produces: the recording (audio)
- * and the summary (text). Both go to the contact's existing topic if it has
- * one, or thread_id null if it doesn't yet, since resolving/creating a topic
- * is the Telegram drain's job, not this worker's.
+ * and the summary (text).
+ *
+ * The topic is RESOLVED here, not deferred to the drain. A null thread_id is not
+ * "not known yet", it is an instruction to post in the General topic, and an
+ * outbox row carries no phone number so the drain cannot turn null into the
+ * right thread. A first-time caller has no topic yet, so deferring would put
+ * their call card in General, which is the same bug that shipped in sms.ts.
  */
 async function loadCallCard(): Promise<CallCardFn> {
-  const [{ completedCallCard }, { getContact }] = await Promise.all([
+  const [{ completedCallCard }, { getContact, resolveTopic }] = await Promise.all([
     import('../telegram/cards'),
     import('../telegram/topics'),
   ]);
@@ -162,7 +166,7 @@ async function loadCallCard(): Promise<CallCardFn> {
     }
 
     const contact = await getContact(call.contact_phone);
-    const threadId = contact?.telegram_topic_id ?? null;
+    const threadId = await resolveTopic(call.contact_phone);
 
     const bucket = env('SUPABASE_STORAGE_BUCKET');
     const { data, error } = await db().storage.from(bucket).createSignedUrl(call.storage_path, OUTBOX_AUDIO_URL_TTL_SECONDS);
