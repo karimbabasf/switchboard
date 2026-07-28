@@ -9,13 +9,31 @@
  */
 
 import { AssemblyAI } from 'assemblyai';
-import type { SpeechModel } from 'assemblyai';
 import { env, optionalEnv } from '../env';
 import { db } from '../db';
 import type { Call } from '../types';
 
 /** Plenty of time for AssemblyAI to fetch a call-length recording from our own signed URL. */
 const SIGNED_URL_TTL_SECONDS = 300;
+
+/**
+ * The only two values `speech_models` accepts. Kept here rather than imported
+ * because the SDK types it as a bare string[], so a typo is otherwise a runtime
+ * failure on a recording that cannot be replayed. Preflight checks against this.
+ */
+export const SUPPORTED_SPEECH_MODELS = ['universal-3-5-pro', 'universal-2'] as const;
+
+/** Broadly available and the automatic language fallback, so it is always last in the list. */
+const FALLBACK_SPEECH_MODEL = 'universal-2';
+
+/**
+ * `speech_models` is an ordered availability fallback, not parallel execution:
+ * the first model that is reachable produces the single transcript.
+ */
+function speechModels(): string[] {
+  const primary = optionalEnv('ASSEMBLYAI_MODEL', 'universal-3-5-pro').trim();
+  return primary === FALLBACK_SPEECH_MODEL ? [FALLBACK_SPEECH_MODEL] : [primary, FALLBACK_SPEECH_MODEL];
+}
 
 interface TranscriptLike {
   status: string;
@@ -41,10 +59,9 @@ export async function transcribeCall(call: Call): Promise<string> {
     audio_url: data.signedUrl,
     multichannel: true,
     speaker_labels: false, // the channel split already identifies who is who
-    // The installed SDK's SpeechModel literal type ("best" | "nano" | "slam-1"
-    // | "universal") lags AssemblyAI's actual model names (e.g. "universal-2",
-    // "universal-3.5"), which is what ASSEMBLYAI_MODEL actually holds.
-    speech_model: optionalEnv('ASSEMBLYAI_MODEL', 'universal-2') as SpeechModel,
+    // Plural array, not the deprecated singular `speech_model`. Passing it
+    // explicitly is required to get the flagship: omitting it lets the API pick.
+    speech_models: speechModels(),
   })) as TranscriptLike;
 
   if (transcript.status === 'error') {

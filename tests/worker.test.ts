@@ -10,7 +10,7 @@ process.env.SUPABASE_URL = 'https://example.supabase.co';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
 process.env.SUPABASE_STORAGE_BUCKET = 'recordings';
 process.env.ASSEMBLYAI_API_KEY = 'test-assemblyai-key';
-process.env.ASSEMBLYAI_MODEL = 'universal-2';
+process.env.ASSEMBLYAI_MODEL = 'universal-3-5-pro';
 process.env.NEAR_AI_API_KEY = 'test-near-ai-key';
 process.env.NEAR_AI_BASE_URL = 'https://cloud-api.near.ai/v1';
 process.env.NEAR_AI_MODEL = 'openai/gpt-oss-120b';
@@ -239,6 +239,43 @@ describe('transcribe.ts', () => {
     expect(transcribeMock).toHaveBeenCalledWith(
       expect.objectContaining({ multichannel: true, speaker_labels: false }),
     );
+  });
+
+  it('sends the plural speech_models array, never the deprecated singular', async () => {
+    const { transcribeCall } = await import('../lib/worker/transcribe');
+    useFakeDb();
+    const transcribeMock = vi.fn(async (_params: Record<string, unknown>) => ({
+      status: 'completed',
+      utterances: [],
+    }));
+    assemblyBox.transcribe = transcribeMock;
+
+    await transcribeCall(makeCall({ storage_path: 'call-1.mp3' }));
+
+    const params = transcribeMock.mock.calls[0][0];
+    expect(params.speech_models).toEqual(['universal-3-5-pro', 'universal-2']);
+    // The singular param is deprecated; sending it alongside the array is the
+    // regression this guards, since the API would silently honour the wrong one.
+    expect(params).not.toHaveProperty('speech_model');
+  });
+
+  it('keeps universal-2 last as the fallback without duplicating it', async () => {
+    const { transcribeCall } = await import('../lib/worker/transcribe');
+    useFakeDb();
+    const transcribeMock = vi.fn(async (_params: Record<string, unknown>) => ({
+      status: 'completed',
+      utterances: [],
+    }));
+    assemblyBox.transcribe = transcribeMock;
+    process.env.ASSEMBLYAI_MODEL = 'universal-2';
+
+    try {
+      await transcribeCall(makeCall({ storage_path: 'call-1.mp3' }));
+      const params = transcribeMock.mock.calls[0][0];
+      expect(params.speech_models).toEqual(['universal-2']);
+    } finally {
+      delete process.env.ASSEMBLYAI_MODEL;
+    }
   });
 
   it('labels each line by channel, not by a diarized speaker', async () => {

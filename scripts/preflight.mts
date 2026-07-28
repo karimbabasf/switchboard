@@ -290,8 +290,18 @@ const checks: Check[] = [
 
   {
     group: 'AssemblyAI',
-    name: 'API key is valid',
+    name: 'API key is valid and the model is a real one',
     run: async () => {
+      // Same reasoning as the NEAR AI check below: AssemblyAI has no /models
+      // endpoint, but `speech_models` accepts exactly two values, so an
+      // unrecognised name is checkable here. A typo authenticates fine and only
+      // fails on the first real call, after a recording exists that cannot be
+      // replayed. Mirrors SUPPORTED_SPEECH_MODELS in lib/worker/transcribe.ts.
+      const supported = ['universal-3-5-pro', 'universal-2'];
+      const want = process.env.ASSEMBLYAI_MODEL?.trim() || 'universal-3-5-pro';
+      if (!supported.includes(want)) {
+        return fail(`ASSEMBLYAI_MODEL "${want}" is not one of ${supported.join(', ')}`);
+      }
       // No plain "list projects" endpoint; asking for zero transcripts is the
       // cheapest authenticated call that proves the key works.
       const res = await fetch('https://api.assemblyai.com/v2/transcript?limit=1', {
@@ -299,7 +309,7 @@ const checks: Check[] = [
       });
       if (res.status === 401) return fail('401, key rejected');
       if (!res.ok) return fail(`HTTP ${res.status}`);
-      return pass(`authenticated, model ${process.env.ASSEMBLYAI_MODEL ?? 'universal-2'}`);
+      return pass(`authenticated, model ${want}`);
     },
   },
   {
