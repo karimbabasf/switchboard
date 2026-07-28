@@ -27,6 +27,26 @@ export const SUPPORTED_SPEECH_MODELS = ['universal-3-5-pro', 'universal-2'] as c
 const FALLBACK_SPEECH_MODEL = 'universal-2';
 
 /**
+ * Boosts names the model otherwise gets wrong. "Akme" is not optional here: a
+ * dry run transcribed it as "Acme", and the transcript feeds the summary, so
+ * the error would surface in every card a human reads.
+ *
+ * Safe to pass terms that never get spoken; the model is trained to tolerate
+ * that, which is why a standing list beats guessing per call. Cannot be sent
+ * alongside a `prompt`, which the API rejects, so this file sends neither one
+ * nor the other. Once the QuickBooks mirror is enabled, real product names in
+ * qbo_items are the natural source to extend this from, rather than more guesses.
+ */
+const KEYTERMS = [
+  'Akme',
+  'wardrobe box',
+  'dish pack',
+  'packing paper',
+  'bubble wrap',
+  'moving blanket',
+];
+
+/**
  * `speech_models` is an ordered availability fallback, not parallel execution:
  * the first model that is reachable produces the single transcript.
  */
@@ -62,6 +82,7 @@ export async function transcribeCall(call: Call): Promise<string> {
     // Plural array, not the deprecated singular `speech_model`. Passing it
     // explicitly is required to get the flagship: omitting it lets the API pick.
     speech_models: speechModels(),
+    keyterms_prompt: KEYTERMS,
   })) as TranscriptLike;
 
   if (transcript.status === 'error') {
