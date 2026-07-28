@@ -1,6 +1,11 @@
 import { env } from '../../../lib/env';
 import { db } from '../../../lib/db';
-import type { CallBackParams, CallbackActionName, TextCardPayload } from '../../../lib/telegram/cards';
+import type {
+  CallBackParams,
+  CallbackActionName,
+  SendSmsParams,
+  TextCardPayload,
+} from '../../../lib/telegram/cards';
 import { CALLBACK_ACTIONS } from '../../../lib/telegram/cards';
 import { telegram } from '../../../lib/telegram/client';
 import { contactByThreadId } from '../../../lib/telegram/topics';
@@ -188,6 +193,20 @@ async function executeAction(row: CallbackAction, cq: TelegramCallbackQuery): Pr
         });
       }
       return 'Marked handled';
+    }
+    case CALLBACK_ACTIONS.SEND_SMS: {
+      const params = row.params as unknown as SendSmsParams;
+      const { sendSms } = await import('../../../lib/telnyx/sms');
+      await sendSms(params.phone, params.text);
+      // Clear the keyboard so the same draft cannot be sent twice by a second
+      // tap, which is the obvious way to double-text a customer.
+      const message = cq.message;
+      if (message) {
+        await telegram.editMessageText(message.message_id, `${message.text ?? ''}\n\n✅ <i>Sent</i>`, {
+          reply_markup: { inline_keyboard: [] },
+        });
+      }
+      return 'Sent';
     }
     case CALLBACK_ACTIONS.CALL_BACK: {
       const params = row.params as unknown as CallBackParams;

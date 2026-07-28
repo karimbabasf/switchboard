@@ -1,7 +1,8 @@
 import { db } from '../db';
 import { env, assertE164, toE164 } from '../env';
 import { resolveTopic } from '../telegram/topics';
-import { inboundSmsCard } from '../telegram/cards';
+import { inboundSmsCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
+import { draftFallback, draftSmsReply, smsAgentDeps } from '../agent/sms';
 import type { Contact, Message, MediaItem } from '../types';
 
 /**
@@ -133,7 +134,32 @@ async function resolveContact(phone: string): Promise<Contact> {
   return inserted.data as Contact;
 }
 
-async function handleMessageReceived(payload: TelnyxMessagePayload): Promise<void> {
+/**
+ * What happens after an inbound message is filed and shown in Telegram.
+ *
+ * Injectable because it is the one part of this path that talks to a model, and
+ * because a test about resolving contacts should not be transitively asserting
+ * on the SMS agent. Defaults to the real agent.
+ */
+export type AgentReply = (
+  phone: string,
+  body: string | null,
+  threadId: number,
+  hasMedia: boolean,
+) => Promise<void>;
+
+export interface SmsEventDeps {
+  reply: AgentReply;
+}
+
+export function smsEventDeps(): SmsEventDeps {
+  return { reply: replyWithAgent };
+}
+
+async function handleMessageReceived(
+  payload: TelnyxMessagePayload,
+  deps: SmsEventDeps,
+): Promise<void> {
   const fromRaw = payload.from.phone_number;
   const fromPhone = toE164(fromRaw) ?? assertE164(fromRaw, 'inbound from');
   const contact = await resolveContact(fromPhone);
@@ -165,6 +191,61 @@ async function handleMessageReceived(payload: TelnyxMessagePayload): Promise<voi
       payload: inboundSmsCard({ body: payload.text ?? null, media }),
     });
   if (outboxError) throw new Error(`handleMessageReceived outbox: ${outboxError.message}`);
+
+  await deps.reply(contact.phone, payload.text ?? null, threadId, media.length > 0);
+}
+
+/**
+ * Drafts a reply and either sends it or puts it in front of a human.
+ *
+ * Never throws into the webhook path. The inbound message is already stored and
+ * already in Telegram by the time this runs, so a failure here costs an
+ * automatic reply, not the message itself. Rethrowing would fail the whole event
+ * and make Telnyx redeliver a text that is already filed.
+ */
+async function replyWithAgent(
+  phone: string,
+  body: string | null,
+  threadId: number,
+  hasMedia: boolean,
+): Promise<void> {
+  try {
+    // An MMS is a picture of something, usually a damaged pallet or a purchase
+    // order. Whatever the text says, the attachment is the message, and the
+    // agent cannot see it.
+    const draft = hasMedia
+      ? draftFallback('the message has an attachment the agent cannot see')
+      : await draftSmsReply(body, smsAgentDeps());
+
+    if (draft.intent === 'opt_out') return;
+
+    if (draft.autoSend) {
+      await sendSms(phone, draft.reply);
+      await db()
+        .from('outbox')
+        .insert({
+          thread_id: threadId,
+          kind: 'text',
+          payload: smsAutoSentCard({ intent: draft.intent, reply: draft.reply }),
+        });
+      return;
+    }
+
+    await db()
+      .from('outbox')
+      .insert({
+        thread_id: threadId,
+        kind: 'text',
+        payload: await smsDraftCard({
+          phone,
+          intent: draft.intent,
+          reply: draft.reply,
+          reason: draft.reason,
+        }),
+      });
+  } catch (err) {
+    console.error(`[sms-agent] reply for ${phone} failed:`, err);
+  }
 }
 
 /** `message.sent` / `message.finalized`: the delivery receipt for an outbound send. */
@@ -179,14 +260,17 @@ async function handleDeliveryReceipt(payload: TelnyxMessagePayload): Promise<voi
  * than once for the same event: claimEvent makes every event after the first
  * a no-op.
  */
-export async function handleTelnyxSmsEvent(body: TelnyxWebhookBody): Promise<void> {
+export async function handleTelnyxSmsEvent(
+  body: TelnyxWebhookBody,
+  deps: SmsEventDeps = smsEventDeps(),
+): Promise<void> {
   const { id, event_type, occurred_at, payload } = body.data;
   const isNew = await claimEvent(id, occurred_at);
   if (!isNew) return;
 
   switch (event_type) {
     case 'message.received':
-      await handleMessageReceived(payload);
+      await handleMessageReceived(payload, deps);
       break;
     case 'message.sent':
     case 'message.finalized':

@@ -37,9 +37,23 @@ vi.mock('../lib/telegram/cards', () => ({
 
 import { db } from '../lib/db';
 import { resolveTopic } from '../lib/telegram/topics';
-import { handleTelnyxSmsEvent, sendSms, type TelnyxWebhookBody } from '../lib/telnyx/sms';
+import {
+  handleTelnyxSmsEvent,
+  sendSms,
+  type SmsEventDeps,
+  type TelnyxWebhookBody,
+} from '../lib/telnyx/sms';
 
 const mockedDb = vi.mocked(db);
+
+/**
+ * These tests are about claiming events, resolving contacts and routing topics.
+ * The SMS agent runs after all of that and talks to a model, so it is stubbed
+ * out here and covered on its own in tests/sms-agent.test.ts.
+ */
+function noAgent(): SmsEventDeps {
+  return { reply: async () => {} };
+}
 
 // Shared across a test's whole call sequence so `fromCalls()` sees every
 // `.from(table)` invocation regardless of how many times `db()` itself is called.
@@ -136,7 +150,7 @@ describe('handleTelnyxSmsEvent: topic routing', () => {
       outboxChain, // outbox insert
     ]);
 
-    await handleTelnyxSmsEvent(inboundEvent());
+    await handleTelnyxSmsEvent(inboundEvent(), noAgent());
 
     expect(vi.mocked(resolveTopic)).toHaveBeenCalledWith('+14155550111');
 
@@ -168,7 +182,7 @@ describe('handleTelnyxSmsEvent: inbound contact resolution', () => {
       makeChain(ok(null)), // outbox insert
     ]);
 
-    await handleTelnyxSmsEvent(inboundEvent());
+    await handleTelnyxSmsEvent(inboundEvent(), noAgent());
 
     expect(fromCalls()).toEqual(['telnyx_events', 'contacts', 'customers', 'contacts', 'messages', 'outbox']);
   });
@@ -190,7 +204,7 @@ describe('handleTelnyxSmsEvent: inbound contact resolution', () => {
       makeChain(ok(null)), // outbox insert
     ]);
 
-    await handleTelnyxSmsEvent(inboundEvent());
+    await handleTelnyxSmsEvent(inboundEvent(), noAgent());
 
     expect(fromCalls()).toEqual(['telnyx_events', 'contacts', 'messages', 'outbox']);
   });

@@ -36,6 +36,7 @@ export interface EditCardPayload {
 export const CALLBACK_ACTIONS = {
   MARK_HANDLED: 'mark_handled',
   CALL_BACK: 'call_back',
+  SEND_SMS: 'send_sms',
 } as const;
 
 export type CallbackActionName = (typeof CALLBACK_ACTIONS)[keyof typeof CALLBACK_ACTIONS];
@@ -46,6 +47,60 @@ export interface MarkHandledParams {
 
 export interface CallBackParams {
   phone: string;
+}
+
+export interface SendSmsParams {
+  phone: string;
+  text: string;
+}
+
+export interface SmsDraftCardInput {
+  phone: string;
+  intent: string;
+  reply: string;
+  /** Why this one is waiting for a tap instead of having gone already. */
+  reason: string;
+}
+
+/**
+ * A drafted reply the agent would not send on its own.
+ *
+ * The draft is shown in full, so the decision is "is this right" rather than
+ * "what did it want to say". Tapping Send sends exactly this text; typing a
+ * reply in the topic instead sends that, through the path that already exists.
+ */
+export async function smsDraftCard(input: SmsDraftCardInput): Promise<TextCardPayload> {
+  const lines = [
+    '<b>Draft reply</b>',
+    `<i>${escapeHtml(input.intent)} · ${escapeHtml(input.reason)}</i>`,
+    '',
+    escapeHtml(input.reply),
+    '',
+    '<i>Send it, or just type your own reply here.</i>',
+  ];
+
+  const send = await makeCallbackButton('Send', CALLBACK_ACTIONS.SEND_SMS, {
+    phone: input.phone,
+    text: input.reply,
+  } satisfies SendSmsParams);
+
+  return { text: lines.join('\n'), reply_markup: { inline_keyboard: [[send]] } };
+}
+
+export interface SmsAutoSentCardInput {
+  intent: string;
+  reply: string;
+}
+
+/** What the agent already sent, so the team sees it without having to approve it. */
+export function smsAutoSentCard(input: SmsAutoSentCardInput): TextCardPayload {
+  return {
+    text: [
+      `✅ <b>Auto-replied</b> <i>(${escapeHtml(input.intent)})</i>`,
+      '',
+      escapeHtml(input.reply),
+    ].join('\n'),
+  };
 }
 
 export interface InboundSmsCardInput {
