@@ -9,7 +9,8 @@
     "lint": "eslint",
     "preflight": "node --env-file=.env.local scripts/preflight.mts",
     "dry-run": "node --env-file=.env.local scripts/dry-run.mts",
-    "assistant:sync": "node --env-file=.env.local scripts/assistant-sync.mts"
+    "assistant:sync": "node --env-file=.env.local scripts/assistant-sync.mts",
+    "voice:bakeoff": "node --env-file=.env.local scripts/voice-bakeoff.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.9",
