@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "preflight": "node --env-file=.env.local scripts/preflight.mts",
-    "dry-run": "node --env-file=.env.local scripts/dry-run.mts"
+    "dry-run": "node --env-file=.env.local scripts/dry-run.mts",
+    "assistant:sync": "node --env-file=.env.local scripts/assistant-sync.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.9",
