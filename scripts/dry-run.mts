@@ -72,7 +72,7 @@ async function seconds(file: string): Promise<number> {
 }
 
 /**
- * Builds a 2-channel WAV where channel 1 only ever carries the caller and
+ * Builds a 2-channel MP3 where channel 1 only ever carries the caller and
  * channel 2 only ever carries the Akme side, with each padded to the full
  * length so neither is truncated by amerge.
  */
@@ -87,7 +87,7 @@ async function buildRecording(dir: string): Promise<string> {
   const [callerLen, agentLen] = await Promise.all(mono.map(seconds));
   const total = callerLen + agentLen + 0.5;
   const delayMs = Math.round(callerLen * 1000);
-  const out = join(dir, 'call.wav');
+  const out = join(dir, 'call.mp3');
 
   await run('ffmpeg', [
     '-y',
@@ -100,6 +100,14 @@ async function buildRecording(dir: string): Promise<string> {
     '-map', '[out]',
     '-ac', '2',
     '-ar', '16000',
+    // MP3, matching the `format: 'mp3'` we ask Telnyx for in lib/telnyx/voice.ts.
+    // Telegram's sendAudio rejects WAV by URL, so a WAV here would fail in a way
+    // production never can, which makes the rehearsal lie in both directions.
+    '-c:a', 'libmp3lame',
+    '-b:a', '128k',
+    // Joint stereo lets the encoder share information between L and R. The whole
+    // point of a dual-channel recording is that it does not, so force it off.
+    '-joint_stereo', '0',
     out,
   ]);
 
@@ -113,7 +121,7 @@ async function upload(localPath: string, storagePath: string): Promise<void> {
     method: 'POST',
     headers: {
       authorization: `Bearer ${env('SUPABASE_SERVICE_ROLE_KEY')}`,
-      'content-type': 'audio/wav',
+      'content-type': 'audio/mpeg',
       'x-upsert': 'true',
     },
     body: await readFile(localPath),
@@ -195,7 +203,7 @@ async function cleanup(storagePath: string): Promise<void> {
   console.log('  the Telegram topic stays; delete it by hand if you want it gone.\n');
 }
 
-const STORAGE_PATH = 'dry-run/pipeline-check.wav';
+const STORAGE_PATH = 'dry-run/pipeline-check.mp3';
 
 async function main() {
   const cleanupOnly = process.argv.includes('--cleanup');
