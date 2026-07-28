@@ -1,8 +1,14 @@
 import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { decodeClientState } from '../lib/telnyx/client';
-import type { DialParams, RecordStartParams, SpeakParams, TelnyxCommands } from '../lib/telnyx/client';
+import type {
+  DialParams,
+  RecordStartParams,
+  SpeakParams,
+  StartAssistantParams,
+  TelnyxCommands,
+} from '../lib/telnyx/client';
 import {
   processTelnyxEvent,
   receiveTelnyxWebhook,
@@ -95,6 +101,11 @@ function fakeCommands(failing: Partial<Record<string, boolean>> = {}) {
       const id = `leg-b${++dialSeq}`;
       issued.push({ cmd: 'dial', id, params });
       return { call_control_id: id, call_leg_id: id, call_session_id: 'sess-1' };
+    },
+    startAssistant: async (id: string, params: StartAssistantParams) => {
+      issued.push({ cmd: 'startAssistant', id, params });
+      if (failing.startAssistant) throw new Error('assistant unavailable');
+      return { conversation_id: 'conv-1' };
     },
     bridge: async (id: string, bridgeWith: string) => {
       issued.push({ cmd: 'bridge', id, params: bridgeWith });
@@ -213,6 +224,22 @@ class FakeStore implements VoiceStore {
   async markRecordingStarted(callControlId: string) {
     const f = this.flows.get(callControlId);
     if (f) f.recording_started = true;
+  }
+
+  conversations = new Map<string, string>();
+
+  async markConversationStarted(callControlId: string, conversationId: string) {
+    this.conversations.set(callControlId, conversationId);
+  }
+
+  async activeAssistantCall(callerPhone: string) {
+    for (const call of this.calls.values()) {
+      if (call.contact_phone !== callerPhone) continue;
+      for (const f of this.flows.values()) {
+        if (f.call_id === call.id && f.stage === 'assistant') return { ...f };
+      }
+    }
+    return null;
   }
 
   async activeResponders() {
@@ -649,5 +676,97 @@ describe('a caller who hangs up before the recording starts', () => {
 
     expect(fake.of('dial')).toHaveLength(1);
     expect(store.flows.get('leg-a')!.recording_started).toBe(false);
+  });
+});
+
+describe('handing the caller to the AI agent', () => {
+  const ASSISTANT_ID = 'assistant-0000-1111-2222-333344445555';
+
+  beforeEach(() => {
+    process.env.TELNYX_ASSISTANT_ID = ASSISTANT_ID;
+  });
+
+  afterEach(() => {
+    delete process.env.TELNYX_ASSISTANT_ID;
+  });
+
+  it('starts the assistant after the disclosure, and dials nobody', async () => {
+    const store = new FakeStore();
+    store.responders = [responder('r1', '+14155550001', 0)];
+    const fake = fakeCommands();
+    await ringResponders(store, fake);
+
+    expect(fake.of('startAssistant')).toHaveLength(1);
+    expect(fake.of('startAssistant')[0].params).toEqual({ assistant: { id: ASSISTANT_ID } });
+    expect(fake.of('dial')).toHaveLength(0);
+    expect(store.flows.get('leg-a')).toMatchObject({ stage: 'assistant' });
+  });
+
+  it('still starts the dual-channel recording, before the assistant takes over', async () => {
+    const store = new FakeStore();
+    store.responders = [responder('r1', '+14155550001', 0)];
+    const fake = fakeCommands();
+    await ringResponders(store, fake);
+
+    expect(fake.of('recordStart')[0].params).toMatchObject({ channels: 'dual', format: 'mp3' });
+    // The agent's first sentence has to be on tape, or the transcript the
+    // Telegram card is built from starts halfway through the conversation.
+    const order = fake.issued.map((i) => i.cmd);
+    expect(order.indexOf('recordStart')).toBeLessThan(order.indexOf('startAssistant'));
+  });
+
+  it('remembers the conversation id, so a call row leads back to Mission Control', async () => {
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    await ringResponders(store, fake);
+
+    expect(store.conversations.get('leg-a')).toBe('conv-1');
+  });
+
+  it('falls back to the ring group if the assistant will not start', async () => {
+    const store = new FakeStore();
+    store.responders = [responder('r1', '+14155550001', 0)];
+    const fake = fakeCommands({ startAssistant: true });
+    await ringResponders(store, fake);
+
+    // A caller who reaches a dead agent must reach a human, not a silent line.
+    expect(fake.of('dial')).toHaveLength(1);
+    expect(store.flows.get('leg-a')).toMatchObject({ stage: 'ringing', wave: 0 });
+  });
+
+  it('falls back to voicemail if the assistant dies and nobody is on the rota', async () => {
+    const store = new FakeStore();
+    store.responders = [];
+    const fake = fakeCommands({ startAssistant: true });
+    await ringResponders(store, fake);
+
+    expect(fake.of('dial')).toHaveLength(0);
+    expect(store.flows.get('leg-a')).toMatchObject({ stage: 'voicemail' });
+  });
+
+  it('does not start two agents when speak.ended is redelivered', async () => {
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    const deps = await ringResponders(store, fake);
+
+    const disclosure = fake.of('speak')[0].params as SpeakParams;
+    await processTelnyxEvent(
+      webhook('call.speak.ended', { client_state: disclosure.client_state }, { id: 'evt-replay' }),
+      deps,
+    );
+
+    expect(fake.of('startAssistant')).toHaveLength(1);
+  });
+
+  it('reverts to the ring group when the assistant id is unset, which is the rollback', async () => {
+    delete process.env.TELNYX_ASSISTANT_ID;
+    const store = new FakeStore();
+    store.responders = [responder('r1', '+14155550001', 0)];
+    const fake = fakeCommands();
+    await ringResponders(store, fake);
+
+    expect(fake.of('startAssistant')).toHaveLength(0);
+    expect(fake.of('dial')).toHaveLength(1);
+    expect(store.flows.get('leg-a')).toMatchObject({ stage: 'ringing' });
   });
 });

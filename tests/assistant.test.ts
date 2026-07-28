@@ -70,6 +70,16 @@ describe('assistant.ts: the settings that make it feel real', () => {
     expect(cfg().tools.map((t) => t.webhook.name)).toEqual([...TOOL_NAMES]);
   });
 
+  it('makes every tool take caller_phone, since Telnyx sends no call identity', () => {
+    // A tool call arrives as the bare arguments object. Nothing in it says which
+    // call it came from, so the caller number has to be an argument or the
+    // server is guessing.
+    for (const tool of cfg().tools) {
+      expect(tool.webhook.body_parameters.properties).toHaveProperty('caller_phone');
+      expect(tool.webhook.body_parameters.required).toContain('caller_phone');
+    }
+  });
+
   it('asks for caller context with a timeout that survives a cold start', () => {
     expect(cfg().dynamic_variables_webhook_url).toBe(`${BASE}/api/agent/context`);
     expect(cfg().dynamic_variables_webhook_timeout_ms).toBeGreaterThanOrEqual(5000);

@@ -118,6 +118,21 @@ export interface DialParams {
   client_state?: string;
 }
 
+/**
+ * The documented body is exactly this and nothing else. It deliberately carries
+ * no client_state: ai_assistant_start is not documented to accept one, and an
+ * undocumented field here would fail as a 422 on a live call.
+ */
+export interface StartAssistantParams {
+  assistant: { id: string };
+}
+
+export interface StartAssistantResult {
+  /** Ties our call row to the conversation in Mission Control. Absent on older responses. */
+  conversation_id?: string;
+  result?: string;
+}
+
 export const telnyx = {
   answer: (callControlId: string) =>
     post<{ result: string }>(`/calls/${callControlId}/actions/answer`),
@@ -143,6 +158,14 @@ export const telnyx = {
       from: env('TELNYX_NUMBER'),
       ...params,
     }),
+
+  /**
+   * Hands the live leg to the AI agent. The caller stays on the same call, so
+   * the dual-channel recording started at the disclosure keeps running across
+   * the whole conversation and the post-call pipeline is untouched.
+   */
+  startAssistant: (callControlId: string, params: StartAssistantParams) =>
+    post<StartAssistantResult>(`/calls/${callControlId}/actions/ai_assistant_start`, params),
 
   bridge: (callControlId: string, bridgeWith: string) =>
     post<{ result: string }>(`/calls/${callControlId}/actions/bridge`, {

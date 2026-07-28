@@ -144,7 +144,7 @@ export function receiveTelnyxWebhook(
 export interface CallFlow {
   call_control_id: string;
   call_id: string;
-  stage: 'initiated' | 'answered' | 'ringing' | 'bridged' | 'voicemail' | 'ended';
+  stage: 'initiated' | 'answered' | 'assistant' | 'ringing' | 'bridged' | 'voicemail' | 'ended';
   wave: number | null;
   recording_started: boolean;
 }
@@ -192,6 +192,10 @@ export interface VoiceStore {
   /** Compare-and-set on wave, so two simultaneous leg deaths cannot both advance. */
   advanceWave(callControlId: string, from: number, to: number): Promise<boolean>;
   markRecordingStarted(callControlId: string): Promise<void>;
+  /** Records the Telnyx conversation the agent is running on this call. */
+  markConversationStarted(callControlId: string, conversationId: string): Promise<void>;
+  /** The call the agent is currently holding for this caller, newest first. */
+  activeAssistantCall(callerPhone: string): Promise<CallFlow | null>;
 
   activeResponders(): Promise<Responder[]>;
   addLeg(leg: Omit<CallLeg, 'status'>): Promise<void>;
@@ -304,6 +308,32 @@ export function supabaseStore(): VoiceStore {
 
     async markRecordingStarted(callControlId) {
       await db().from('call_flow').update({ recording_started: true }).eq('call_control_id', callControlId);
+    },
+
+    async markConversationStarted(callControlId, conversationId) {
+      await db()
+        .from('call_flow')
+        .update({ telnyx_conversation_id: conversationId })
+        .eq('call_control_id', callControlId);
+    },
+
+    /**
+     * A webhook tool call carries no call identity, only the caller's number, so
+     * this is how a tool finds the call it is acting on. Scoped to the assistant
+     * stage: a call that already escalated is being handled by a person, and a
+     * retried tool call must not reach back into it.
+     */
+    async activeAssistantCall(callerPhone) {
+      const res = await db()
+        .from('call_flow')
+        .select('*, calls!inner(contact_phone)')
+        .eq('stage', 'assistant')
+        .eq('calls.contact_phone', callerPhone)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (res.error) throw new Error(`activeAssistantCall: ${res.error.message}`);
+      return (res.data as CallFlow) ?? null;
     },
 
     async activeResponders() {
@@ -578,16 +608,24 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
   const responders = await deps.store.activeResponders();
   const first = responders[0];
 
+  // Unsetting TELNYX_ASSISTANT_ID is the rollback: with no assistant to start,
+  // this reverts to dialing humans by the path it always took.
+  const assistantId = process.env.TELNYX_ASSISTANT_ID?.trim();
+
   // The compare-and-set comes before any command: a redelivered speak.ended must
-  // not start a second recording or dial everybody twice.
-  const flow = await deps.store.advanceStage(p.call_control_id, ['answered'], 'ringing', {
-    wave: first?.ring_order ?? null,
-  });
+  // not start a second recording, a second agent, or dial everybody twice.
+  let flow = assistantId
+    ? await deps.store.advanceStage(p.call_control_id, ['answered'], 'assistant')
+    : await deps.store.advanceStage(p.call_control_id, ['answered'], 'ringing', {
+        wave: first?.ring_order ?? null,
+      });
   if (!flow) return;
 
   // Disclosure is done, so consent is on the recording from its first frame.
   // Dual channel puts each party on its own track, which is what lets the
-  // transcript be attributed without diarization.
+  // transcript be attributed without diarization. This runs before the agent
+  // starts, or the agent's first sentence is missing from the transcript the
+  // Telegram card is built from.
   try {
     await deps.commands.recordStart(p.call_control_id, {
       channels: 'dual',
@@ -599,6 +637,28 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
     // A call that rings without a recording still connects the customer. A throw
     // here would strand them instead, so this is logged and the flow continues.
     console.error(`[voice] record_start failed for ${p.call_control_id}: ${describe(err)}`);
+  }
+
+  if (assistantId) {
+    try {
+      const started = await deps.commands.startAssistant(p.call_control_id, {
+        assistant: { id: assistantId },
+      });
+      if (started?.conversation_id) {
+        await deps.store.markConversationStarted(p.call_control_id, started.conversation_id);
+      }
+      return;
+    } catch (err) {
+      // A caller who reaches a dead agent must reach a human. Falling through to
+      // the ring group is strictly better than a silent open line, and this is
+      // the only path by which the old behaviour still runs on a normal call.
+      console.error(`[voice] ai_assistant_start failed for ${p.call_control_id}: ${describe(err)}`);
+      const fellBack = await deps.store.advanceStage(p.call_control_id, ['assistant'], 'ringing', {
+        wave: first?.ring_order ?? null,
+      });
+      if (!fellBack) return;
+      flow = fellBack;
+    }
   }
 
   if (!first) {

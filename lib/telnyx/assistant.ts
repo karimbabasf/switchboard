@@ -81,32 +81,49 @@ interface ToolSpec {
   required: string[];
 }
 
+/**
+ * A webhook tool call arrives carrying only the arguments the model filled in.
+ * Telnyx sends no call_control_id, no conversation id, and no caller identity
+ * with it, so the only way a tool can act on the right call is for the caller's
+ * number to be one of those arguments.
+ *
+ * The prompt tells the agent to pass `{{telnyx_end_user_target}}` verbatim, and
+ * the server resolves it against the call it bound at conversation start. Every
+ * tool takes it, including the ones that could technically work without it,
+ * because a tool that sometimes needs it and sometimes does not is a tool the
+ * model gets wrong half the time.
+ */
+const CALLER_PHONE = {
+  caller_phone: {
+    type: 'string',
+    description:
+      'The number the caller is calling from, in E.164. Always pass the value of telnyx_end_user_target exactly as given to you.',
+  },
+} as const;
+
 const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'lookup_invoice',
     description:
       'Look up one invoice by its number and return whether it is paid. Use only when the caller says an invoice number.',
     properties: {
+      ...CALLER_PHONE,
       invoice_number: { type: 'string', description: 'The invoice number the caller said, digits only.' },
     },
-    required: ['invoice_number'],
+    required: ['caller_phone', 'invoice_number'],
   },
   {
     name: 'check_order',
     description: "Look up the caller's most recent order and what is on it.",
-    properties: {
-      phone: {
-        type: 'string',
-        description: 'The caller phone number in E.164. Defaults to the number they are calling from.',
-      },
-    },
-    required: [],
+    properties: { ...CALLER_PHONE },
+    required: ['caller_phone'],
   },
   {
     name: 'take_message',
     description:
       'Save a message for the team with a callback number. Use at the end of any call needing follow-up.',
     properties: {
+      ...CALLER_PHONE,
       message: { type: 'string', description: 'What the caller wants, in one or two sentences.' },
       callback_number: {
         type: 'string',
@@ -114,16 +131,17 @@ const TOOL_SPECS: ToolSpec[] = [
       },
       caller_name: { type: 'string', description: 'The caller name, if they gave one.' },
     },
-    required: ['message', 'callback_number'],
+    required: ['caller_phone', 'message', 'callback_number'],
   },
   {
     name: 'escalate_to_human',
     description:
       'Ring the team and connect the caller to a person. Use the moment the caller asks for a human, sounds upset, or asks something outside your instructions.',
     properties: {
+      ...CALLER_PHONE,
       reason: { type: 'string', description: 'Why the caller needs a person, in a few words.' },
     },
-    required: ['reason'],
+    required: ['caller_phone', 'reason'],
   },
 ];
 
