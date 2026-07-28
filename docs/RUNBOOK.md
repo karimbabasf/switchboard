@@ -46,6 +46,27 @@ Fill in `.env.local`, run `pnpm preflight` after each. It names what is broken.
 - [ ] `ASSEMBLYAI_API_KEY`: free tier is fine
 - [ ] `FORWARD_TO_NUMBER`: your cell, E.164
 
+## 2b. Prove the pipeline without a phone (5 minutes)
+
+Do this as soon as `ASSEMBLYAI_API_KEY` is filled. It needs no Telnyx account,
+so it is the right thing to run while identity verification or a payment method
+is still pending.
+
+```
+pnpm dev          # one terminal
+pnpm dry-run      # another
+```
+
+Builds a real dual-channel recording with `say` and `ffmpeg`, uploads it to
+Supabase Storage, and drives it through the actual worker route: transcribe,
+summarize, Telegram card. Prints the transcript and the summary, and a topic
+for the fake caller should appear in Telegram.
+
+That covers everything except Telnyx itself. If it passes, a failure during the
+live test in step 5 is a phone problem, which is a much smaller search space.
+
+Clean up when you have looked at the card: `pnpm dry-run --cleanup`.
+
 ## 3. Telnyx (30 to 60 minutes, plus verification wait)
 
 - [ ] Sign up, push identity verification to **Level 2**. The slow part; start it
