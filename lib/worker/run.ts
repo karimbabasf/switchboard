@@ -33,9 +33,20 @@ const OUTBOX_AUDIO_URL_TTL_SECONDS = 60 * 60 * 24;
 // RunWorkerOptions.callCard without needing the real modules to exist on disk.
 export type CallCardFn = (call: Call) => Promise<OutboxPayload[]>;
 
+/** Mirrors DrainResult in lib/telegram/outbox.ts, kept structural to avoid importing it at module scope. */
+export type DrainFn = (limit: number) => Promise<{
+  processed: number;
+  sent: number;
+  throttled: number;
+  repaired: number;
+  failed: number;
+}>;
+
 export interface RunWorkerOptions {
   /** Injectable for tests; production default lazily imports lib/telegram/cards.ts. */
   callCard?: CallCardFn;
+  /** Injectable for tests; production default lazily imports lib/telegram/outbox.ts. */
+  drain?: DrainFn;
   /** Injectable clock for tests. */
   now?: () => Date;
 }
@@ -46,6 +57,9 @@ export interface RunWorkerResult {
   posted: number;
   errored: number;
   failed: number;
+  /** Zeroed when the drain itself threw; the tick still reports what the calls did. */
+  sent: number;
+  throttled: number;
 }
 
 /** Per-step retry budget. Attempts reset to 0 whenever a step succeeds, so this is a budget per pipeline step, not a lifetime total. */
@@ -55,7 +69,15 @@ type StepOutcome = 'advanced' | 'posted' | 'errored' | 'failed';
 
 export async function runWorker(limit: number, options: RunWorkerOptions = {}): Promise<RunWorkerResult> {
   const now = options.now ?? (() => new Date());
-  const result: RunWorkerResult = { claimed: 0, advanced: 0, posted: 0, errored: 0, failed: 0 };
+  const result: RunWorkerResult = {
+    claimed: 0,
+    advanced: 0,
+    posted: 0,
+    errored: 0,
+    failed: 0,
+    sent: 0,
+    throttled: 0,
+  };
 
   const candidates = await selectCandidates(limit);
 
@@ -66,6 +88,24 @@ export async function runWorker(limit: number, options: RunWorkerOptions = {}): 
 
     const outcome = await runStep(claimed, now(), options);
     result[outcome] += 1;
+  }
+
+  // Draining is part of a tick, not a separate schedule: nothing else calls it,
+  // and an enqueued card that never sends is indistinguishable from a broken
+  // pipeline. It runs unconditionally because inbound SMS enqueues rows too, so
+  // a tick that processed zero calls can still have a full outbox. It runs LAST
+  // so a card enqueued by this same tick goes out now rather than in two minutes.
+  try {
+    const drain = options.drain ?? (await loadDrain());
+    // Two rows per call card. The real ceiling is the TokenBucket inside the
+    // drain, which holds the group to Telegram's ~20 messages/minute.
+    const drained = await drain(limit * 2);
+    result.sent = drained.sent;
+    result.throttled = drained.throttled;
+  } catch (err) {
+    // A drain failure must not discard what the calls just did: those rows have
+    // already advanced, and the outbox is durable, so the next tick retries.
+    console.error(`[worker] outbox drain failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   return result;
@@ -151,6 +191,12 @@ async function runStep(call: Call, now: Date, options: RunWorkerOptions): Promis
  * right thread. A first-time caller has no topic yet, so deferring would put
  * their call card in General, which is the same bug that shipped in sms.ts.
  */
+/** Lazy for the same reason as loadCallCard: lib/telegram is a separate module's territory. */
+async function loadDrain(): Promise<DrainFn> {
+  const { drainOutbox } = await import('../telegram/outbox');
+  return drainOutbox;
+}
+
 async function loadCallCard(): Promise<CallCardFn> {
   const [{ completedCallCard }, { getContact, resolveTopic }] = await Promise.all([
     import('../telegram/cards'),

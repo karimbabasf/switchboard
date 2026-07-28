@@ -546,6 +546,57 @@ describe('run.ts: state machine advances one step per call', () => {
   });
 });
 
+/**
+ * The drain shipped fully written, rate-limited and unit-tested, and wired to
+ * nothing: every card was enqueued and none was ever sent. Nothing caught it
+ * because each side worked in isolation. These guard the seam, not the parts.
+ */
+describe('run.ts: every tick drains the outbox', () => {
+  it('drains even when there were no calls to process, because inbound SMS also enqueues', async () => {
+    useFakeDb([]);
+    const drain = vi.fn(async () => ({ processed: 2, sent: 2, throttled: 0, repaired: 0, failed: 0 }));
+    const { runWorker } = await import('../lib/worker/run');
+
+    const result = await runWorker(10, { now: FIXED_NOW, callCard: testCallCard, drain });
+
+    expect(drain).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ claimed: 0, sent: 2 });
+  });
+
+  it('drains after the calls run, so a card enqueued this tick goes out this tick', async () => {
+    useFakeDb([makeCall({ status: 'summarizing', attempts: 0 })]);
+    const order: string[] = [];
+    const drain = vi.fn(async () => {
+      order.push('drain');
+      return { processed: 1, sent: 1, throttled: 0, repaired: 0, failed: 0 };
+    });
+    const callCard = vi.fn(async () => {
+      order.push('card');
+      return [{ thread_id: 7, kind: 'text' as const, payload: { text: 'x' } }];
+    });
+    const { runWorker } = await import('../lib/worker/run');
+
+    await runWorker(10, { now: FIXED_NOW, callCard, drain });
+
+    expect(order).toEqual(['card', 'drain']);
+  });
+
+  it('keeps the call results when the drain itself throws', async () => {
+    const fake = useFakeDb([makeCall({ status: 'new', attempts: 0 })]);
+    const drain = vi.fn(async () => {
+      throw new Error('telegram is down');
+    });
+    const { runWorker } = await import('../lib/worker/run');
+
+    const result = await runWorker(10, { now: FIXED_NOW, callCard: testCallCard, drain });
+
+    // The row already advanced and the outbox is durable, so losing the tick's
+    // reported work would be strictly worse than reporting a zeroed drain.
+    expect(result).toMatchObject({ claimed: 1, advanced: 1, sent: 0 });
+    expect(fake.state.calls[0].status).toBe('fetching');
+  });
+});
+
 describe('run.ts: an expired recording URL fails cleanly instead of looping', () => {
   it('marks the row failed immediately, without waiting for the retry budget', async () => {
     const { RecordingExpiredError } = await import('../lib/worker/recording');
