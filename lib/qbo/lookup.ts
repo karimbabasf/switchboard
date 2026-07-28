@@ -71,6 +71,24 @@ export async function openInvoicesFor(customerId: string): Promise<OpenInvoice[]
 }
 
 /**
+ * One invoice by the number a caller reads off a piece of paper.
+ *
+ * Reads the mirror, never Intuit. A live call must not trigger an Intuit round
+ * trip: every Intuit request rotates a refresh token shared with Akme's
+ * invoicing, so a bug on this path would stop Akme invoicing anyone rather than
+ * merely degrading the phone line.
+ */
+export async function findInvoiceByDocNumber(docNumber: string): Promise<OpenInvoice | null> {
+  const res = await db()
+    .from('qbo_invoices')
+    .select('qbo_id, doc_number, balance_cents, due_date, status')
+    .eq('doc_number', docNumber.trim())
+    .maybeSingle();
+  if (res.error) throw new Error(`findInvoiceByDocNumber failed: ${res.error.message}`);
+  return (res.data as OpenInvoice) ?? null;
+}
+
+/**
  * Recent Akme orders for a customer. READ ONLY, switchboard never writes this
  * table. Indexed by orders_customer_idx.
  */

@@ -673,7 +673,7 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
  * so this is where simulring happens; the cascade to the next wave is driven by
  * the dial timeout, in advanceAfterLegDeath.
  */
-async function startWave(
+export async function startWave(
   flow: CallFlow,
   wave: number,
   responders: Responder[],
