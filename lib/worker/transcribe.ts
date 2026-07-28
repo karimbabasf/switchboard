@@ -11,6 +11,7 @@
 import { AssemblyAI } from 'assemblyai';
 import { env, optionalEnv } from '../env';
 import { db } from '../db';
+import { keyterms } from '../agent/brief';
 import type { Call } from '../types';
 
 /** Plenty of time for AssemblyAI to fetch a call-length recording from our own signed URL. */
@@ -27,24 +28,15 @@ export const SUPPORTED_SPEECH_MODELS = ['universal-3-5-pro', 'universal-2'] as c
 const FALLBACK_SPEECH_MODEL = 'universal-2';
 
 /**
- * Boosts names the model otherwise gets wrong. "Akme" is not optional here: a
- * dry run transcribed it as "Acme", and the transcript feeds the summary, so
- * the error would surface in every card a human reads.
+ * Keyterms come from lib/agent/brief.ts, which reads the real catalogue. The
+ * list that used to live here named wardrobe boxes, dish packs, packing paper
+ * and moving blankets: Akme stocks none of those. It was typed from an
+ * assumption and never checked, so the boost was spending itself on words that
+ * never get said while missing the six that do.
  *
- * Safe to pass terms that never get spoken; the model is trained to tolerate
- * that, which is why a standing list beats guessing per call. Cannot be sent
- * alongside a `prompt`, which the API rejects, so this file sends neither one
- * nor the other. Once the QuickBooks mirror is enabled, real product names in
- * qbo_items are the natural source to extend this from, rather than more guesses.
+ * Cannot be sent alongside a `prompt`, which the API rejects, so this file
+ * sends one or the other and never both.
  */
-const KEYTERMS = [
-  'Akme',
-  'wardrobe box',
-  'dish pack',
-  'packing paper',
-  'bubble wrap',
-  'moving blanket',
-];
 
 /**
  * `speech_models` is an ordered availability fallback, not parallel execution:
@@ -82,7 +74,7 @@ export async function transcribeCall(call: Call): Promise<string> {
     // Plural array, not the deprecated singular `speech_model`. Passing it
     // explicitly is required to get the flagship: omitting it lets the API pick.
     speech_models: speechModels(),
-    keyterms_prompt: KEYTERMS,
+    keyterms_prompt: keyterms(),
   })) as TranscriptLike;
 
   if (transcript.status === 'error') {
