@@ -120,12 +120,46 @@ Call Control application is not attached to the number. Call connects but no
 card means the worker: `select status, attempts, last_error from calls order by
 created_at desc limit 5;`
 
+## 5b. Turn the AI agent on (built 2026-07-28, not yet live)
+
+The code is in and under test. Nothing below changes behaviour until
+`TELNYX_ASSISTANT_ID` is set: with it empty, a call rings the ring group
+exactly as it does today, which is also the rollback.
+
+- [ ] Fill `PUBLIC_BASE_URL` with the tunnel origin (no trailing slash). The
+      agent's tools and its caller-context webhook are built from it, so a stale
+      value means the assistant answers and every tool call 404s.
+- [ ] `AGENT_TOOL_SECRET` is already generated in `.env.local`. It is sent as
+      `X-Agent-Secret` on every tool and context call and checked on the way in.
+- [ ] `pnpm assistant:sync`. Prints an assistant id. Put it in `.env.local` as
+      `TELNYX_ASSISTANT_ID`, then run it again: the id must not change. Running
+      it twice must make exactly one assistant.
+- [ ] Fire each tool from Mission Control's play button with sample data before
+      any real call. A tool that 403s here is the secret or the tunnel, not the
+      agent.
+- [ ] **Call and check the recording FIRST, before judging the conversation:**
+      ```
+      ffprobe -v error -show_entries stream=channels,channel_layout -of default out/call.mp3
+      ```
+      The whole transcript design rests on the caller being on one channel and
+      the agent on the other, and `speaker_labels` is off because of it. That is
+      verified for a human-to-human bridge and NOT for assistant audio, which
+      Telnyx generates on the leg rather than receiving from a second one. If it
+      comes back mono, or both parties share a channel, stop and fix that before
+      anything else.
+- [ ] Then judge the call: the gap after you stop talking, whether you can cut
+      it off mid-sentence, whether saying "mm-hm" derails it.
+- [ ] Ask for a human. Stage should go `assistant`, `ringing`, `bridged`.
+- [ ] Hang up, confirm the Telegram card still arrives with the agent's turns in
+      the transcript.
+
+**Rollback:** unset `TELNYX_ASSISTANT_ID`. The flow falls back to the ring group
+by the path that is under test in `tests/voice.test.ts`.
+
 ## 6. Then two decisions
 
-- [ ] **Build the AI receptionist, or stay with record-and-route.** Roughly 2 to
-      4 days on Telnyx's native assistant at about $0.05/min. Do the live test
-      first: real transcripts from step 5 tell you what it actually has to
-      answer, which beats guessing.
+- [ ] **Point QuickBooks at the mirror.** See the note below: the blocker is not
+      technical.
 - [ ] **Port `+1 555 555 0158`**, only after everything above passes. Unlock in
       Voice settings ($3). The account number is the 10-digit Google Voice number
       itself and the PIN is the Google Voice voicemail PIN, both counterintuitive
