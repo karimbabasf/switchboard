@@ -22,15 +22,29 @@ https://developers.telnyx.com/development/llms/ai-assistants-llms-full-txt.md
 and, for call commands,
 https://developers.telnyx.com/development/llms/calling-llms-full-txt.md
 
-Field names in this area have moved more than once, and one that a plan for this
-repo asserted from memory does not exist at all. Verified against the live docs
-on 2026-07-28:
+**The docs are not the whole API here.** Several real fields are undocumented,
+and Telnyx will accept a request containing a field it does not recognise,
+return 200, and store nothing. So the rule in this area is stronger than reading
+the docs: **`pnpm assistant:sync` reads the assistant back and fails if anything
+sent was not stored.** Never trust a 200 from this API as confirmation.
 
-- There is **no** `interrupt_prediction_threshold`, anywhere, at any nesting
-  level. Turn-taking is controlled by `interruption_settings.enable`,
-  `interruption_settings.disable_greeting_interruption`, and
-  `interruption_settings.start_speaking_plan.wait_seconds` (float, default 0.4).
-  If you find yourself writing a threshold number, you are writing from memory.
+Verified by pushing a real assistant and reading it back on 2026-07-28:
+
+- `interruption_settings.interrupt_prediction_threshold` **does exist**, and is
+  **not in the published docs**. It defaults to `0.0`, which means off. We set
+  0.4 so a backchannel "mm-hm" does not cut the agent off while a real
+  interruption still lands. An earlier pass grepped the docs, found nothing, and
+  wrote here that the field did not exist. It does.
+- The other turn-taking controls are `interruption_settings.enable`,
+  `.disable_greeting_interruption`, and
+  `.start_speaking_plan.wait_seconds` (float, default 0.4, we use 0.3).
+- **Voice is `voice_settings.voice`, not a top-level `voice`.** A top-level
+  `voice` is accepted with a 200 and silently ignored, and the assistant runs
+  with the account default. The id must exist in
+  `GET /v2/text-to-speech/voices` (4437 of them; the payload key is `voices`,
+  not `data`). Format `<Provider>.<Model>.<VoiceId>`, e.g. `Telnyx.Bayan.Amanda`.
+- `voice_settings.background_audio` is `{type, value, volume}`, `value: "office"`
+  is valid, and **volume must be a tenth**: 0.35 is a 400, not a rounding.
 - Keyterm boost is `transcription.settings.keyterm`, a **comma-separated
   string**, not an array. Supported by `deepgram/flux` and `deepgram/nova-3`.
 - End-of-turn: `deepgram/flux` is a turn-taking model and owns end-of-turn

@@ -20,12 +20,29 @@ describe('assistant.ts: the settings that make it feel real', () => {
     expect(cfg().interruption_settings.start_speaking_plan.wait_seconds).toBe(0.3);
   });
 
-  it('never carries interrupt_prediction_threshold, which does not exist', () => {
-    // The plan for this repo specified this field as the centrepiece setting.
-    // It appears nowhere in Telnyx's assistants or calling docs. This test is
-    // here so a future pass writing from memory fails instead of shipping a
-    // key the API ignores.
-    expect(JSON.stringify(cfg())).not.toMatch(/interrupt_prediction/i);
+  it('turns interruption prediction on, which is off by default', () => {
+    // Undocumented, but real: absent from Telnyx's published docs and stored by
+    // the API, defaulting to 0.0 (off). Confirmed by reading an assistant back
+    // on 2026-07-28. At 0.4 a backchannel "mm-hm" no longer cuts the agent off.
+    expect(cfg().interruption_settings.interrupt_prediction_threshold).toBe(0.4);
+  });
+
+  it('nests the voice under voice_settings, where the API actually reads it', () => {
+    // A top-level `voice` is accepted with a 200 and ignored. This assistant ran
+    // voiceless once because of exactly that.
+    expect(cfg()).not.toHaveProperty('voice');
+    expect(cfg().voice_settings.voice).toBeTruthy();
+  });
+
+  it('keeps room tone under the call, so a tool call is not dead air', () => {
+    expect(cfg().voice_settings.background_audio.value).not.toBe('silence');
+  });
+
+  it('names a voice in the provider.model.id shape the API requires', () => {
+    // An unknown voice id is accepted with a 200 and stored as null, so the
+    // shape is the only thing testable offline; assistant-sync reads the value
+    // back and fails if Telnyx dropped it.
+    expect(cfg().voice_settings.voice).toMatch(/^[A-Za-z]+\.[A-Za-z0-9]+\.[A-Za-z0-9-]+$/);
   });
 
   it('does not set an endpointing plan, which Flux would silently ignore', () => {

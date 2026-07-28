@@ -58,10 +58,18 @@ export interface AssistantConfig {
   interruption_settings: {
     enable: boolean;
     disable_greeting_interruption: boolean;
+    interrupt_prediction_threshold: number;
     start_speaking_plan: { wait_seconds: number };
   };
   telephony_settings: { noise_suppression: 'krisp' | 'deepfilternet' | 'disabled' };
-  voice: string;
+  /**
+   * Voice is nested here, not top level. A top-level `voice` is accepted with a
+   * 200 and silently ignored, which is how this shipped voiceless once.
+   */
+  voice_settings: {
+    voice: string;
+    background_audio: { type: 'predefined_media'; value: string; volume: number };
+  };
   tools: WebhookTool[];
   dynamic_variables_webhook_url: string;
   dynamic_variables_webhook_timeout_ms: number;
@@ -187,12 +195,30 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
       // This greeting is one short line, and a caller who talks over it is
       // telling us what they want. Letting them is the human behaviour.
       disable_greeting_interruption: false,
+      // Undocumented but real: it is absent from the published docs and the API
+      // stores it, defaulting to 0.0, which means off. At 0.4 a caller saying
+      // "mm-hm" while the agent talks no longer cuts it off, while a genuine
+      // interruption still lands. Read back by assistant-sync, so if Telnyx ever
+      // drops the field the sync says so instead of going quiet.
+      interrupt_prediction_threshold: 0.4,
       start_speaking_plan: { wait_seconds: 0.3 },
     },
     telephony_settings: { noise_suppression: 'krisp' },
-    // Set by the bake-off in Task 6. Kept in env so changing the voice is not a
-    // code change. Format is <Provider>.<Model>.<VoiceId>.
-    voice: optionalEnv('TELNYX_TTS', 'Telnyx.KokoroTTS.af'),
+    voice_settings: {
+      // Set by the bake-off in Task 6. Kept in env so changing the voice is not
+      // a code change. Format is <Provider>.<Model>.<VoiceId>, and the id must
+      // exist in GET /v2/text-to-speech/voices.
+      voice: optionalEnv('TELNYX_TTS', 'Telnyx.Bayan.Amanda'),
+      // Not decoration. Tool calls take a beat, and dead silence on a phone line
+      // reads as a dropped call, so a low room tone keeps the line feeling alive
+      // while lookup_invoice runs. Defaults to "silence", which is the problem.
+      background_audio: {
+        type: 'predefined_media',
+        value: optionalEnv('TELNYX_BACKGROUND_AUDIO', 'office'),
+        // Telnyx accepts tenths only: 0.35 is a 400, not a rounding.
+        volume: 0.3,
+      },
+    },
     tools,
     dynamic_variables_webhook_url: `${deps.publicBaseUrl}/api/agent/context`,
     // Default is 1500ms, which is tight for a cold serverless function. If this

@@ -97,10 +97,78 @@ if (pinned) {
   }
 }
 
+/**
+ * Read back what Telnyx actually stored.
+ *
+ * This exists because Telnyx accepted `voice: "Telnyx.KokoroTTS.af"`, returned
+ * 200, and stored null. An invalid voice id is not an error, it is a silently
+ * voiceless agent that only shows up on a live call. Anything sent and not
+ * stored is worth failing over.
+ */
+const stored = await api<{ data?: Record<string, unknown> } & Record<string, unknown>>(
+  `/ai/assistants/${id}`,
+);
+const got = (stored.data ?? stored) as Record<string, unknown>;
+
+const interruption = (got.interruption_settings ?? {}) as Record<string, unknown>;
+const startPlan = (interruption.start_speaking_plan ?? {}) as Record<string, unknown>;
+const transcription = (got.transcription ?? {}) as Record<string, unknown>;
+const telephony = (got.telephony_settings ?? {}) as Record<string, unknown>;
+const voiceSettings = (got.voice_settings ?? {}) as Record<string, unknown>;
+
+const checks: { name: string; sent: unknown; stored: unknown }[] = [
+  { name: 'voice_settings.voice', sent: config.voice_settings.voice, stored: voiceSettings.voice },
+  {
+    name: 'background_audio',
+    sent: config.voice_settings.background_audio.value,
+    stored: ((voiceSettings.background_audio ?? {}) as Record<string, unknown>).value,
+  },
+  { name: 'model', sent: config.model, stored: got.model },
+  { name: 'transcription.model', sent: config.transcription.model, stored: transcription.model },
+  {
+    name: 'interrupt_prediction_threshold',
+    sent: config.interruption_settings.interrupt_prediction_threshold,
+    stored: interruption.interrupt_prediction_threshold,
+  },
+  {
+    name: 'start_speaking_plan.wait_seconds',
+    sent: config.interruption_settings.start_speaking_plan.wait_seconds,
+    stored: startPlan.wait_seconds,
+  },
+  {
+    name: 'noise_suppression',
+    sent: config.telephony_settings.noise_suppression,
+    stored: telephony.noise_suppression,
+  },
+  {
+    name: 'dynamic_variables_webhook_url',
+    sent: config.dynamic_variables_webhook_url,
+    stored: got.dynamic_variables_webhook_url,
+  },
+  {
+    name: 'tools',
+    sent: config.tools.length,
+    stored: Array.isArray(got.tools) ? got.tools.length : 0,
+  },
+];
+
+const dropped = checks.filter((c) => c.sent !== c.stored);
+if (dropped.length > 0) {
+  console.error('\nTelnyx accepted the request but did not store these as sent:');
+  for (const d of dropped) {
+    console.error(`  ${d.name}: sent ${JSON.stringify(d.sent)}, stored ${JSON.stringify(d.stored)}`);
+  }
+  console.error('\nA value stored as null usually means it is not a legal value for that field.');
+  console.error('For voice, check it against GET /v2/text-to-speech/voices.\n');
+  process.exit(1);
+}
+
 console.log(`\nAssistant ${action}: ${id}`);
+console.log('  every field read back matching what was sent');
 console.log(`  name        ${config.name}`);
 console.log(`  model       ${config.model}`);
-console.log(`  voice       ${config.voice}`);
+console.log(`  voice       ${config.voice_settings.voice}`);
+console.log(`  room tone   ${config.voice_settings.background_audio.value}`);
 console.log(`  stt         ${config.transcription.model}`);
 console.log(`  wait        ${config.interruption_settings.start_speaking_plan.wait_seconds}s`);
 console.log(`  tools       ${config.tools.map((t) => t.webhook.name).join(', ')}`);
