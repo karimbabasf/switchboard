@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BUSINESS, keyterms, systemPrompt } from '../lib/agent/brief';
+import { BUSINESS, GREETING, keyterms, systemPrompt } from '../lib/agent/brief';
 
 describe('brief.ts: the business facts are one source', () => {
   it('names the six real SKUs and nothing Akme does not sell', () => {
@@ -53,6 +53,44 @@ describe('brief.ts: the business facts are one source', () => {
     // module is spoken aloud, so it is stored spoken.
     for (const product of BUSINESS.products) {
       expect(product.spec).not.toMatch(/["'/]|\bx\b/);
+    }
+  });
+});
+
+describe('brief.ts: the prompt holds its guardrails', () => {
+  const prompt = systemPrompt();
+
+  it('spells out what it may never do', () => {
+    for (const rule of [/never quote/i, /never take a card/i, /never promise a delivery date/i]) {
+      expect(prompt).toMatch(rule);
+    }
+  });
+
+  it('names the escalation tool by the name the tool is registered under', () => {
+    expect(prompt).toContain('escalate_to_human');
+  });
+
+  it('is a greeting, not an instruction to greet', () => {
+    // Telnyx sends the greeting straight to TTS without running it through the
+    // model, so a meta-instruction would be read aloud word for word.
+    expect(GREETING).not.toMatch(/^(greet|say|welcome the)/i);
+    expect(GREETING).toContain('Akme');
+  });
+
+  it('keeps the greeting short enough to sound like a person answering', () => {
+    // Two clauses is what a human receptionist says. Four is a recording.
+    expect(GREETING.split(/[.?!]/).filter(Boolean).length).toBeLessThanOrEqual(2);
+  });
+
+  it('carries every product into the prompt, so the agent cannot invent a seventh', () => {
+    for (const product of BUSINESS.products) {
+      expect(prompt).toContain(product.name);
+    }
+  });
+
+  it('names the four things we do not sell, since callers ask for all of them', () => {
+    for (const absent of ['boxes', 'tape guns', 'dollies', 'blankets']) {
+      expect(prompt).toContain(absent);
     }
   });
 });
