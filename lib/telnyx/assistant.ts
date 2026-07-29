@@ -260,13 +260,16 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
       // finish. Format is <Provider>.<Model>.<VoiceId>, and the id must exist in
       // GET /v2/text-to-speech/voices.
       voice: agentVoice(),
-      // Not decoration. Tool calls take a beat, and dead silence on a phone line
-      // reads as a dropped call, so a low room tone keeps the line feeling alive
-      // while lookup_invoice runs. Defaults to "silence", which is the problem.
+      // "office" room tone was here so a pause during a tool call did not read as
+      // a dropped line. On a real call it read as murmuring instead: Karim heard
+      // the agent as full of "uhmms", and office ambience is chatter. The trade
+      // has also moved, because the common path (products, then route to a quote)
+      // makes no slow tool calls, so there is barely a pause left to cover. Set
+      // TELNYX_BACKGROUND_AUDIO back to "office" to restore it; tenths only, 0.35
+      // is a 400 rather than a rounding.
       background_audio: {
         type: 'predefined_media',
-        value: optionalEnv('TELNYX_BACKGROUND_AUDIO', 'office'),
-        // Telnyx accepts tenths only: 0.35 is a 400, not a rounding.
+        value: optionalEnv('TELNYX_BACKGROUND_AUDIO', 'silence'),
         volume: 0.3,
       },
     },

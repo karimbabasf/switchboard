@@ -35,8 +35,14 @@ describe('assistant.ts: the settings that make it feel real', () => {
     expect(cfg().voice_settings.voice).toBeTruthy();
   });
 
-  it('keeps room tone under the call, so a tool call is not dead air', () => {
-    expect(cfg().voice_settings.background_audio.value).not.toBe('silence');
+  it('runs with no room tone, because office ambience sounded like the agent mumbling', () => {
+    // This assertion used to be the exact opposite, and the reason it flipped is
+    // worth keeping: "office" was chosen so a pause during a tool call would not
+    // read as a dropped line, but on a real call Karim heard it as the agent
+    // being full of "uhmms". Office ambience is chatter. The trade also moved,
+    // since the common path (products, then route to a quote) makes no slow tool
+    // calls, so there is barely a pause left to cover.
+    expect(cfg().voice_settings.background_audio.value).toBe('silence');
   });
 
   it('names a voice in the provider.model.id shape the API requires', () => {

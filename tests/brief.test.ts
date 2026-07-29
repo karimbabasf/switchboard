@@ -107,16 +107,49 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
 
   it('forbids producing, pricing or sending a quote', () => {
     expect(prompt).toMatch(/you do not produce a quote/i);
-    expect(prompt).toMatch(/never price one/i);
-    expect(prompt).toMatch(/never send one/i);
+    // Matched verb by verb rather than as one sentence, so rewording the prompt
+    // cannot quietly drop one of them the way a single exact-phrase match would.
+    for (const verb of [/never price one/i, /total one/i, /build one/i, /send one/i]) {
+      expect(prompt).toMatch(verb);
+    }
     // The old prompt told the agent to say "I will get a quote out to you today",
     // which is the agent promising to do the one thing it cannot do.
     expect(prompt).not.toMatch(/say: "I do not have pricing in front of me, but I will get a quote/i);
   });
 
   it('forbids creating or sending an invoice, while still allowing a lookup', () => {
-    expect(prompt).toMatch(/never create, price, or send one/i);
+    expect(prompt).toMatch(/may never create, price, or send/i);
     expect(prompt).toContain('lookup_invoice');
+  });
+
+  it('answers an order or pricing request with a yes and a route, never a refusal', () => {
+    // Karim's second live call: the agent led with what it could not do. The
+    // prompt was the cause, not the model. It literally said "say plainly that
+    // you do not have prices and are not the one who sets them", and separately
+    // banned "absolutely", which is the exact opener that fixes it.
+    expect(prompt).toMatch(/start with yes/i);
+    expect(prompt).toMatch(/never open with what you cannot do/i);
+    for (const refusal of [/"I can't"/i, /"I am unable to"/i, /unfortunately/i]) {
+      expect(prompt).toMatch(refusal);
+    }
+    expect(prompt).not.toMatch(/do not say "great question" or "absolutely"/i);
+    // And it has to say what it CAN do, or a yes with a redirect is still a dead end.
+    expect(prompt).toMatch(/tell them what you CAN do right now/i);
+  });
+
+  it('bans filler, which is what made the agent sound full of "uhmms"', () => {
+    expect(prompt).toMatch(/NO FILLER, EVER/);
+    for (const filler of [/"um"/i, /"uh"/i, /"let me see"/i]) {
+      expect(prompt).toMatch(filler);
+    }
+    expect(prompt).toMatch(/If a tool is running, say nothing at all/i);
+  });
+
+  it('keeps the greeting short, because it is time before the caller can speak', () => {
+    // The disclosure already said the company name, so repeating it here is pure
+    // delay. Ten words is generous for one spoken line; the current one is seven.
+    expect(GREETING.split(/\s+/).length).toBeLessThanOrEqual(10);
+    expect(GREETING).not.toMatch(/Akme/i);
   });
 
   it('gives the caller all three places a quote actually happens', () => {
