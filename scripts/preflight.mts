@@ -154,6 +154,68 @@ const checks: Check[] = [
   },
   {
     group: 'Supabase',
+    name: 'schema matches the migrations, not just the table list',
+    run: async () => {
+      /**
+       * Table-presence is not schema-correctness. A migration that only adds a
+       * column or widens a CHECK leaves every table exactly where it was, so the
+       * check above stays green while the database is a version behind.
+       *
+       * This shipped as a real failure: 20260729000000_assistant_stage.sql was
+       * written, committed, and never applied. Preflight said 19/19 and the
+       * first live call died on `violates check constraint call_flow_stage_check`
+       * the moment it tried to hand the caller to the agent.
+       *
+       * Probing beats introspection here: writing the value the constraint has to
+       * accept, then rolling it back, tests the thing that actually matters.
+       */
+      const headers = {
+        apikey: env('SUPABASE_SERVICE_ROLE_KEY'),
+        authorization: `Bearer ${env('SUPABASE_SERVICE_ROLE_KEY')}`,
+        'content-type': 'application/json',
+        prefer: 'return=representation',
+      };
+      const base = env('SUPABASE_URL');
+
+      // The column the assistant stage migration adds. Selecting a column that
+      // does not exist is a 400 naming it, which is the cheapest possible probe.
+      const col = await fetch(`${base}/rest/v1/call_flow?select=telnyx_conversation_id&limit=0`, {
+        headers,
+      });
+      if (!col.ok) {
+        return fail('call_flow.telnyx_conversation_id is missing. Apply 20260729000000_assistant_stage.sql');
+      }
+
+      // And the constraint itself. A row is inserted with stage 'assistant' and
+      // deleted again, because the constraint is what the live call trips on and
+      // reading pg_constraint through PostgREST is not available to us.
+      const probeId = `preflight-schema-probe-${Date.now()}`;
+      const callRes = await fetch(`${base}/rest/v1/calls?select=id&limit=1`, { headers });
+      const anyCall = (await callRes.json().catch(() => [])) as { id?: string }[];
+      if (!Array.isArray(anyCall) || anyCall.length === 0 || !anyCall[0]?.id) {
+        // No call row to borrow a foreign key from, so the column check above is
+        // all we can prove. Say so rather than implying more was verified.
+        return pass('assistant column present (constraint unprovable until one call exists)');
+      }
+
+      const ins = await fetch(`${base}/rest/v1/call_flow`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ call_control_id: probeId, call_id: anyCall[0].id, stage: 'assistant' }),
+      });
+      const detail = ins.ok ? '' : ((await ins.text()) || '').slice(0, 160);
+      await fetch(`${base}/rest/v1/call_flow?call_control_id=eq.${probeId}`, {
+        method: 'DELETE',
+        headers,
+      });
+
+      return ins.ok
+        ? pass("stage 'assistant' is accepted, so the handoff will not be rejected")
+        : fail(`stage 'assistant' rejected: ${detail}. Apply 20260729000000_assistant_stage.sql`);
+    },
+  },
+  {
+    group: 'Supabase',
     name: 'recordings bucket exists',
     run: async () => {
       const bucket = env('SUPABASE_STORAGE_BUCKET');
