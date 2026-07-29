@@ -10,6 +10,10 @@ database. Recordings go to private Supabase Storage, transcripts to AssemblyAI,
 summaries to NEAR AI Cloud (OpenAI-compatible), the default LLM provider across
 Karim's projects.
 
+**`docs/STATUS.md` is what works today and what is only tested.** Read it before
+assuming any part of this is live. `docs/RUNBOOK.md` is the ordered go-live
+sequence, and `docs/ECOSYSTEM.md` explains how this repo relates to `akme`.
+
 ## Run it
 
 ```bash
