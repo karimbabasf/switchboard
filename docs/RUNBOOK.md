@@ -141,6 +141,13 @@ exactly as it does today, which is also the rollback.
 - [ ] Fire each tool from Mission Control's play button with sample data before
       any real call. A tool that 403s here is the secret or the tunnel, not the
       agent.
+- [ ] `pnpm rehearse`. Nine scripted callers against the same model that answers
+      the phone, for about a cent, with no phone leg. **9/9 or do not call.** It
+      cannot hear the voice and cannot talk over the agent, so it is the gate you
+      clear before spending a real call, never the thing that says the line is
+      good. Re-run it after ANY edit to the prompt in `lib/agent/brief.ts`: that
+      file is a program, and the last two defects in it were both invisible to the
+      unit tests and obvious to this.
 - [ ] **Call and check the recording FIRST, before judging the conversation:**
       ```
       ffprobe -v error -show_entries stream=channels,channel_layout -of default out/call.mp3

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { BUSINESS, GREETING, keyterms, systemPrompt } from '../lib/agent/brief';
+import { BUSINESS, GREETING, SPOKEN_LIST, keyterms, systemPrompt } from '../lib/agent/brief';
 import { callerContext } from '../lib/agent/context';
 
 describe('brief.ts: the business facts are one source', () => {
@@ -77,10 +77,12 @@ describe('brief.ts: the prompt holds its guardrails', () => {
     // model, so a meta-instruction would be read aloud word for word.
     expect(GREETING).not.toMatch(/^(greet|say|welcome the)/i);
     expect(GREETING).toContain('Robin');
-    // Deliberately NOT the company name. RECORDING_DISCLOSURE has already said
-    // "Thanks for calling Akme USA" seconds earlier, in the same voice. Saying
-    // it twice is what makes a line sound like two systems talking.
-    expect(GREETING).not.toContain('Akme');
+    // The company name belongs HERE, not in the recording notice ahead of it
+    // (Karim, 2026-07-29): a caller should hear a person introduce themselves and
+    // where they work. This assertion was previously the exact opposite. The rule
+    // that survived the reversal is "named once across the two beats", which the
+    // disclosure suite below is what actually enforces.
+    expect(GREETING).toContain(BUSINESS.name);
     expect(GREETING.trim().endsWith('?')).toBe(true);
   });
 
@@ -146,10 +148,11 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
   });
 
   it('keeps the greeting short, because it is time before the caller can speak', () => {
-    // The disclosure already said the company name, so repeating it here is pure
-    // delay. Ten words is generous for one spoken line; the current one is seven.
-    expect(GREETING.split(/\s+/).length).toBeLessThanOrEqual(10);
-    expect(GREETING).not.toMatch(/Akme/i);
+    // Fourteen words, not ten: naming the company here costs three of them and is
+    // the point of this line. It still has to stay one breath, because
+    // `disable_greeting_interruption` is true and anything a caller says over this
+    // line is thrown away.
+    expect(GREETING.split(/\s+/).length).toBeLessThanOrEqual(14);
   });
 
   it('gives the caller all three places a quote actually happens', () => {
@@ -159,10 +162,81 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     expect(prompt).toContain('text_me_the_list');
   });
 
-  it('still lets the agent give out any product detail it has', () => {
-    expect(prompt).toMatch(/say any of that freely/i);
+  it('still lets the agent give out any product detail it has, on request', () => {
+    // The old prompt said "say any of that freely" about the whole spec table,
+    // directly under the product list. The agent read measurements at people who
+    // had only asked what we sell. Karim's rule (2026-07-29): listing is titles,
+    // detail is a follow-up. Both halves still have to be in the prompt.
+    expect(prompt).toMatch(/THE DETAIL, ONLY WHEN THEY ASK FOR IT/);
+    expect(prompt).toMatch(/never volunteer a measurement nobody asked for/i);
     for (const product of BUSINESS.products) {
       expect(prompt).toContain(product.spec);
+    }
+  });
+
+  it('answers "what do you sell" with titles only, and no measurement leaks in', () => {
+    expect(prompt).toContain(SPOKEN_LIST);
+    // Every product has to be reachable from the one sentence the agent says, or
+    // adding a seventh SKU silently drops it off the phone line.
+    for (const product of BUSINESS.products) {
+      const firstWord = product.name.split(' ')[0].toLowerCase();
+      expect(SPOKEN_LIST.toLowerCase()).toContain(firstWord);
+    }
+    // No digits, no units: a spoken list with "48 millimeters" in it is the thing
+    // this sentence exists to prevent.
+    expect(SPOKEN_LIST).not.toMatch(/\d/);
+    expect(SPOKEN_LIST).not.toMatch(/inch|gauge|yard|feet|pound|mil\b|roll/i);
+  });
+
+  it('forbids taking the order item by item, which is what it actually did', () => {
+    // The 58 second call on 2026-07-29: the caller said "I'd like to place an
+    // order" three times and got "what kinds of tape are you after?" and then
+    // "besides the hot melt, what else?". The website, a text and email were
+    // never mentioned. The prompt had the routing rule; it was in section five of
+    // eight, under a heading about pricing, so ordering never triggered it.
+    expect(prompt).toMatch(/NEVER TAKE THE ORDER ITEM BY ITEM/);
+    expect(prompt).toMatch(/do not ask "what else"/i);
+    expect(prompt).toMatch(/your NEXT sentence is the route/);
+  });
+
+  it('forbids asking what they need a second time', () => {
+    // Same call: the greeting asked "how can I help", then the agent asked "what
+    // can I do for you" and then "what do you need". Three open questions, one
+    // caller, who had answered the first one.
+    expect(prompt).toMatch(/YOU HAVE ALREADY ASKED WHAT THEY NEED/);
+    expect(prompt).toMatch(/answer the thing they said instead of asking again/i);
+  });
+
+  it('knows the words callers actually use, so it cannot deny stocking bubble wrap', () => {
+    // Verified against `qbName` in Akme's lib/catalog.ts, not from memory:
+    // Cushion Wrap is literally 'BUBBLE - 48" x 1/2" x 250\' PERFORATED 12"'.
+    for (const product of BUSINESS.products) {
+      expect(product.alsoCalled.length).toBeGreaterThan(0);
+      for (const alias of product.alsoCalled) {
+        expect(prompt).toContain(alias);
+      }
+    }
+    expect(prompt).toMatch(/bubble wrap is asking for Cushion Wrap/i);
+    expect(prompt).toMatch(/Never tell someone we do not carry something because they used their word/i);
+    // Stretch film is not shrink film. Claiming they are the same is exactly the
+    // invented answer the alias list is supposed to prevent.
+    const aliases = BUSINESS.products.flatMap((p) => p.alsoCalled);
+    expect(aliases).not.toContain('shrink wrap');
+  });
+
+  it('offers a person instead of waiting to be asked for one', () => {
+    expect(prompt).toMatch(/I can put you through to someone on our team, would you like that\?/);
+    expect(prompt).toMatch(/Do not ask them why and do not talk them out of it/i);
+    // "Whatever the title is" was Karim's phrasing, and the safe answer to it is
+    // to have no title at all rather than a plausible invented one.
+    expect(prompt).toMatch(/Do not invent a job title/i);
+  });
+
+  it('says only what it knows for certain, and lists what it does not know', () => {
+    expect(prompt).toMatch(/ONLY SAY WHAT YOU KNOW FOR CERTAIN/);
+    expect(prompt).toMatch(/written in these instructions or came back from a tool/i);
+    for (const unknown of ['stock levels', 'lead times', 'minimum orders', 'returns']) {
+      expect(prompt).toContain(unknown);
     }
   });
 
@@ -204,5 +278,16 @@ describe('the recording disclosure', () => {
     // introducing somebody, is the tell that two systems are talking.
     expect(together.match(new RegExp(BUSINESS.name, 'g'))).toHaveLength(1);
     expect(disclosure.length).toBeLessThan(200);
+  });
+
+  it('is the notice and only the notice, with the company name left to the greeting', () => {
+    // The split changed on 2026-07-29 so the caller hears a person introduce
+    // themselves and their company, which is the half a customer remembers. This
+    // is the assertion that keeps the pair from drifting back into saying "Akme
+    // USA" twice in six seconds; the test above only counts, this one says where.
+    expect(disclosure).not.toContain(BUSINESS.name);
+    expect(GREETING).toContain(BUSINESS.name);
+    // Nothing else belongs in the notice: no product talk, no offer of help.
+    expect(disclosure).not.toMatch(/how can i help|what can i/i);
   });
 });

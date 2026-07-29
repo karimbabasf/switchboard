@@ -23,19 +23,41 @@ templates with no model call at all, but has still never handled a real text.
 
 ## What the caller hears now
 
-> "Thanks for calling Akme USA. Just so you know, this call is recorded, and
-> you're speaking with our automated assistant. I'm Robin. What can I get for
-> you today?"
+> "Just so you know, this call is recorded and you're speaking with an automated
+> assistant. Hi, this is Robin from Akme USA. How can I help you today?"
 
-First sentence is our own `speak` command, second is the assistant's greeting,
-same voice, no gap, company name said once.
+First sentence is our own `speak` command (`RECORDING_DISCLOSURE`), second is the
+assistant's greeting (`GREETING` in lib/agent/brief.ts), same voice, no gap.
+
+The split is deliberate and tested: the notice half carries the recording and
+machine disclosures and **nothing else**, and the company name lives in the
+greeting so a caller hears a person introduce themselves and where they work.
+Akme USA is said exactly once across the two, and `tests/brief.test.ts` asserts
+both the count and which half has it. This block was stale before 2026-07-29,
+quoting an opener neither half had ever said, so treat it as load-bearing: if you
+change either string, change this quote in the same edit.
 
 ## The rule the agent runs on
 
-It may say what we stock and describe any of it in as much detail as the caller
-wants. It may **never** produce, price, or send a quote or an invoice. Every
-pricing question ends the same way: the website, an email, or a text, and a
+**Listing is titles. Detail is a follow-up.** Asked what we stock, it says six
+product names in one sentence and stops, with no sizes and no prices. Asked how
+many rolls are in a case, or what size, or how many on a pallet, it answers
+exactly from the brief, one product at a time. It used to be told to say the whole
+spec table "freely", and it read measurements at people who had only asked what we
+sell.
+
+**It may never produce, price, or send a quote or an invoice.** Every pricing
+question ends the same way: the website, an email, or a text, and a
 `quote_requests` row so a human sees it. That row is the point of the phone line.
+
+**It does not take orders.** Not item by item, not "what else", not quantities. It
+cannot price any of it, so a list collected on the call is a list that dies on the
+call. One description, however vague, goes straight to `text_me_the_list` and the
+team works from there.
+
+**It only says what is in the brief or what a tool just returned.** Stock levels,
+lead times, delivery dates, minimums, returns and payment terms are in neither, so
+it offers a person instead of an answer.
 
 ## SMS: templates first, model second
 
@@ -74,9 +96,56 @@ say" and nobody can work a queue out of that.
   and NEAR AI.
 - `pnpm assistant:sync`: every field read back matching what was sent, including
   the five new settings above.
+- `pnpm rehearse`: 9/9 scenarios against `anthropic/claude-haiku-4-5`, the same
+  model that answers the phone, over Telnyx's chat completions endpoint. Scenario
+  one is a replay of the real call below. It caught a live defect on its first run
+  and the transcripts are in `out/rehearse/`.
+
+## The order-taking bug, and what the rehearsal is for
+
+The 58 second call at 20:56 on 2026-07-29, transcript quoted from the `calls` row:
+
+> **Robin:** This is Robin. How can I help?
+> **Caller:** I'd like to place an order. Hello?
+> **Robin:** Hi there, what can I do for you?
+> **Caller:** Hello? I'd like to place an order, please.
+> **Robin:** Definitely, what do you need?
+> **Caller:** I'm looking for tape and a couple other things.
+> **Robin:** What kinds of tape are you after?
+> **Caller:** Hot melt tape.
+> **Robin:** Got it, besides the hot melt, what else?
+
+Three asks to place an order, three open questions back, and the website, a text
+and email were never mentioned. The prompt already had the routing rule: it was in
+section five of eight under a heading about pricing, so ordering never reached it.
+Rewritten with the routing rule as the top-level job and the item-by-item ban
+stated as its own rule, the same scripted caller now gets the route in turn one and
+their request on the team's queue in turn two.
+
+The first `pnpm rehearse` run then failed that same scenario for a new reason: the
+example script in the prompt said "tell me what you are after", which the model
+read as licence to collect a list, so it routed correctly and then went straight
+back to "what else?". A prompt is a program and that was a bug in it. The example
+is now a statement rather than an invitation, followed by "STOP AND LET THEM
+ANSWER".
 
 ## Still not proven
 
+- **The new opener and the new prompt, on a real call.** Everything above was
+  proven in text, and `pnpm rehearse` cannot hear the voice, cannot be talked over,
+  and never touches Telnyx voice. It is the cheap gate, not the verdict. The next
+  real call to +1 555 555 0124 is what says whether the two-beat opener sounds like
+  one person and whether the routing holds when a caller rambles.
+- **Whether the caller's first words survive the greeting.** On the 20:56 call the
+  caller said "I'd like to place an order" and then "Hello?" into silence, and the
+  agent answered only the "Hello?". `disable_greeting_interruption: true` throws
+  away anything said over the greeting, and the greeting just got three words
+  longer. The prompt now recovers from it (never re-ask, answer what they said),
+  but the underlying loss is untested either way. The experiment is one line:
+  flip that flag to `false` in lib/telnyx/assistant.ts, `pnpm assistant:sync`, and
+  make three calls talking over the greeting on purpose. It was `false` once and
+  line noise made the agent open with "I'm not sure I caught that", but that was
+  before `interrupt_prediction_threshold: 0.4` existed, so the trade has moved.
 - **SMS on real traffic.** `messages` still has zero rows. The template layer,
   the guards and the quote-request wiring are unit tested and have never seen a
   real text.
@@ -118,7 +187,7 @@ dead tunnel from a failing local curl.
 |---|---|
 | Commits | 42 |
 | Application code | 5,804 lines |
-| Tests | 4,074 lines, 246 passing |
+| Tests | 256 passing, plus 9 rehearsal scenarios against the live model |
 | API routes | 7 |
 | Migrations | 7, fourteen tables |
 | Preflight checks | 20, all green against live services |
@@ -127,10 +196,12 @@ dead tunnel from a failing local curl.
 
 ```bash
 pnpm preflight                        # 20 live credential checks, the gate
-node ./node_modules/vitest/vitest.mjs run   # 246 tests, no network
+node ./node_modules/vitest/vitest.mjs run   # 256 tests, no network
 ./node_modules/.bin/tsc --noEmit -p tsconfig.json
 ./node_modules/.bin/next build        # 7 route handlers, 0 errors
 pnpm dry-run                          # whole post-call pipeline, no phone
+pnpm rehearse                         # 9 scripted callers vs the real prompt
+pnpm rehearse order                   # just the scenarios matching "order"
 ```
 
 Run the binaries directly. A shell wrapper on this machine collapses `pnpm`

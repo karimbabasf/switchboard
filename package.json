@@ -10,6 +10,7 @@
     "preflight": "node --env-file=.env.local scripts/preflight.mts",
     "dry-run": "node --env-file=.env.local scripts/dry-run.mts",
     "assistant:sync": "node --env-file=.env.local scripts/assistant-sync.mts",
+    "rehearse": "node --env-file=.env.local scripts/rehearse.mts",
     "voice:bakeoff": "node --env-file=.env.local scripts/voice-bakeoff.mts",
     "repoint": "node --env-file=.env.local scripts/repoint.mts"
   },

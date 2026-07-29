@@ -157,7 +157,10 @@ const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'text_me_the_list',
     description:
-      'Text the caller our product list and how to get a quote, and put their request in front of the team. Use when the caller asks about pricing, asks what we stock, or asks for it in writing.',
+      // Deliberately NOT "asks what we stock" any more. The agent now answers that
+      // out loud from the brief, in one sentence of product names, and texting the
+      // list instead of answering a question it can answer is worse service.
+      'Text the caller our product list and how to get a quote, and put their request in front of the team. Use when the caller wants pricing, wants to order, or asks for something in writing.',
     properties: {
       ...CALLER_PHONE,
       wants: {
@@ -187,7 +190,7 @@ const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'escalate_to_human',
     description:
-      'Ring the team and connect the caller to a person. Use the moment the caller asks for a human, sounds upset, or asks something outside your instructions.',
+      'Ring the team and connect the caller to a person. Use the moment the caller asks for a human, immediately after they accept your offer of one, or when they are upset or disputing a charge.',
     properties: {
       ...CALLER_PHONE,
       reason: { type: 'string', description: 'Why the caller needs a person, in a few words.' },
