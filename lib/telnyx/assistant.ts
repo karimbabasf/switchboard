@@ -23,15 +23,33 @@
 import { optionalEnv } from '../env.ts';
 import { GREETING, keyterms, systemPrompt } from '../agent/brief.ts';
 
-/** The four tools, in the order the prompt introduces them. */
+/** The five tools, in the order the prompt introduces them. */
 export const TOOL_NAMES = [
   'lookup_invoice',
   'check_order',
+  'text_me_the_list',
   'take_message',
   'escalate_to_human',
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
+
+/**
+ * The one voice on this phone line.
+ *
+ * It lives here rather than in client.ts because this is the file that documents
+ * the `<Provider>.<Model>.<VoiceId>` rule, and both consumers import it: the
+ * assistant's `voice_settings.voice`, and the Call Control `speak` command that
+ * reads the recording disclosure before the assistant ever starts.
+ *
+ * They used to be two separate variables with two separate defaults, and the
+ * disclosure default was `female`, Telnyx's legacy BASIC engine. A caller heard
+ * a robot read a legal notice and then a different, human-sounding person say
+ * hello. One function, one default, so they cannot drift apart again.
+ */
+export function agentVoice(): string {
+  return optionalEnv('TELNYX_TTS', 'Telnyx.Bayan.Amanda');
+}
 
 export interface WebhookTool {
   type: 'webhook';
@@ -61,7 +79,17 @@ export interface AssistantConfig {
     interrupt_prediction_threshold: number;
     start_speaking_plan: { wait_seconds: number };
   };
-  telephony_settings: { noise_suppression: 'krisp' | 'deepfilternet' | 'disabled' };
+  telephony_settings: {
+    noise_suppression: 'krisp' | 'deepfilternet' | 'disabled';
+    /**
+     * The assistant records the call itself unless told not to, and `enabled`
+     * DEFAULTS TO TRUE. We already run our own dual-channel `record_start` from
+     * the disclosure step, so leaving this alone produced two recordings of
+     * every call and two `call.recording.saved` webhooks. There is no per-call
+     * override for it; it is only settable on the stored assistant.
+     */
+    recording_settings: { enabled: boolean };
+  };
   /**
    * Voice is nested here, not top level. A top-level `voice` is accepted with a
    * 200 and silently ignored, which is how this shipped voiceless once.
@@ -127,6 +155,21 @@ const TOOL_SPECS: ToolSpec[] = [
     required: ['caller_phone'],
   },
   {
+    name: 'text_me_the_list',
+    description:
+      'Text the caller our product list and how to get a quote, and put their request in front of the team. Use when the caller asks about pricing, asks what we stock, or asks for it in writing.',
+    properties: {
+      ...CALLER_PHONE,
+      wants: {
+        type: 'string',
+        description:
+          'What the caller said they need, in their own words. Use "the full product list" if they did not name anything.',
+      },
+      caller_name: { type: 'string', description: 'The caller name, if they gave one.' },
+    },
+    required: ['caller_phone', 'wants'],
+  },
+  {
     name: 'take_message',
     description:
       'Save a message for the team with a callback number. Use at the end of any call needing follow-up.',
@@ -190,11 +233,13 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
     },
     interruption_settings: {
       enable: true,
-      // The recording and AI disclosure is spoken by our own Call Control
-      // `speak` before the assistant ever starts, so it is already protected.
-      // This greeting is one short line, and a caller who talks over it is
-      // telling us what they want. Letting them is the human behaviour.
-      disable_greeting_interruption: false,
+      // This was false, on the theory that a caller talking over a one-line
+      // greeting is telling us what they want. On real calls it was line noise
+      // doing the talking: the agent's first sentence on a 58 second call was
+      // "I'm not sure I caught that", before the caller had said a word. The
+      // greeting is under two seconds. Nobody is kept waiting by protecting it,
+      // and `enable: true` above still lets them cut in from then on.
+      disable_greeting_interruption: true,
       // Undocumented but real: it is absent from the published docs and the API
       // stores it, defaulting to 0.0, which means off. At 0.4 a caller saying
       // "mm-hm" while the agent talks no longer cuts it off, while a genuine
@@ -203,12 +248,18 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
       interrupt_prediction_threshold: 0.4,
       start_speaking_plan: { wait_seconds: 0.3 },
     },
-    telephony_settings: { noise_suppression: 'krisp' },
+    telephony_settings: {
+      noise_suppression: 'krisp',
+      // Off, because our own record_start already covers the whole call. See the
+      // field comment above: this defaults to TRUE and was the second recording.
+      recording_settings: { enabled: false },
+    },
     voice_settings: {
-      // Set by the bake-off in Task 6. Kept in env so changing the voice is not
-      // a code change. Format is <Provider>.<Model>.<VoiceId>, and the id must
-      // exist in GET /v2/text-to-speech/voices.
-      voice: optionalEnv('TELNYX_TTS', 'Telnyx.Bayan.Amanda'),
+      // Set by the bake-off in Task 6, and shared with the Call Control `speak`
+      // that reads the disclosure, so the caller hears one person start to
+      // finish. Format is <Provider>.<Model>.<VoiceId>, and the id must exist in
+      // GET /v2/text-to-speech/voices.
+      voice: agentVoice(),
       // Not decoration. Tool calls take a beat, and dead silence on a phone line
       // reads as a dropped call, so a low room tone keeps the line feeling alive
       // while lookup_invoice runs. Defaults to "silence", which is the problem.
@@ -221,8 +272,12 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
     },
     tools,
     dynamic_variables_webhook_url: `${deps.publicBaseUrl}/api/agent/context`,
-    // Default is 1500ms, which is tight for a cold serverless function. If this
-    // times out the agent greets a known customer as a stranger.
-    dynamic_variables_webhook_timeout_ms: 8000,
+    // The assistant will not say a word until this webhook answers or this
+    // timeout expires, so it is a floor on how long the caller sits in silence
+    // after the disclosure. It was 8000, which is what ~10 seconds of dead air
+    // was mostly made of. The lookup itself is ~200ms and is now prewarmed at
+    // call.answered (see prewarmCallerContext), so this should never be reached;
+    // if it is, being greeted as a stranger after 2.5s beats waiting out 8.
+    dynamic_variables_webhook_timeout_ms: 2500,
   };
 }

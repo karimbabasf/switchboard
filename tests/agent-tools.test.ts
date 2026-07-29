@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { runTool, type ToolDeps } from '../lib/agent/tools';
+import { renderTemplate } from '../lib/agent/templates';
+import type { NewQuoteRequest, QuoteRequestRow } from '../lib/quote-requests';
 import type { CallFlow, VoiceStore } from '../lib/telnyx/voice';
 import type { TelnyxCommands } from '../lib/telnyx/client';
 import type { OpenInvoice } from '../lib/qbo/lookup';
@@ -18,6 +20,8 @@ interface Options {
   invoice?: OpenInvoice | null;
   order?: AkmeOrder | null;
   customerId?: string | null;
+  /** Makes the SMS send throw, the way a carrier rejection does. */
+  smsFails?: boolean;
 }
 
 function testDeps(opts: Options = {}) {
@@ -50,6 +54,9 @@ function testDeps(opts: Options = {}) {
 
   const commands = { dial } as unknown as TelnyxCommands;
 
+  const texted: { phone: string; body: string }[] = [];
+  const quotes: NewQuoteRequest[] = [];
+
   const deps: ToolDeps = {
     store,
     commands,
@@ -64,9 +71,17 @@ function testDeps(opts: Options = {}) {
     postToTeam: async (phone, text) => {
       posted.push({ phone, text });
     },
+    sendText: async (phone, body) => {
+      if (opts.smsFails) throw new Error('carrier rejected the message');
+      texted.push({ phone, body });
+    },
+    recordQuote: async (input) => {
+      quotes.push(input);
+      return { id: `qr-${quotes.length}`, ...input } as unknown as QuoteRequestRow;
+    },
   };
 
-  return { deps, dial, flow, posted, commands };
+  return { deps, dial, flow, posted, commands, texted, quotes };
 }
 
 describe('runTool: escalate_to_human', () => {
@@ -188,5 +203,101 @@ describe('runTool: check_order and take_message', () => {
     const out = await runTool('take_message', { caller_phone: CALLER, message: '', callback_number: '' }, t.deps);
     expect(t.posted).toHaveLength(0);
     expect(out.speech).toMatch(/\?$/);
+  });
+
+  it('files a pricing message on the quote queue as well as in the topic', async () => {
+    const t = testDeps();
+    await runTool(
+      'take_message',
+      { caller_phone: CALLER, message: 'How much is a pallet of hand wrap', callback_number: CALLER, caller_name: 'Maria' },
+      t.deps,
+    );
+
+    // A pricing question left only as a sentence in one contact's thread is
+    // invisible to anyone working the queue.
+    expect(t.posted).toHaveLength(1);
+    expect(t.quotes).toEqual([
+      { phone: CALLER, source: 'call', wants: 'How much is a pallet of hand wrap', callerName: 'Maria' },
+    ]);
+  });
+
+  it('does not turn every message into a quote request', async () => {
+    const t = testDeps();
+    await runTool(
+      'take_message',
+      { caller_phone: CALLER, message: 'Please call me back about the damaged pallet', callback_number: CALLER },
+      t.deps,
+    );
+
+    expect(t.posted).toHaveLength(1);
+    expect(t.quotes).toHaveLength(0);
+  });
+});
+
+describe('runTool: text_me_the_list', () => {
+  it('sends the reviewed catalogue template, never a second copy of the list', async () => {
+    const t = testDeps();
+    await runTool('text_me_the_list', { caller_phone: CALLER, wants: 'tape and hand wrap' }, t.deps);
+
+    // Byte for byte the template. The last time this codebase kept its own copy
+    // of the product list it named four products Akme does not sell.
+    expect(t.texted).toEqual([{ phone: CALLER, body: renderTemplate('catalogue') }]);
+  });
+
+  it('records the quote request, which is the thing a human actually works from', async () => {
+    const t = testDeps();
+    await runTool(
+      'text_me_the_list',
+      { caller_phone: CALLER, wants: 'a pallet of machine wrap', caller_name: 'Maria' },
+      t.deps,
+    );
+
+    expect(t.quotes).toEqual([
+      { phone: CALLER, source: 'call', wants: 'a pallet of machine wrap', callerName: 'Maria' },
+    ]);
+  });
+
+  it('quotes no price and sends no quote, because the agent may do neither', async () => {
+    const t = testDeps();
+    const out = await runTool('text_me_the_list', { caller_phone: CALLER, wants: 'pricing' }, t.deps);
+
+    expect(t.texted[0].body).not.toMatch(/\$|\bper case\b.*\d|\d+\.\d\d/);
+    expect(out.speech).not.toMatch(/\$|quote is|here is your quote/i);
+  });
+
+  it('gives the agent one sentence to say, not a JSON blob to narrate', async () => {
+    const t = testDeps();
+    const out = await runTool('text_me_the_list', { caller_phone: CALLER, wants: 'the list' }, t.deps);
+
+    expect(Object.keys(out)).toEqual(['speech']);
+    expect(out.speech).not.toMatch(/[{}[\]"]|:\s/);
+    expect(out.speech.split(/[.?!]/).filter((s) => s.trim()).length).toBeLessThanOrEqual(2);
+  });
+
+  it('still records the request when the text will not go through', async () => {
+    const t = testDeps({ smsFails: true });
+    const out = await runTool('text_me_the_list', { caller_phone: CALLER, wants: 'the list' }, t.deps);
+
+    // A carrier rejection must not lose the customer. The request is the product.
+    expect(t.texted).toHaveLength(0);
+    expect(t.quotes).toHaveLength(1);
+    expect(out.speech).toMatch(/not go through|team/i);
+  });
+
+  it('asks for a number rather than texting nowhere', async () => {
+    const t = testDeps();
+    const out = await runTool('text_me_the_list', { caller_phone: 'unknown', wants: 'the list' }, t.deps);
+
+    expect(t.texted).toHaveLength(0);
+    expect(t.quotes).toHaveLength(0);
+    expect(out.speech).toMatch(/\?$/);
+  });
+
+  it('defaults wants rather than filing an empty request the queue cannot read', async () => {
+    const t = testDeps();
+    await runTool('text_me_the_list', { caller_phone: CALLER }, t.deps);
+    // recordQuoteRequest throws on an empty `wants`, and that throw would land
+    // mid-sentence on a live call.
+    expect(t.quotes[0].wants).toBeTruthy();
   });
 });

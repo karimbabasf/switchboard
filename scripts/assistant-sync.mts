@@ -141,9 +141,30 @@ const checks: { name: string; sent: unknown; stored: unknown }[] = [
     stored: telephony.noise_suppression,
   },
   {
+    // The one that produced two recordings and two call.recording.saved webhooks
+    // per call. It defaults to true, so "not stored" here means it is still on.
+    name: 'recording_settings.enabled',
+    sent: config.telephony_settings.recording_settings.enabled,
+    stored: ((telephony.recording_settings ?? {}) as Record<string, unknown>).enabled,
+  },
+  {
+    // Line noise interrupting the greeting is what made the agent open with
+    // "I'm not sure I caught that" before the caller had spoken.
+    name: 'disable_greeting_interruption',
+    sent: config.interruption_settings.disable_greeting_interruption,
+    stored: interruption.disable_greeting_interruption,
+  },
+  {
     name: 'dynamic_variables_webhook_url',
     sent: config.dynamic_variables_webhook_url,
     stored: got.dynamic_variables_webhook_url,
+  },
+  {
+    // A floor on the silence between the disclosure and the agent's first word,
+    // so a value Telnyx clamped or dropped is worth failing over.
+    name: 'dynamic_variables_webhook_timeout_ms',
+    sent: config.dynamic_variables_webhook_timeout_ms,
+    stored: got.dynamic_variables_webhook_timeout_ms,
   },
   {
     name: 'tools',
@@ -171,8 +192,9 @@ console.log(`  voice       ${config.voice_settings.voice}`);
 console.log(`  room tone   ${config.voice_settings.background_audio.value}`);
 console.log(`  stt         ${config.transcription.model}`);
 console.log(`  wait        ${config.interruption_settings.start_speaking_plan.wait_seconds}s`);
+console.log(`  own recording ${config.telephony_settings.recording_settings.enabled ? 'on' : 'off, ours is the only one'}`);
 console.log(`  tools       ${config.tools.map((t) => t.webhook.name).join(', ')}`);
-console.log(`  context     ${config.dynamic_variables_webhook_url}`);
+console.log(`  context     ${config.dynamic_variables_webhook_url} (${config.dynamic_variables_webhook_timeout_ms}ms)`);
 
 if (!pinned) {
   console.log(`\nPut this in .env.local so later runs update rather than search:`);

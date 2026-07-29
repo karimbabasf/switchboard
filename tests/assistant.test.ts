@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { TOOL_NAMES, assistantConfig } from '../lib/telnyx/assistant';
+import { GREETING, systemPrompt } from '../lib/agent/brief';
 
 const BASE = 'https://switchboard.example.com';
 
@@ -83,8 +84,10 @@ describe('assistant.ts: the settings that make it feel real', () => {
     }
   });
 
-  it('registers exactly the four tools the prompt tells the agent it has', () => {
+  it('registers exactly the tools the prompt tells the agent it has', () => {
     expect(cfg().tools.map((t) => t.webhook.name)).toEqual([...TOOL_NAMES]);
+    expect(TOOL_NAMES).toContain('text_me_the_list');
+    for (const name of TOOL_NAMES) expect(cfg().instructions).toContain(name);
   });
 
   it('makes every tool take caller_phone, since Telnyx sends no call identity', () => {
@@ -97,13 +100,36 @@ describe('assistant.ts: the settings that make it feel real', () => {
     }
   });
 
-  it('asks for caller context with a timeout that survives a cold start', () => {
+  it('asks for caller context with a timeout the caller could sit through', () => {
+    // This is a FLOOR on silence: the assistant says nothing until the webhook
+    // answers or this expires. It was 8000, and it was most of the ten seconds
+    // of dead air callers heard. The lookup is prewarmed at call.answered now,
+    // so being greeted as a stranger after 2.5s is the worst case, not the norm.
     expect(cfg().dynamic_variables_webhook_url).toBe(`${BASE}/api/agent/context`);
-    expect(cfg().dynamic_variables_webhook_timeout_ms).toBeGreaterThanOrEqual(5000);
+    expect(cfg().dynamic_variables_webhook_timeout_ms).toBeLessThanOrEqual(3000);
+  });
+
+  it('protects the greeting from being interrupted by line noise', () => {
+    // The first line of a real 58 second call was "I'm not sure I caught that",
+    // before the caller had spoken: the greeting was interruptible and the agent
+    // answered the noise that interrupted it.
+    expect(cfg().interruption_settings.disable_greeting_interruption).toBe(true);
+    // Everything after the greeting is still interruptible, which is the whole
+    // difference between this and a phone tree.
+    expect(cfg().interruption_settings.enable).toBe(true);
+  });
+
+  it('does not let the assistant record alongside our own record_start', () => {
+    // recording_settings.enabled DEFAULTS TO TRUE, which is why every call
+    // produced two recordings and fired call.recording.saved twice. There is no
+    // per-call override; it only exists on the stored assistant.
+    expect(cfg().telephony_settings.recording_settings.enabled).toBe(false);
+    expect(cfg().telephony_settings.noise_suppression).toBe('krisp');
   });
 
   it('carries the greeting and the prompt from the brief, not a second copy', () => {
-    expect(cfg().greeting).toContain('Akme');
+    expect(cfg().greeting).toBe(GREETING);
+    expect(cfg().instructions).toBe(systemPrompt());
     expect(cfg().instructions).toContain('escalate_to_human');
   });
 });

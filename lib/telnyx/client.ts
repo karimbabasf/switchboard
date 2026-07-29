@@ -1,4 +1,5 @@
 import { env, optionalEnv } from '../env';
+import { agentVoice } from './assistant';
 
 /**
  * Telnyx Call Control v2 commands.
@@ -18,6 +19,12 @@ const BASE = 'https://api.telnyx.com/v2';
  * maxDuration, which is what this bounds.
  */
 const REQUEST_TIMEOUT_MS = 8000;
+
+/**
+ * Telnyx's basic TTS, which every account has and which cannot be rejected for a
+ * bad voice id. Only ever reached when the configured premium voice is refused.
+ */
+const BASIC_VOICE_FALLBACK = 'female';
 
 export class TelnyxError extends Error {
   constructor(
@@ -138,16 +145,43 @@ export const telnyx = {
     post<{ result: string }>(`/calls/${callControlId}/actions/answer`),
 
   /**
-   * `voice` and `language` are optional per the API reference but sending them is
-   * safe either way, and pinning them keeps the disclosure sounding identical
-   * across calls rather than drifting with an account default.
+   * The disclosure and the voicemail prompt.
+   *
+   * `voice` is the SAME value the assistant speaks with, from agentVoice(). This
+   * used to read its own TELNYX_VOICE, defaulting to `female`, which is Telnyx's
+   * basic engine: the caller heard a robot read the legal notice and then a
+   * different, human-sounding voice say hello, three seconds apart. The speak
+   * command takes the premium `<Provider>.<Model>.<VoiceId>` form as well as the
+   * basic male/female words, so one voice covers both.
+   *
+   * `language` only applies to the basic voices and to `alice`; it is ignored
+   * when a provider-prefixed voice is named. Kept because it costs nothing and
+   * is correct if the voice is ever set back to a basic one.
    */
-  speak: (callControlId: string, params: SpeakParams) =>
-    post<{ result: string }>(`/calls/${callControlId}/actions/speak`, {
-      ...params,
-      voice: optionalEnv('TELNYX_VOICE', 'female'),
-      language: optionalEnv('TELNYX_LANGUAGE', 'en-US'),
-    }),
+  /**
+   * The disclosure is spoken in the assistant's own voice so the caller hears one
+   * person rather than a robot reading a legal notice followed by somebody else.
+   *
+   * The fallback is not defensive padding, it is the only thing standing between
+   * a bad voice id and a dead phone line. `call.speak.ended` is what triggers
+   * `record_start` and the agent handoff, so a speak that never succeeds means
+   * that event never fires: the caller sits in silence, the retry throws again,
+   * and the call is stuck until they hang up. A 4xx here is almost always the
+   * voice id, so retrying once with the basic voice trades a worse-sounding
+   * disclosure for a call that still works. Anything 5xx or already-hung-up is
+   * rethrown, because a retry cannot help either one.
+   */
+  speak: async (callControlId: string, params: SpeakParams) => {
+    const path = `/calls/${callControlId}/actions/speak`;
+    const body = { ...params, language: optionalEnv('TELNYX_LANGUAGE', 'en-US') };
+    try {
+      return await post<{ result: string }>(path, { ...body, voice: agentVoice() });
+    } catch (err) {
+      if (!(err instanceof TelnyxError) || err.status >= 500 || err.isCallGone) throw err;
+      console.error(`[telnyx] speak rejected voice "${agentVoice()}", retrying basic: ${err.detail}`);
+      return post<{ result: string }>(path, { ...body, voice: BASIC_VOICE_FALLBACK });
+    }
+  },
 
   recordStart: (callControlId: string, params: RecordStartParams) =>
     post<{ result: string }>(`/calls/${callControlId}/actions/record_start`, params),

@@ -9,9 +9,11 @@ import {
  * Telnyx dynamic-variables webhook: who is calling, answered before hello.
  *
  * Called once at the start of every conversation, with a timeout Telnyx enforces
- * (`dynamic_variables_webhook_timeout_ms`, set to 8s on our assistant). Unlike
- * the Call Control webhook there is nothing to defer to `after`: the response
- * body IS the work, so it has to be fast rather than merely prompt.
+ * (`dynamic_variables_webhook_timeout_ms`, 2.5s on our assistant) during which
+ * the caller hears nothing at all. Unlike the Call Control webhook there is
+ * nothing to defer to `after`: the response body IS the work, so it has to be
+ * fast rather than merely prompt. `callerContext` normally answers this from the
+ * prewarm started back at `call.answered`, so the usual cost here is a Map read.
  *
  * Signed with the same Ed25519 scheme as every other Telnyx webhook, over
  * `${timestamp}|${rawBody}`, so the existing verifier applies unchanged.

@@ -1,12 +1,12 @@
 /**
- * The four things the agent can actually do.
+ * The five things the agent can actually do.
  *
  * Every tool returns one sentence for the agent to say, never a JSON blob for
  * it to narrate. A model handed `{"status":"PAID","balance":0}` reads the field
  * names out loud eventually; a model handed "Invoice ten forty three is paid"
  * cannot.
  *
- * Two rules hold across all four:
+ * Two rules hold across all five:
  *  - NO MONEY LEAVES THIS FILE. Akme quotes no prices by policy, and the
  *    reliable way to keep a number out of the agent's mouth is to keep it out
  *    of the string it is given.
@@ -16,6 +16,7 @@
  */
 import { startWave, supabaseStore, type VoiceStore } from '../telnyx/voice';
 import { telnyx, type TelnyxCommands } from '../telnyx/client';
+import { sendSms } from '../telnyx/sms';
 import {
   findInvoiceByDocNumber,
   identifyCaller,
@@ -23,7 +24,9 @@ import {
   type CallerIdentity,
   type OpenInvoice,
 } from '../qbo/lookup';
-import { resolveTopic } from '../telegram/topics';
+import { learnContactName, resolveTopic } from '../telegram/topics';
+import { matchTemplate, renderTemplate } from './templates';
+import { recordQuoteRequest, type NewQuoteRequest, type QuoteRequestRow } from '../quote-requests';
 import { db } from '../db';
 import { toE164 } from '../env';
 import type { AkmeOrder } from '../types';
@@ -37,6 +40,15 @@ export interface ToolDeps {
   recentOrders(customerId: string): Promise<AkmeOrder[]>;
   /** Puts a message in front of a human, in the caller's Telegram topic. */
   postToTeam(phone: string, text: string): Promise<void>;
+  /** The one SMS sender, in lib/telnyx/sms.ts. There is deliberately no second one. */
+  sendText(phone: string, body: string): Promise<void>;
+  /** The work item a human prices. Owned by lib/quote-requests.ts. */
+  recordQuote(input: NewQuoteRequest): Promise<QuoteRequestRow>;
+  /**
+   * Records a name the caller gave us, which also retitles their Telegram topic.
+   * Optional so a test can leave it out; production always supplies it.
+   */
+  learnName?(phone: string, displayName: string): Promise<void>;
 }
 
 export interface ToolResult {
@@ -57,6 +69,11 @@ export function toolDeps(): ToolDeps {
         .insert({ thread_id: threadId, kind: 'text', payload: { text } });
       if (error) throw new Error(`postToTeam failed: ${error.message}`);
     },
+    sendText: async (phone, body) => {
+      await sendSms(phone, body);
+    },
+    recordQuote: recordQuoteRequest,
+    learnName: learnContactName,
   };
 }
 
@@ -83,6 +100,8 @@ export async function runTool(name: ToolName, args: Args, deps: ToolDeps): Promi
       return lookupInvoice(args, deps);
     case 'check_order':
       return checkOrder(args, deps);
+    case 'text_me_the_list':
+      return textTheList(args, deps);
     case 'take_message':
       return takeMessage(args, deps);
   }
@@ -162,6 +181,45 @@ async function checkOrder(args: Args, deps: ToolDeps): Promise<ToolResult> {
   return { speech: `Your most recent order is ${ref}, currently ${order.status}${due}.` };
 }
 
+/**
+ * The whole point of the phone line, in one tool.
+ *
+ * The agent may not price anything, so the useful thing it can do on a pricing
+ * call is put the list in the caller's hand and the request on a human's queue.
+ * Both, in one turn, while they are still on the phone.
+ *
+ * The message body is `renderTemplate('catalogue')` and nothing else. That
+ * template is the reviewed copy of what we stock, it already ends with how to
+ * get a quote, and the last time this codebase kept a second copy of the product
+ * list it shipped four products Akme does not sell.
+ */
+async function textTheList(args: Args, deps: ToolDeps): Promise<ToolResult> {
+  const phone = callerPhone(args);
+  if (!phone) return { speech: 'I do not have a number I can text. What is the best mobile for you?' };
+
+  const wants = str(args, 'wants') || 'the full product list';
+  const name = str(args, 'caller_name') || null;
+
+  let texted = true;
+  try {
+    await deps.sendText(phone, renderTemplate('catalogue'));
+  } catch (err) {
+    // The request is what matters and it is still recorded below. Losing it
+    // because a carrier rejected one message would be the worse failure, and
+    // the sentence at the end tells the caller the truth either way.
+    texted = false;
+    console.error(`[agent] text_me_the_list send to ${phone} failed:`, err);
+  }
+
+  await deps.recordQuote({ phone, source: 'call', wants, callerName: name });
+
+  return {
+    speech: texted
+      ? 'Sent, that should be on your phone now. The team will come back to you with pricing.'
+      : 'That text would not go through, but I have put your request in front of the team and they will come back to you.',
+  };
+}
+
 async function takeMessage(args: Args, deps: ToolDeps): Promise<ToolResult> {
   const phone = callerPhone(args) ?? str(args, 'caller_phone');
   const message = str(args, 'message');
@@ -179,6 +237,37 @@ async function takeMessage(args: Args, deps: ToolDeps): Promise<ToolResult> {
   ].filter((l) => l !== null);
 
   await deps.postToTeam(phone || callback, lines.join('\n'));
+
+  // A caller who says their name is the only way a contact ever stops being a
+  // bare phone number: nothing else in this system writes display_name. Recorded
+  // best effort, because a failed rename must not cost the caller their message.
+  if (name && phone) {
+    try {
+      await (deps.learnName ?? learnContactName)(phone, name);
+    } catch (err) {
+      console.error(`[agent] could not record the name ${JSON.stringify(name)} for ${phone}:`, err);
+    }
+  }
+
+  // A message that is plainly a pricing question is a quote request, and it has
+  // to land on the quote queue as well as in the caller's topic, or the only
+  // record of it is a sentence in a thread nobody works from. `matchTemplate` is
+  // the same matcher the SMS side uses to decide the same thing, deliberately:
+  // it under-matches, and a request that misses is still filed as a message.
+  if (matchTemplate(message) === 'quote') {
+    try {
+      await deps.recordQuote({
+        phone: phone || callback,
+        source: 'call',
+        wants: message,
+        callerName: name || null,
+      });
+    } catch (err) {
+      // The message is already in front of a human. A failed second write must
+      // not take the tool call down mid-sentence.
+      console.error(`[agent] take_message quote request for ${phone || callback} failed:`, err);
+    }
+  }
 
   const readback = callback ? ` We will call you back on ${callback}.` : '';
   return { speech: `I have got that down and passed it to the team.${readback}` };

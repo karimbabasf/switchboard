@@ -1,7 +1,8 @@
 import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { decodeClientState } from '../lib/telnyx/client';
+import { decodeClientState, telnyx } from '../lib/telnyx/client';
+import { agentVoice, assistantConfig } from '../lib/telnyx/assistant';
 import type {
   DialParams,
   RecordStartParams,
@@ -303,7 +304,10 @@ class FakeStore implements VoiceStore {
     if (!c || c.ended_at) return;
     c.ended_at = args.endedAt;
     c.duration_sec = Math.max(0, Math.round((Date.parse(args.endedAt) - Date.parse(c.started_at)) / 1000));
-    c.was_answered = args.wasAnswered;
+    // Mirrors the contract on VoiceStore.finishCall and the `was_answered ||
+    // row.was_answered` in supabaseStore: a stage that is not 'bridged' does not
+    // un-answer a call the agent already picked up.
+    c.was_answered = args.wasAnswered || c.was_answered;
     if (!args.recordingStarted && c.status === 'new') {
       c.status = 'failed';
       c.last_error = 'call ended before recording started, nothing to transcribe';
@@ -346,13 +350,17 @@ function responder(id: string, phone: string, ring_order: number): Responder {
  * echoing client_state back the way Telnyx does: whatever a command set on a leg
  * comes back on that leg's later webhooks.
  */
-async function ringResponders(store: FakeStore, fake: ReturnType<typeof fakeCommands>) {
-  const deps = { store, commands: fake.commands };
+async function ringResponders(
+  store: FakeStore,
+  fake: ReturnType<typeof fakeCommands>,
+  prewarm: (phone: string) => void = () => {},
+) {
+  const deps = { store, commands: fake.commands, prewarm };
   await processTelnyxEvent(
     webhook('call.initiated', { from: '+14155550123', to: '+14155559999', direction: 'incoming', state: 'parked' }),
     deps,
   );
-  await processTelnyxEvent(webhook('call.answered', {}), deps);
+  await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), deps);
 
   const disclosure = fake.of('speak').at(-1)!.params as SpeakParams;
   await processTelnyxEvent(webhook('call.speak.ended', { client_state: disclosure.client_state }), deps);
@@ -768,5 +776,163 @@ describe('handing the caller to the AI agent', () => {
     expect(fake.of('startAssistant')).toHaveLength(0);
     expect(fake.of('dial')).toHaveLength(1);
     expect(store.flows.get('leg-a')).toMatchObject({ stage: 'ringing' });
+  });
+
+  it('counts an agent-handled call as answered, which it never used to', async () => {
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    const deps = await ringResponders(store, fake);
+
+    // The agent has the caller and the caller rings off from the agent, so the
+    // flow never reaches 'bridged'. Every one of these read as unanswered, and
+    // any report built on was_answered was wrong about every AI call.
+    await processTelnyxEvent(
+      webhook('call.hangup', { hangup_cause: 'normal_clearing' }, { occurredAt: '2026-07-27T18:00:58.000Z' }),
+      deps,
+    );
+
+    expect([...store.calls.values()][0]).toMatchObject({
+      was_answered: true,
+      answered_at: '2026-07-27T18:00:00.000Z',
+      duration_sec: 58,
+    });
+  });
+
+  it('keeps was_answered true when the agent escalates and nobody picks up', async () => {
+    const store = new FakeStore();
+    store.responders = [responder('r1', '+14155550001', 0)];
+    const fake = fakeCommands();
+    const deps = await ringResponders(store, fake);
+
+    // Agent answered, then handed off to a ring group that timed out into
+    // voicemail. The caller still spoke to somebody.
+    await store.advanceStage('leg-a', ['assistant'], 'voicemail');
+    await processTelnyxEvent(webhook('call.hangup', { hangup_cause: 'normal_clearing' }), deps);
+
+    expect([...store.calls.values()][0].was_answered).toBe(true);
+  });
+});
+
+describe('the silence between the disclosure and the agent', () => {
+  const ASSISTANT_ID = 'assistant-0000-1111-2222-333344445555';
+
+  beforeEach(() => {
+    process.env.TELNYX_ASSISTANT_ID = ASSISTANT_ID;
+  });
+
+  afterEach(() => {
+    delete process.env.TELNYX_ASSISTANT_ID;
+  });
+
+  it('warms the caller lookup before the disclosure plays, not after it', async () => {
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    const warmed: { phone: string; speaksSoFar: number }[] = [];
+
+    await ringResponders(store, fake, (phone) =>
+      warmed.push({ phone, speaksSoFar: fake.of('speak').length }),
+    );
+
+    // The disclosure is several seconds the caller is already spending. The
+    // lookup the assistant blocks on has to be running through them, or the
+    // dynamic-variables webhook pays for a database round trip in dead air.
+    expect(warmed).toEqual([{ phone: '+14155550123', speaksSoFar: 0 }]);
+  });
+
+  it(
+    'issues record_start and ai_assistant_start together instead of one after the other',
+    { timeout: 3000 },
+    async () => {
+      const store = new FakeStore();
+      const fake = fakeCommands();
+
+      // record_start does not resolve until ai_assistant_start has been ISSUED.
+      // Serial code cannot get past this: it is still awaiting the recording when
+      // the thing it is waiting on is the command it has not sent yet. Concurrent
+      // code sends both, then collects both.
+      let assistantIssued!: () => void;
+      const assistantWasIssued = new Promise<void>((resolve) => {
+        assistantIssued = resolve;
+      });
+
+      const commands: TelnyxCommands = {
+        ...fake.commands,
+        recordStart: async (id, params) => {
+          const out = fake.commands.recordStart(id, params);
+          await assistantWasIssued;
+          return out;
+        },
+        startAssistant: async (id, params) => {
+          const out = fake.commands.startAssistant(id, params);
+          assistantIssued();
+          return out;
+        },
+      };
+
+      const deps = { store, commands, prewarm: () => {} };
+      await processTelnyxEvent(webhook('call.initiated', { from: '+14155550123' }), deps);
+      await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), deps);
+      const disclosure = fake.of('speak').at(-1)!.params as SpeakParams;
+      await processTelnyxEvent(webhook('call.speak.ended', { client_state: disclosure.client_state }), deps);
+
+      expect(fake.of('recordStart')).toHaveLength(1);
+      expect(fake.of('startAssistant')).toHaveLength(1);
+      expect(store.flows.get('leg-a')).toMatchObject({ stage: 'assistant', recording_started: true });
+      // Still issued in this order, so the agent's first sentence is on tape.
+      const order = fake.issued.map((i) => i.cmd);
+      expect(order.indexOf('recordStart')).toBeLessThan(order.indexOf('startAssistant'));
+    },
+  );
+
+  it('still hands the caller to the agent when record_start fails', async () => {
+    const store = new FakeStore();
+    store.responders = [responder('r1', '+14155550001', 0)];
+    const fake = fakeCommands({ recordStart: true });
+    await ringResponders(store, fake);
+
+    expect(fake.of('startAssistant')).toHaveLength(1);
+    expect(fake.of('dial')).toHaveLength(0);
+    expect(store.flows.get('leg-a')).toMatchObject({ stage: 'assistant', recording_started: false });
+  });
+
+  it('still falls back to the ring group when the assistant will not start', async () => {
+    // The concurrent issue must not have weakened this: the fallback is the only
+    // thing between a dead agent and an open line with nobody on it.
+    const store = new FakeStore();
+    store.responders = [responder('r1', '+14155550001', 0)];
+    const fake = fakeCommands({ startAssistant: true });
+    await ringResponders(store, fake);
+
+    expect(fake.of('dial')).toHaveLength(1);
+    expect(store.flows.get('leg-a')).toMatchObject({ stage: 'ringing', wave: 0 });
+    expect([...store.calls.values()][0].was_answered).toBe(false);
+  });
+});
+
+describe('one voice, start to finish', () => {
+  it('speaks the disclosure in the same voice the assistant answers in', async () => {
+    // Bug A: `speak` had its own TELNYX_VOICE defaulting to "female", Telnyx's
+    // basic engine, while the assistant ran neural Telnyx.Bayan.Amanda. The
+    // caller heard a robot read the legal notice and then a person say hello.
+    process.env.TELNYX_API_KEY = 'test-api-key';
+    const sent: { url: string; body: Record<string, unknown> }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      sent.push({ url: String(url), body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ data: { result: 'ok' } }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await telnyx.speak('leg-a', { payload: 'This call is recorded.' });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    const assistant = assistantConfig({ publicBaseUrl: 'https://x.example', toolSecret: 's' });
+    expect(sent[0].url).toContain('/calls/leg-a/actions/speak');
+    expect(sent[0].body.voice).toBe(assistant.voice_settings.voice);
+    expect(sent[0].body.voice).toBe(agentVoice());
+    // Not a basic voice word. Those are the ones that sound like a phone tree.
+    expect(sent[0].body.voice).not.toMatch(/^(male|female|man|woman)$/i);
   });
 });

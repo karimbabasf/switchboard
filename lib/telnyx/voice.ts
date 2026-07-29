@@ -1,4 +1,5 @@
 import { db, unwrap } from '../db';
+import { prewarmCallerContext } from '../agent/context';
 import { env, optionalEnv, toE164 } from '../env';
 import type { Responder } from '../types';
 import {
@@ -209,6 +210,12 @@ export interface VoiceStore {
   killRingingLegs(callId: string): Promise<CallLeg[]>;
 
   markCallAnswered(callId: string, answeredAt: string): Promise<void>;
+  /**
+   * `wasAnswered` here means "the stage this call ended in counts as answered".
+   * Implementations MUST NOT use it to clear a call already marked answered by
+   * markCallAnswered: an agent that handled a caller and then escalated into a
+   * ring group nobody picked up still answered the call.
+   */
   finishCall(args: {
     callId: string;
     endedAt: string;
@@ -407,7 +414,7 @@ export function supabaseStore(): VoiceStore {
     },
 
     async finishCall({ callId, endedAt, wasAnswered, recordingStarted }) {
-      const row = await db().from('calls').select('started_at, ended_at').eq('id', callId).maybeSingle();
+      const row = await db().from('calls').select('started_at, ended_at, was_answered').eq('id', callId).maybeSingle();
       if (row.error) throw new Error(`finishCall read: ${row.error.message}`);
       if (!row.data || row.data.ended_at) return; // already closed by an earlier delivery
 
@@ -419,7 +426,14 @@ export function supabaseStore(): VoiceStore {
 
       await db()
         .from('calls')
-        .update({ ended_at: endedAt, duration_sec: duration, was_answered: wasAnswered })
+        .update({
+          ended_at: endedAt,
+          duration_sec: duration,
+          // Never downgrades. markCallAnswered is only ever called by a responder
+          // bridging or by the agent taking the call, and both of those are the
+          // flag's whole meaning, so a later stage cannot take it back.
+          was_answered: wasAnswered || row.data.was_answered === true,
+        })
         .eq('id', callId)
         .is('ended_at', null);
 
@@ -478,10 +492,12 @@ async function matchAkmeCustomer(phone: string): Promise<string | null> {
 export interface VoiceDeps {
   store: VoiceStore;
   commands: TelnyxCommands;
+  /** Warms the caller lookup the assistant is about to block on. Injectable for tests. */
+  prewarm?: (phone: string) => void;
 }
 
 export function voiceDeps(): VoiceDeps {
-  return { store: supabaseStore(), commands: telnyx };
+  return { store: supabaseStore(), commands: telnyx, prewarm: prewarmCallerContext };
 }
 
 /**
@@ -548,6 +564,14 @@ async function onAnswered(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> 
 
   const flow = await deps.store.advanceStage(p.call_control_id, ['initiated'], 'answered');
   if (!flow) return;
+
+  // Started before the disclosure, not after it. In a few seconds the assistant
+  // will hold the caller in silence waiting on /api/agent/context; the disclosure
+  // playing right now is several seconds of that wait we can spend in advance.
+  // Fire and forget on purpose: nothing below depends on it, and a lookup that
+  // fails just means the webhook does its own, exactly as it did before.
+  const caller = toE164(p.from ?? '');
+  if (caller) (deps.prewarm ?? prewarmCallerContext)(caller);
 
   await deps.commands.speak(p.call_control_id, {
     payload: env('RECORDING_DISCLOSURE'),
@@ -621,44 +645,70 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
       });
   if (!flow) return;
 
+  // BOTH COMMANDS ARE ISSUED BEFORE EITHER IS AWAITED. They used to run back to
+  // back, which put a whole Telnyx round trip of silence between the disclosure
+  // ending and the agent existing, for no reason: neither command needs the
+  // other's result. record_start still goes out FIRST, so the agent's opening
+  // line is on tape and the transcript the Telegram card is built from does not
+  // start halfway through the conversation.
+  //
   // Disclosure is done, so consent is on the recording from its first frame.
   // Dual channel puts each party on its own track, which is what lets the
-  // transcript be attributed without diarization. This runs before the agent
-  // starts, or the agent's first sentence is missing from the transcript the
-  // Telegram card is built from.
-  try {
-    await deps.commands.recordStart(p.call_control_id, {
+  // transcript be attributed without diarization.
+  //
+  // Both are settled into a result rather than left as rejectable promises. A
+  // rejection with no handler attached yet, during the await below, is an
+  // unhandled rejection, and this runs inside `after` where that kills the
+  // whole event rather than the one command.
+  const recording = deps.commands
+    .recordStart(p.call_control_id, {
       channels: 'dual',
       format: 'mp3',
       max_length: RECORDING_MAX_SECONDS,
-    });
+    })
+    .then(
+      () => ({ ok: true }) as const,
+      (error: unknown) => ({ ok: false, error }) as const,
+    );
+
+  const assistantStart = assistantId
+    ? deps.commands.startAssistant(p.call_control_id, { assistant: { id: assistantId } }).then(
+        (data) => ({ ok: true, data }) as const,
+        (error: unknown) => ({ ok: false, error }) as const,
+      )
+    : null;
+
+  const recorded = await recording;
+  if (recorded.ok) {
     await deps.store.markRecordingStarted(p.call_control_id);
-  } catch (err) {
+  } else {
     // A call that rings without a recording still connects the customer. A throw
     // here would strand them instead, so this is logged and the flow continues.
-    console.error(`[voice] record_start failed for ${p.call_control_id}: ${describe(err)}`);
+    console.error(`[voice] record_start failed for ${p.call_control_id}: ${describe(recorded.error)}`);
   }
 
-  if (assistantId) {
-    try {
-      const started = await deps.commands.startAssistant(p.call_control_id, {
-        assistant: { id: assistantId },
-      });
-      if (started?.conversation_id) {
-        await deps.store.markConversationStarted(p.call_control_id, started.conversation_id);
+  if (assistantStart) {
+    const started = await assistantStart;
+    if (started.ok) {
+      if (started.data?.conversation_id) {
+        await deps.store.markConversationStarted(p.call_control_id, started.data.conversation_id);
       }
+      // The agent has the caller. That is a call somebody answered, and without
+      // this every agent-handled call closed out reading as unanswered, because
+      // was_answered was only ever set by a responder bridging.
+      await deps.store.markCallAnswered(flow.call_id, event.data.occurred_at);
       return;
-    } catch (err) {
-      // A caller who reaches a dead agent must reach a human. Falling through to
-      // the ring group is strictly better than a silent open line, and this is
-      // the only path by which the old behaviour still runs on a normal call.
-      console.error(`[voice] ai_assistant_start failed for ${p.call_control_id}: ${describe(err)}`);
-      const fellBack = await deps.store.advanceStage(p.call_control_id, ['assistant'], 'ringing', {
-        wave: first?.ring_order ?? null,
-      });
-      if (!fellBack) return;
-      flow = fellBack;
     }
+
+    // A caller who reaches a dead agent must reach a human. Falling through to
+    // the ring group is strictly better than a silent open line, and this is
+    // the only path by which the old behaviour still runs on a normal call.
+    console.error(`[voice] ai_assistant_start failed for ${p.call_control_id}: ${describe(started.error)}`);
+    const fellBack = await deps.store.advanceStage(p.call_control_id, ['assistant'], 'ringing', {
+      wave: first?.ring_order ?? null,
+    });
+    if (!fellBack) return;
+    flow = fellBack;
   }
 
   if (!first) {
