@@ -3,6 +3,7 @@ import { env, assertE164, toE164 } from '../env';
 import { resolveTopic } from '../telegram/topics';
 import { inboundSmsCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
 import { draftFallback, draftSmsReply, smsAgentDeps } from '../agent/sms';
+import { recordQuoteRequest } from '../quote-requests';
 import type { Contact, Message, MediaItem } from '../types';
 
 /**
@@ -146,6 +147,7 @@ export type AgentReply = (
   body: string | null,
   threadId: number,
   hasMedia: boolean,
+  displayName: string | null,
 ) => Promise<void>;
 
 export interface SmsEventDeps {
@@ -192,7 +194,7 @@ async function handleMessageReceived(
     });
   if (outboxError) throw new Error(`handleMessageReceived outbox: ${outboxError.message}`);
 
-  await deps.reply(contact.phone, payload.text ?? null, threadId, media.length > 0);
+  await deps.reply(contact.phone, payload.text ?? null, threadId, media.length > 0, contact.display_name);
 }
 
 /**
@@ -208,6 +210,7 @@ async function replyWithAgent(
   body: string | null,
   threadId: number,
   hasMedia: boolean,
+  displayName: string | null,
 ): Promise<void> {
   try {
     // An MMS is a picture of something, usually a damaged pallet or a purchase
@@ -218,6 +221,22 @@ async function replyWithAgent(
       : await draftSmsReply(body, smsAgentDeps());
 
     if (draft.intent === 'opt_out') return;
+
+    // Covers both triggers in one check: draftSmsReply maps the `quote`
+    // template's hit to intent 'pricing', the same value the model uses for a
+    // pricing question, so a template match and a model classification land
+    // here identically. Recording the work item and replying to the customer
+    // are independent outcomes, so a failure here must not skip the reply below.
+    if (draft.intent === 'pricing') {
+      const wants = body?.trim();
+      if (wants) {
+        try {
+          await recordQuoteRequest({ phone, source: 'sms', wants, callerName: displayName });
+        } catch (err) {
+          console.error(`[sms-agent] recordQuoteRequest for ${phone} failed:`, err);
+        }
+      }
+    }
 
     if (draft.autoSend) {
       await sendSms(phone, draft.reply);

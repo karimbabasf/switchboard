@@ -33,26 +33,42 @@ vi.mock('../lib/db', () => ({ db: vi.fn() }));
 vi.mock('../lib/telegram/topics', () => ({ resolveTopic: vi.fn(async () => 42) }));
 vi.mock('../lib/telegram/cards', () => ({
   inboundSmsCard: vi.fn((input: { body: string | null }) => ({ text: input.body ?? '(empty)' })),
+  smsAutoSentCard: vi.fn((input: { intent: string; reply: string }) => ({
+    text: `auto:${input.intent}:${input.reply}`,
+  })),
+  smsDraftCard: vi.fn(async (input: { phone: string; intent: string; reply: string; reason: string }) => ({
+    text: `draft:${input.intent}:${input.reply}:${input.reason}`,
+  })),
 }));
+// recordQuoteRequest has its own owner and its own concerns (the DB row, the
+// Telegram card, surviving Telegram being down); mocked at the boundary here
+// so this file only proves the SMS pipeline calls it, with the right
+// arguments, not what it does with them.
+vi.mock('../lib/quote-requests', () => ({ recordQuoteRequest: vi.fn(async () => ({ id: 'qr_1' })) }));
 
 import { db } from '../lib/db';
 import { resolveTopic } from '../lib/telegram/topics';
+import { recordQuoteRequest } from '../lib/quote-requests';
 import {
   handleTelnyxSmsEvent,
   sendSms,
+  smsEventDeps,
   type SmsEventDeps,
   type TelnyxWebhookBody,
 } from '../lib/telnyx/sms';
 
 const mockedDb = vi.mocked(db);
+const mockedRecordQuoteRequest = vi.mocked(recordQuoteRequest);
 
 /**
  * These tests are about claiming events, resolving contacts and routing topics.
  * The SMS agent runs after all of that and talks to a model, so it is stubbed
- * out here and covered on its own in tests/sms-agent.test.ts.
+ * out here and covered on its own in tests/sms-agent.test.ts. A vi.fn(), not a
+ * bare arrow, so the handful of tests that care can assert what it was called
+ * with (namely: did the resolved contact's display name make it through).
  */
 function noAgent(): SmsEventDeps {
-  return { reply: async () => {} };
+  return { reply: vi.fn(async () => {}) };
 }
 
 // Shared across a test's whole call sequence so `fromCalls()` sees every
@@ -80,6 +96,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   mockedDb.mockReset();
+  mockedRecordQuoteRequest.mockClear();
 });
 
 function inboundEvent(overrides: Partial<TelnyxWebhookBody['data']['payload']> = {}): TelnyxWebhookBody {
@@ -204,9 +221,13 @@ describe('handleTelnyxSmsEvent: inbound contact resolution', () => {
       makeChain(ok(null)), // outbox insert
     ]);
 
-    await handleTelnyxSmsEvent(inboundEvent(), noAgent());
+    const deps = noAgent();
+    await handleTelnyxSmsEvent(inboundEvent(), deps);
 
     expect(fromCalls()).toEqual(['telnyx_events', 'contacts', 'messages', 'outbox']);
+    // The contact's known display name has to reach replyWithAgent, or a
+    // repeat texter's quote request would file under their phone number alone.
+    expect(deps.reply).toHaveBeenCalledWith('+14155550111', 'hey', 42, false, 'Known Caller');
   });
 });
 
@@ -297,5 +318,99 @@ describe('sendSms: outbound', () => {
     await sendSms('+14155550111', 'pic', [{ url: 'https://example.com/a.jpg', content_type: 'image/jpeg' }]);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('replyWithAgent (via smsEventDeps): a pricing text becomes a work item', () => {
+  const contact = {
+    phone: '+14155550111',
+    display_name: null,
+    customer_id: null,
+    telegram_topic_id: 42,
+    topic_created_at: 'now',
+    created_at: 'now',
+    updated_at: 'now',
+  };
+
+  /** contacts(select, found) -> messages(insert) -> messages(update): the same shape sendSms's own tests use above. */
+  function autoSendChains(providerId: string) {
+    const insertedRow = {
+      id: 'msg_row_x',
+      contact_phone: contact.phone,
+      direction: 'outbound',
+      body: 'reply body',
+      media: [],
+      provider_id: null,
+      provider_status: null,
+      telegram_message_id: null,
+      created_at: 'now',
+    };
+    return [
+      makeChain(ok(contact)), // resolveContact inside sendSms
+      makeChain(ok(insertedRow)), // messages insert
+      makeChain(ok({ ...insertedRow, provider_id: providerId, provider_status: 'sent' })), // messages update
+      makeChain(ok(null)), // outbox insert: smsAutoSentCard
+    ];
+  }
+
+  it('a quote-template match auto-sends and records the request in the customer\'s own words', async () => {
+    queueFrom(autoSendChains('telnyx_a'));
+    vi.mocked(fetch).mockImplementation(
+      async () => new Response(JSON.stringify({ data: { id: 'telnyx_a' } }), { status: 200 }),
+    );
+
+    await smsEventDeps().reply(contact.phone, 'how much for a pallet of tape', 42, false, 'Jane Doe');
+
+    expect(fromCalls()).toEqual(['contacts', 'messages', 'messages', 'outbox']); // the auto-send path ran for real
+    expect(mockedRecordQuoteRequest).toHaveBeenCalledWith({
+      phone: contact.phone,
+      source: 'sms',
+      wants: 'how much for a pallet of tape',
+      callerName: 'Jane Doe',
+    });
+  });
+
+  it('a model pricing classification records the CUSTOMER\'s words, not the drafted reply', async () => {
+    vi.stubEnv('NEAR_AI_API_KEY', 'test-key');
+    const nearAiResponse = {
+      choices: [
+        {
+          message: {
+            tool_calls: [
+              {
+                function: {
+                  name: 'draft_sms_reply',
+                  arguments: JSON.stringify({ intent: 'pricing', reply: 'I will get a quote over to you.' }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify(nearAiResponse), { status: 200 }));
+    queueFrom([makeChain(ok(null))]); // outbox insert: smsDraftCard. autoSend is false, so nothing else runs.
+
+    const inbound = 'I need forty cases of tape for a job next month, what would that run me';
+    await smsEventDeps().reply(contact.phone, inbound, 42, false, null);
+
+    expect(fromCalls()).toEqual(['outbox']); // never reaches sendSms or Telnyx
+    expect(mockedRecordQuoteRequest).toHaveBeenCalledWith({
+      phone: contact.phone,
+      source: 'sms',
+      wants: inbound, // the customer's own words, never draft.reply
+      callerName: null,
+    });
+  });
+
+  it('does not record a quote request for an hours template match', async () => {
+    queueFrom(autoSendChains('telnyx_b'));
+    vi.mocked(fetch).mockImplementation(
+      async () => new Response(JSON.stringify({ data: { id: 'telnyx_b' } }), { status: 200 }),
+    );
+
+    await smsEventDeps().reply(contact.phone, 'what are your hours', 42, false, null);
+
+    expect(mockedRecordQuoteRequest).not.toHaveBeenCalled();
   });
 });

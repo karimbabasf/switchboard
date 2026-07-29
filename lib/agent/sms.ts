@@ -14,6 +14,11 @@
  * Anything not on the allowlist becomes a Telegram card with a Send button, so
  * the slow path is still one tap rather than retyping the message.
  *
+ * A fixed set of questions never reaches the model at all: lib/agent/templates.ts
+ * matches them first and returns a human-reviewed answer that always auto-sends,
+ * on its own rule rather than the allowlist below. That is deliberate, not a
+ * loophole in it; see that file's header for why.
+ *
  * Runs on NEAR AI Cloud, the standing default for every LLM call, same endpoint
  * and model as the call summariser. Latency is free here: nobody is holding a
  * phone to their ear waiting for it.
@@ -21,6 +26,8 @@
 
 import { env, optionalEnv } from '../env';
 import { BUSINESS } from './brief';
+import { matchTemplate, renderTemplate, nonGsm7 } from './templates';
+import type { TemplateKey } from './templates';
 
 const TOOL_NAME = 'draft_sms_reply';
 const TIMEOUT_MS = 20_000;
@@ -53,6 +60,23 @@ const AUTO_SEND: ReadonlySet<SmsIntent> = new Set<SmsIntent>([
   'order_status',
   'acknowledge',
 ]);
+
+/**
+ * What SmsIntent a template answers as. A caller downstream (lib/telnyx/sms.ts)
+ * checks `draft.intent` and never has to know whether the draft came from a
+ * template or the model: `quote` lands on 'pricing' specifically so "the quote
+ * template matched, or the model classified pricing" collapses into the one
+ * `=== 'pricing'` check. `contact` has no real match among the model's own
+ * intents, so it takes 'other'; that is safe only here, because the template
+ * branch below sets autoSend directly and never consults AUTO_SEND the way a
+ * model's "other" classification would.
+ */
+const TEMPLATE_INTENT: Readonly<Record<TemplateKey, SmsIntent>> = Object.freeze({
+  quote: 'pricing',
+  hours: 'hours',
+  catalogue: 'products',
+  contact: 'other',
+});
 
 /**
  * Guards over the DRAFTED TEXT, not the intent. A reply classified as "products"
@@ -105,7 +129,8 @@ const DRAFT_TOOL = {
         },
         reply: {
           type: 'string',
-          description: 'The reply to send, under 320 characters, plain text, no emoji.',
+          description:
+            'The reply to send: one or two short sentences, under 320 characters. Plain text: no emoji, no greeting, no signature, no em dash, no en dash.',
         },
       },
       required: ['intent', 'reply'],
@@ -126,7 +151,7 @@ HOURS
 ${BUSINESS.hours}. ${BUSINESS.fulfilment}
 
 HOW TO WRITE
-One or two sentences. Plain text, no emoji, no greeting block, no signature. Write the way a person at a supply counter texts back: direct and warm, not formal.
+One sentence. Two at the most. Plain text: no emoji, no greeting, no signature. Never an em dash or an en dash, a comma or a colon or parentheses instead. Write the way a person at a supply counter texts back: direct and warm, not formal.
 
 WHAT YOU MAY NEVER WRITE
 - Never a price, a rate, a discount, or a total. Pricing goes out in a written quote from the team.
@@ -206,6 +231,32 @@ export function draftFallback(reason: string): SmsDraft {
   };
 }
 
+/**
+ * GSM 03.38 has no curly quotes, no em or en dash, and no ellipsis character,
+ * and the model is told to write plain text and reliably does not. Each of
+ * those gets a same-meaning ASCII stand-in: an em or en dash becomes a comma,
+ * Karim's own standing replacement for it. Emoji and anything else outside the
+ * alphabet have no safe stand-in, so whatever nonGsm7 still flags after that is
+ * dropped outright. The result is always inside the 160-character single-segment
+ * alphabet, never the 70-character one a stray character silently drops it into.
+ * Built from character codes, not literal punctuation, so the source file
+ * itself never contains the characters this function exists to remove.
+ */
+function sanitizeForGsm7(text: string): string {
+  const chr = (code: number) => String.fromCharCode(code);
+  const curlySingle = new RegExp(`[${chr(0x2018)}${chr(0x2019)}${chr(0x201a)}${chr(0x201b)}]`, 'g');
+  const curlyDouble = new RegExp(`[${chr(0x201c)}${chr(0x201d)}${chr(0x201e)}${chr(0x201f)}]`, 'g');
+  const dash = new RegExp(`\\s*[${chr(0x2013)}${chr(0x2014)}]\\s*`, 'g');
+  const ellipsisChar = new RegExp(chr(0x2026), 'g');
+  const replaced = text
+    .replace(curlySingle, "'")
+    .replace(curlyDouble, '"')
+    .replace(dash, ', ')
+    .replace(ellipsisChar, '...');
+  const bad = new Set(nonGsm7(replaced));
+  return bad.size === 0 ? replaced : [...replaced].filter((c) => !bad.has(c)).join('');
+}
+
 export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDeps): Promise<SmsDraft> {
   const body = inboundBody?.trim() ?? '';
   if (!body) return draftFallback('empty message, nothing to reply to');
@@ -216,6 +267,20 @@ export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDe
     return { intent: 'opt_out', reply: '', autoSend: false, reason: 'opt-out keyword, carrier handles this' };
   }
 
+  // A template answers this outright. A human wrote and reviewed every one of
+  // these strings, so this deliberately skips the money/day guards below and
+  // never calls the model: see lib/agent/templates.ts's header for why. This
+  // is the credit saving and the formatting fix in the same move.
+  const templateKey = matchTemplate(body);
+  if (templateKey) {
+    return {
+      intent: TEMPLATE_INTENT[templateKey],
+      reply: renderTemplate(templateKey),
+      autoSend: true,
+      reason: `template: ${templateKey}`,
+    };
+  }
+
   let raw: { intent: string; reply: string };
   try {
     raw = await deps.complete(systemPrompt(), body);
@@ -224,7 +289,7 @@ export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDe
     return draftFallback('the model call failed');
   }
 
-  const reply = raw.reply.trim();
+  const reply = sanitizeForGsm7(raw.reply).trim();
   if (!reply) return draftFallback('the model returned an empty reply');
   if (!isIntent(raw.intent)) return { intent: 'other', reply, autoSend: false, reason: `unknown intent ${raw.intent}` };
 
