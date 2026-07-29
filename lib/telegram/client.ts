@@ -76,6 +76,10 @@ export const telegram = {
   deleteForumTopic: (message_thread_id: number) =>
     call<boolean>('deleteForumTopic', { chat_id: chatId(), message_thread_id }),
 
+  /** Renames a topic. Omitting icon_custom_emoji_id (we always do) leaves the icon as-is. */
+  editForumTopic: (message_thread_id: number, name: string) =>
+    call<boolean>('editForumTopic', { chat_id: chatId(), message_thread_id, name }),
+
   /**
    * thread_id null targets the General topic, which is addressed by OMITTING
    * message_thread_id. Passing 1 does not work.

@@ -37,6 +37,7 @@ export const CALLBACK_ACTIONS = {
   MARK_HANDLED: 'mark_handled',
   CALL_BACK: 'call_back',
   SEND_SMS: 'send_sms',
+  MARK_QUOTE_HANDLED: 'mark_quote_handled',
 } as const;
 
 export type CallbackActionName = (typeof CALLBACK_ACTIONS)[keyof typeof CALLBACK_ACTIONS];
@@ -52,6 +53,10 @@ export interface CallBackParams {
 export interface SendSmsParams {
   phone: string;
   text: string;
+}
+
+export interface MarkQuoteHandledParams {
+  id: string;
 }
 
 export interface SmsDraftCardInput {
@@ -155,6 +160,49 @@ export async function completedCallCard(input: CompletedCallCardInput): Promise<
   ]);
 
   return { text: lines.join('\n'), reply_markup: { inline_keyboard: [[callBack, markHandled]] } };
+}
+
+export interface QuoteRequestCardInput {
+  id: string;
+  who: string;
+  phone: string;
+  source: 'call' | 'sms';
+  wants: string;
+}
+
+/**
+ * The work item, not the conversation: who is asking, how they reached us,
+ * and what they said verbatim, plus a Done button. Lives in the standing
+ * Quote Requests topic (lib/telegram/topics.ts's resolveIndexTopic), not the
+ * contact's own topic, because a queue you have to open every contact's
+ * topic to read is not a queue (see lib/quote-requests.ts).
+ *
+ * `wants` is a customer's own words, deliberately uncorrected, which makes it
+ * the field on this card most likely to carry copy-pasted or dictated
+ * punctuation like "<18x18x16>" -- escaped here for the same reason every
+ * other card escapes customer-provided text.
+ */
+export async function quoteRequestCard(input: QuoteRequestCardInput): Promise<TextCardPayload> {
+  const channel = input.source === 'call' ? '📞 Call' : '💬 Text';
+  const phone = formatPhoneForDisplay(input.phone);
+  // who is often just the same phone number reformatted (no name known yet);
+  // showing it twice on one line would be noise, not signal.
+  const identity = input.who === phone ? escapeHtml(phone) : `${escapeHtml(input.who)} · ${escapeHtml(phone)}`;
+
+  const lines = [
+    '<b>Quote requested</b>',
+    `${identity} · ${channel}`,
+    '',
+    escapeHtml(input.wants),
+    '',
+    '<i>Tap Done once priced.</i>',
+  ];
+
+  const done = await makeCallbackButton('Done', CALLBACK_ACTIONS.MARK_QUOTE_HANDLED, {
+    id: input.id,
+  } satisfies MarkQuoteHandledParams);
+
+  return { text: lines.join('\n'), reply_markup: { inline_keyboard: [[done]] } };
 }
 
 export interface OutboxPayload {

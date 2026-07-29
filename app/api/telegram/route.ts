@@ -3,6 +3,7 @@ import { db } from '../../../lib/db';
 import type {
   CallBackParams,
   CallbackActionName,
+  MarkQuoteHandledParams,
   SendSmsParams,
   TextCardPayload,
 } from '../../../lib/telegram/cards';
@@ -21,6 +22,8 @@ import type { CallbackAction, Message } from '../../../lib/types';
 export interface TelegramUser {
   id: number;
   is_bot: boolean;
+  username?: string;
+  first_name?: string;
 }
 
 export interface TelegramChat {
@@ -48,6 +51,8 @@ export interface TelegramMessage {
 export interface TelegramCallbackQuery {
   id: string;
   data?: string;
+  /** Always present on a real callback_query; only tests construct one without it. */
+  from: TelegramUser;
   message?: TelegramMessage;
 }
 
@@ -179,7 +184,7 @@ async function runCallbackAction(cq: TelegramCallbackQuery): Promise<void> {
   }
 }
 
-async function executeAction(row: CallbackAction, cq: TelegramCallbackQuery): Promise<string> {
+export async function executeAction(row: CallbackAction, cq: TelegramCallbackQuery): Promise<string> {
   const action = row.action as CallbackActionName;
   switch (action) {
     case CALLBACK_ACTIONS.MARK_HANDLED: {
@@ -216,6 +221,28 @@ async function executeAction(row: CallbackAction, cq: TelegramCallbackQuery): Pr
         .insert({ thread_id: cq.message?.message_thread_id ?? null, kind: 'text', payload });
       if (error) throw new Error(`enqueue callback request: ${error.message}`);
       return 'Callback requested';
+    }
+    case CALLBACK_ACTIONS.MARK_QUOTE_HANDLED: {
+      const params = row.params as unknown as MarkQuoteHandledParams;
+      const by = cq.from.username ?? cq.from.first_name ?? String(cq.from.id);
+      // lib/quote-requests.ts is Karim's, not built here; dynamic import for the
+      // same resilience-to-concurrent-editing reason as forwardSms above, and
+      // markQuoteRequestHandled is the one function that may write handled_at,
+      // per its own doc comment.
+      const { markQuoteRequestHandled } = await import('../../../lib/quote-requests');
+      const didHandle = await markQuoteRequestHandled(params.id, by);
+      if (didHandle) {
+        const message = cq.message;
+        if (message) {
+          await telegram.editMessageText(message.message_id, `${message.text ?? ''}\n\n✅ <i>Done</i>`, {
+            reply_markup: { inline_keyboard: [] },
+          });
+        }
+      }
+      // A double tap (or two admins tapping at once) must not re-edit an
+      // already-edited card or double-count the handling: markQuoteRequestHandled
+      // is idempotent (is('handled_at', null)), and this mirrors that here.
+      return didHandle ? 'Marked handled' : 'Already marked handled';
     }
     default:
       throw new Error(`unknown callback action: ${row.action}`);
