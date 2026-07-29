@@ -157,21 +157,3 @@ Take a message. A message that reaches a human beats a guess that sounds confide
 
 The current time is {{telnyx_current_time_America/Los_Angeles}}. The caller is {{telnyx_end_user_target}}.`;
 }
-
-export function knowledgeBaseMarkdown(): string {
-  const rows = BUSINESS.products
-    .map((p) => `| ${p.name} | ${p.unit} | ${p.contents} | ${p.spec} | ~${p.perPallet} |`)
-    .join('\n');
-  return [
-    `# ${BUSINESS.name}`,
-    `Phone ${BUSINESS.phone}. Email ${BUSINESS.email}. Web ${BUSINESS.site}.`,
-    `Hours: ${BUSINESS.hours}. ${BUSINESS.fulfilment}`,
-    '',
-    '## Products',
-    '| Product | Ordered by | One unit holds | Spec | Units per pallet (approximate) |',
-    '| --- | --- | --- | --- | --- |',
-    rows,
-    '',
-    'We do not sell boxes, tape guns, dollies, or moving blankets.',
-  ].join('\n');
-}
