@@ -3,19 +3,23 @@
 Execution, not planning. Work top to bottom. Everything above the live test is
 either waiting on someone else or a five-minute form.
 
-Built and verified 2026-07-27: code, database and Telegram are done and tested.
-What is missing is the phone.
+The phone now works: real calls were answered end to end on 2026-07-28. What is
+left is porting the real number and the items in `docs/STATUS.md`. Read STATUS
+first, it is the honest account of what is proven against what is only tested.
 
 ## Already wired, nothing to do
 
-- **Database**: `akme-dev` (`your-dev-project-ref`). 12 tables, RLS on with zero
-  policies, so the service role key is the only way in. Private `recordings`
-  bucket, 100MB cap. Scheduler functions defined, not yet scheduled.
+- **Database**: `akme-dev` (`your-dev-project-ref`), which switchboard SHARES
+  with Akme. 12 of its tables are switchboard's; the rest belong to Akme's
+  order pipeline, so never assume a table here is yours (see `docs/ECOSYSTEM.md`
+  and the ownership list at the top of `20260727000000_init.sql`). RLS on with
+  zero policies, so the service role key is the only way in. Private `recordings`
+  bucket, 100MB cap.
 - **Telegram**: bot `@your_phone_bot`, group "Akme Phone assistant"
   (`-1001000000002`), Topics on, bot admin with Manage Topics, privacy off.
   Verified end to end.
 - **Code**: voice, SMS, Telegram routing, worker pipeline, QuickBooks mirror.
-  96 tests, typecheck clean, production build green.
+  176 tests, typecheck clean, production build green.
 
 ## Read this before planning the day
 
