@@ -131,21 +131,40 @@ ANSWER".
 
 ## Still not proven
 
-- **The new opener and the new prompt, on a real call.** Everything above was
-  proven in text, and `pnpm rehearse` cannot hear the voice, cannot be talked over,
-  and never touches Telnyx voice. It is the cheap gate, not the verdict. The next
-  real call to +1 555 555 0124 is what says whether the two-beat opener sounds like
-  one person and whether the routing holds when a caller rambles.
-- **Whether the caller's first words survive the greeting.** On the 20:56 call the
-  caller said "I'd like to place an order" and then "Hello?" into silence, and the
-  agent answered only the "Hello?". `disable_greeting_interruption: true` throws
-  away anything said over the greeting, and the greeting just got three words
-  longer. The prompt now recovers from it (never re-ask, answer what they said),
-  but the underlying loss is untested either way. The experiment is one line:
-  flip that flag to `false` in lib/telnyx/assistant.ts, `pnpm assistant:sync`, and
-  make three calls talking over the greeting on purpose. It was `false` once and
-  line noise made the agent open with "I'm not sure I caught that", but that was
-  before `interrupt_prediction_threshold: 0.4` existed, so the trade has moved.
+- **The opener, and it is now measured rather than suspected.** The 21:38 call
+  proved the prompt half (routes on the first ask, titles-only list, and "plastic
+  wrap" resolved to both films even though that phrase is not in the alias list) and
+  failed the audio half: roughly 40 of 116 seconds went to "Hello? / Who is this? /
+  Who is this?". `telnyx_events` says why. `call.speak.ended` +6.64s,
+  `call.conversation.created` +9.40s, so there is **2.76s of dead air between the
+  notice and the greeting** and the caller talks into it. `/api/agent/context`
+  answered in **7ms**, so this is not our latency and the prewarm works: it is
+  Telnyx booting the assistant, serially, because `record_start` and
+  `ai_assistant_start` are both issued on `call.speak.ended`.
+  **The fix, recommended and not built:** fold the disclosure into the assistant's
+  greeting, so the boot happens before any audio instead of inside the opener. The
+  care needed is consent ordering, since `record_start` currently fires after the
+  disclosure and the recording deliberately excludes it. Covering the hole with
+  `TELNYX_BACKGROUND_AUDIO=office` is the one-line alternative and Karim already
+  rejected that room tone as murmuring.
+  Note the earlier theory in this file blamed `disable_greeting_interruption`. That
+  flag makes the symptom worse by discarding what is said over the greeting, but it
+  is not the hole.
+- **Two smaller things the same call surfaced.** Filler came back on confused turns
+  ("Uh, Robin from Akme USA", "Um, we have Hand Wrap Film") despite NO FILLER,
+  EVER, which is the model degrading under ambiguity rather than a missing rule. And
+  the prompt has no rule for "who is this?", which went unanswered on the first ask.
+- **`quote_requests` has zero rows, across every call ever placed.** The row this
+  file calls the point of the phone line has never been produced live. On the 21:38
+  call that is defensible (the agent offered to text the list and the caller changed
+  the subject), but nothing has ever exercised the path end to end on a real call.
+- **The worker can race the recording webhook.** The 21:38 call errored once with
+  `has no recording_url` seconds before the webhook landed, and Telnyx's presigned
+  URL carries `X-Amz-Expires=600`. pg_cron retries every 2 minutes so it self-heals
+  inside that window, but a call erroring near the end of it loses its recording for
+  good, because our permanent copy is made during `fetching`. Rescue by hand: POST
+  `/api/worker` with `authorization: Bearer $WORKER_SECRET` until the row is
+  `posted`.
 - **SMS on real traffic.** `messages` still has zero rows. The template layer,
   the guards and the quote-request wiring are unit tested and have never seen a
   real text.
