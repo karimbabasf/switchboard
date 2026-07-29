@@ -46,7 +46,7 @@ export async function fetchRecording(call: Call, now: Date): Promise<string> {
   if (!res.ok) {
     throw new Error(`recording download failed: HTTP ${res.status}`);
   }
-  const contentType = res.headers.get('content-type') ?? 'audio/mpeg';
+  const contentType = audioContentType(res.headers.get('content-type'));
   const buffer = Buffer.from(await res.arrayBuffer());
 
   const bucket = env('SUPABASE_STORAGE_BUCKET');
@@ -59,6 +59,22 @@ export async function fetchRecording(call: Call, now: Date): Promise<string> {
   if (error) throw new Error(`storage upload failed: ${error.message}`);
 
   return path;
+}
+
+/**
+ * Telnyx serves recordings as `binary/octet-stream`, and a Supabase bucket with
+ * an allowed-mime-type list rejects that outright: "mime type
+ * binary/octet-stream is not supported". The old code passed the header through
+ * whenever it was present, and its `?? 'audio/mpeg'` fallback only covered a
+ * MISSING header, never a useless one, so every real call failed here while the
+ * dry run (which uploads a locally built file) passed.
+ *
+ * The header is therefore only trusted when it actually names an audio type.
+ * Otherwise we use what we asked Telnyx to record, which is mp3: see the
+ * `format: 'mp3'` on recordStart in lib/telnyx/voice.ts.
+ */
+export function audioContentType(header: string | null): string {
+  return header && /^audio\//i.test(header.trim()) ? header.trim() : 'audio/mpeg';
 }
 
 function extensionFor(contentType: string): string {
