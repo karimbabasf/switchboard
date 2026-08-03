@@ -37,7 +37,7 @@ export const QUOTE_CHANNELS = Object.freeze({
   text: 'reply to this text',
 });
 
-export type TemplateKey = 'catalogue' | 'hours' | 'quote' | 'contact';
+export type TemplateKey = 'catalogue' | 'hours' | 'quote' | 'contact' | 'fulfilment';
 
 /**
  * The product list, spoken of the way a customer asks for it: what it is called
@@ -64,19 +64,41 @@ const QUOTE_SMS = [
   `${QUOTE_CHANNELS.site} and we will send pricing over.`,
 ].join(' ');
 
+/**
+ * "Where are you" is a will call question nine times out of ten, and this used to
+ * answer it with a phone number. The address is the answer.
+ */
 const CONTACT_SMS = [
   `${BUSINESS.name}`,
+  `Will call: ${BUSINESS.willCallAddress}`,
   `Phone: ${BUSINESS.phone}`,
   `Email: ${BUSINESS.email}`,
   `Site: ${BUSINESS.site}`,
   `Open ${BUSINESS.hours}.`,
 ].join('\n');
 
+/**
+ * Both fulfilment methods, as policy.
+ *
+ * Every sentence here is a standing fact that is true before anyone texts, which
+ * is the only reason it is safe to send unread. It deliberately ends by handing
+ * the specific case back: the cadence is ours to state, "yours goes out Thursday"
+ * is a promise about one order and belongs to whoever taps Send.
+ */
+const FULFILMENT_SMS = [
+  // Answers both halves regardless of which half was asked. "We do both" was
+  // shorter and read as a non-sequitur to anyone who only asked about delivery.
+  `We deliver and we do will call. Will call pickup is ${BUSINESS.willCallAddress}, ${BUSINESS.hours}.`,
+  'For delivery, orders in by Tuesday go out on Thursday.',
+  'Tell us which you need and we will confirm it on your quote.',
+].join(' ');
+
 const TEMPLATES: Readonly<Record<TemplateKey, string>> = Object.freeze({
   catalogue: CATALOGUE_SMS,
   hours: HOURS_SMS,
   quote: QUOTE_SMS,
   contact: CONTACT_SMS,
+  fulfilment: FULFILMENT_SMS,
 });
 
 export function renderTemplate(key: TemplateKey): string {
@@ -109,10 +131,43 @@ const MATCHERS: ReadonlyArray<{ key: TemplateKey; pattern: RegExp }> = [
       /\b(what.{0,15}(sell|stock|carry|have|offer)|product list|catalog(ue)?|inventory|full list|item list)\b/i,
   },
   {
+    key: 'fulfilment',
+    pattern:
+      /\b(do you deliver|deliver to|delivery option|ship to|do you ship|will.?call|curbside|pick.?up|pick it up|come get)\b/i,
+  },
+  {
     key: 'contact',
-    pattern: /\b(address|where are you|location|email address|your email|phone number)\b/i,
+    pattern: /\b(address|where are you|located|location|email address|your email|phone number)\b/i,
   },
 ];
+
+/**
+ * The message is about THEIR order, not about how we work.
+ *
+ * "Is my order ready to pick up" contains "pick up" and is not a fulfilment
+ * question at all: it is an order status question, and this agent has no order
+ * lookup. Without this it auto-sent the will call address and hours to someone
+ * asking whether their pallet was packed, which reads as yes.
+ */
+const ABOUT_THEIR_ORDER =
+  /\b(my|our|their) (order|stuff|shipment|delivery|pallet|stock|invoice|quote|things)\b|\bis it ready\b|\bready yet\b/i;
+
+/**
+ * Turns a policy question into a promise question.
+ *
+ * "Do you deliver" is a standing fact and this file can answer it. "Can you
+ * deliver Thursday" is the same words plus a commitment, and the answer to that
+ * one depends on stock, on the run, and on whoever is loading the truck. The
+ * templates skip every model guard by design, so a fulfilment template that fired
+ * on the second question would auto-send a confident policy statement to someone
+ * who asked whether their pallet makes it before the weekend, and they would read
+ * it as yes.
+ *
+ * Only gates `fulfilment`. `hours` is unaffected: "what time do you open
+ * tomorrow" is still just the hours.
+ */
+const ASKS_TO_COMMIT =
+  /\b(today|tonight|tomorrow|mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this week|next week|weekend|asap|rush|urgent|by (the|then|noon|end)|when (will|can|would)|how soon|how long|eta|what day|which day|in time|before)\b/i;
 
 /**
  * Returns the template that answers this message outright, or null if the model
@@ -127,7 +182,9 @@ export function matchTemplate(body: string | null | undefined): TemplateKey | nu
   // contains the words. Templates answer questions; paragraphs need the model.
   if (text.length > 160) return null;
 
-  return MATCHERS.find((m) => m.pattern.test(text))?.key ?? null;
+  const key = MATCHERS.find((m) => m.pattern.test(text))?.key ?? null;
+  if (key === 'fulfilment' && (ASKS_TO_COMMIT.test(text) || ABOUT_THEIR_ORDER.test(text))) return null;
+  return key;
 }
 
 /**

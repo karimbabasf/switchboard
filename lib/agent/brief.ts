@@ -48,6 +48,8 @@ export interface BusinessBrief {
   site: string;
   hours: string;
   fulfilment: string;
+  /** Where will call actually happens. Mirrors WILL_CALL_ADDRESS in Akme's lib/site.ts. */
+  willCallAddress: string;
   products: BriefProduct[];
   /** False means every pallet quantity must be hedged out loud. */
   palletCountsConfirmed: boolean;
@@ -61,7 +63,20 @@ export const BUSINESS: BusinessBrief = Object.freeze({
   email: 'sales@akmeusa.com',
   site: 'akmeusa.com',
   hours: 'Monday to Friday, 8am to 4pm',
-  fulfilment: 'Delivery and will call both run Monday to Friday, 8am to 4pm.',
+  // This said "Delivery and will call both run Monday to Friday, 8am to 4pm",
+  // and the delivery half of that was wrong. Akme's own lib/site.ts carries the
+  // same sentence with a comment saying so: the real cadence Karim gave on
+  // 2026-07-29 is DELIVERY_ORDER_BY_DAY Tuesday, DELIVERY_DAY Thursday. It was
+  // left alone there because fixing it would have changed quote-email copy that
+  // was not part of that request. Here it is squarely in scope, since answering
+  // delivery and will call questions is the job, and this one string is what the
+  // phone prompt, the SMS prompt and the hours template all read.
+  //
+  // A cadence is a standing fact and the agent may repeat it. "Yours arrives
+  // Thursday" is a promise about one order and is still a human's to make.
+  fulfilment:
+    'Will call runs Monday to Friday, 8am to 4pm. For delivery, orders in by Tuesday go out on Thursday.',
+  willCallAddress: '1234 Example Way, Springfield, CA',
   // Mirrors PALLET_COUNTS_CONFIRMED in Akme's lib/catalog.ts. Every perPallet
   // below is inferred from a standard pallet build and has not been checked
   // against the warehouse, so the agent hedges all six.

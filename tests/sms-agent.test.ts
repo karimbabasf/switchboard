@@ -16,6 +16,7 @@ const ALL_TEMPLATE_KEYS: Record<TemplateKey, true> = {
   hours: true,
   quote: true,
   contact: true,
+  fulfilment: true,
 };
 const TEMPLATE_KEYS = Object.keys(ALL_TEMPLATE_KEYS) as TemplateKey[];
 
@@ -210,21 +211,51 @@ describe('draftSmsReply: the hours are a fact, not a promise', () => {
     expect(d.autoSend).toBe(true);
   });
 
+  // Both of these used to open with "can I pick up", which now matches the
+  // fulfilment template and never reaches the model at all. The day guard being
+  // tested here is unchanged; the inputs had to move to messages that still get
+  // that far, or the assertions would have been passing on the template branch
+  // and quietly testing nothing.
   it('auto-sends the standing fulfilment window, which also names weekdays', async () => {
     const d = await draftSmsReply(
-      'can I pick up',
-      model('hours', 'Delivery and will call both run Monday to Friday, 8am to 4pm.'),
+      'remind me of your standard schedule',
+      model('hours', 'Will call runs Monday to Friday, 8am to 4pm.'),
     );
     expect(d.autoSend).toBe(true);
   });
 
   it('still holds the same day named at the customer', async () => {
     const d = await draftSmsReply(
-      'can I pick up',
+      'any chance you could have it ready for me',
       model('hours', 'We can have it ready for you Monday.'),
     );
     expect(d.autoSend).toBe(false);
     expect(d.reason).toMatch(/day/i);
+  });
+});
+
+describe('draftSmsReply: fulfilment answers the policy, never the promise', () => {
+  it.each([
+    ['do you deliver', 'a plain policy question'],
+    ['do you do will call', 'the other half of the same question'],
+    ['can I pick up', 'pickup with no order attached'],
+    ['do you deliver to Shelbyville', 'a place is still policy, not a date'],
+  ])('answers %s from the reviewed template (%s)', async (body) => {
+    const d = await draftSmsReply(body, neverCalled());
+    expect(d.intent).toBe('fulfilment');
+    expect(d.autoSend).toBe(true);
+    expect(d.reply).toContain('1234 Example Way');
+  });
+
+  it.each([
+    ['can you deliver Thursday', 'names a day'],
+    ['how soon can you deliver', 'asks for a date without naming one'],
+    ['can I pick up today', 'a policy question with a date bolted on'],
+    ['will it get here before the weekend', 'the promise with no policy word at all'],
+    ['is my order ready to pick up', 'about their order, not about us'],
+  ])('sends %s to the model instead (%s)', async (body) => {
+    const d = await draftSmsReply(body, model('delivery_commitment', 'The team will confirm timing.'));
+    expect(d.autoSend).toBe(false);
   });
 });
 

@@ -38,6 +38,10 @@ export const SMS_INTENTS = [
   'order_status',
   'acknowledge',
   'pricing',
+  // The policy question ("do you deliver, where is will call") as against the
+  // promise question ("can you get it here Thursday"). Only the first is ever a
+  // standing fact, and only the template form of it auto-sends.
+  'fulfilment',
   'delivery_commitment',
   'complaint',
   'payment',
@@ -91,6 +95,9 @@ const TEMPLATE_INTENT: Readonly<Record<TemplateKey, SmsIntent>> = Object.freeze(
   hours: 'hours',
   catalogue: 'products',
   contact: 'other',
+  // Not 'delivery_commitment'. The template commits to nothing, and labelling it
+  // as a commitment would make every log and every card read as though it had.
+  fulfilment: 'fulfilment',
 });
 
 /**
@@ -215,15 +222,20 @@ function systemPrompt(): string {
 WHAT WE SELL
 ${catalogue}. We do not sell boxes, tape guns, dollies, or blankets.
 
-HOURS
+HOURS AND FULFILMENT
 ${BUSINESS.hours}. ${BUSINESS.fulfilment}
+Will call pickup is ${BUSINESS.willCallAddress}.
+That cadence is a standing fact and you may repeat it. What you may never do is
+apply it to the person texting you: when THEIR order goes out, when it arrives,
+or whether it makes a date they named. That is a promise, and promises are made
+by a person, not by you.
 
 HOW TO WRITE
 One sentence. Two at the most. Plain text: no emoji, no greeting, no signature. Never an em dash or an en dash, a comma or a colon or parentheses instead. Write the way a person at a supply counter texts back: direct and warm, not formal.
 
 WHAT YOU MAY NEVER WRITE
 - Never a price, a rate, a discount, or a total. Pricing goes out in a written quote from the team.
-- Never a delivery date, a time window, or a day of the week. You may state the standard hours and nothing more.
+- Never a delivery date or a time window for their order. The standing hours and the standing cadence above are facts and may be repeated; anything that lands on a date for the person you are texting is a promise and is not yours to make.
 - Never a card number or a payment instruction.
 - Never invent an order number, an invoice number, or a stock level.
 
