@@ -3,11 +3,17 @@
  *
  * The phone line can run from a local machine behind a cloudflared quick tunnel, and
  * a quick tunnel's hostname is random per start and dies on its own. When it
- * changes, FOUR separate places still point at the old one and the line is down
+ * changes, FIVE separate places still point at the old one and the line is down
  * until every one of them is corrected: the disclosure plays, or the call is
  * never answered at all, and nothing says why. That used to be a manual runbook
  * checklist, which is a checklist run at the exact moment somebody is annoyed the
  * phone is broken. This is that checklist as one command.
+ *
+ * Telegram was the fifth, and was missing from here entirely until 2026-08-03.
+ * It is the only one whose failure is completely silent in both directions:
+ * cards keep arriving in the group because those are outbound, while every
+ * button tap and every typed reply goes nowhere. Missing it costs more than
+ * missing any of the other four, which at least take the phone down loudly.
  *
  *   pnpm repoint https://something-new.trycloudflare.com
  *
@@ -99,6 +105,21 @@ async function telnyxPatch(path: string, body: object): Promise<void> {
   if (!res.ok) throw new Error(`telnyx PATCH ${path}: ${res.status} ${(await res.text()).slice(0, 300)}`);
 }
 
+/**
+ * Telegram's Bot API answers 200 with `{ok: false}` on a rejected call, so the
+ * status code alone is not the answer.
+ */
+async function telegram(method: string, body: object): Promise<Record<string, unknown>> {
+  const res = await fetch(`https://api.telegram.org/bot${need('TELEGRAM_BOT_TOKEN')}/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = (await res.json()) as { ok: boolean; description?: string; result?: unknown };
+  if (!json.ok) throw new Error(`telegram ${method}: ${json.description ?? res.status}`);
+  return (json.result ?? {}) as Record<string, unknown>;
+}
+
 async function telnyxGet(path: string): Promise<Record<string, unknown>> {
   const res = await fetch(`https://api.telnyx.com/v2${path}`, {
     headers: { authorization: `Bearer ${need('TELNYX_API_KEY')}` },
@@ -138,6 +159,20 @@ async function main(): Promise<void> {
   });
   console.log('  ok  Telnyx messaging profile -> /api/sms');
 
+  // The one that was missing, and the worst one to miss. Telegram holds its own
+  // copy of the URL, so a tunnel restart left the bot posting updates at a
+  // hostname that no longer resolves. Nothing anywhere reports that: Telnyx keeps
+  // working, cards keep arriving in the group, and every button tap and every
+  // typed reply silently does nothing. It looked like a bug in the buttons for a
+  // week. `secret_token` is what /api/telegram checks on every request, so it has
+  // to be re-sent here or the route rejects Telegram's own posts.
+  await telegram('setWebhook', {
+    url: `${target}/api/telegram`,
+    secret_token: need('TELEGRAM_WEBHOOK_SECRET'),
+    allowed_updates: ['message', 'edited_message', 'callback_query'],
+  });
+  console.log('  ok  Telegram bot -> /api/telegram');
+
   // Upsert, not update: on a fresh database the row does not exist yet and a
   // silent zero-row update would leave the worker calling `null || '/api/worker'`.
   const supa = await fetch(`${need('SUPABASE_URL')}/rest/v1/switchboard_settings`, {
@@ -156,16 +191,26 @@ async function main(): Promise<void> {
   // Read back rather than trust the 200s. Telnyx in particular will accept a
   // field it does not recognise and store nothing, which is the whole reason
   // assistant-sync exists, and the same caution is cheap here.
-  const [cc, mp] = await Promise.all([
+  const [cc, mp, tg] = await Promise.all([
     telnyxGet(`/call_control_applications/${need('TELNYX_CONNECTION_ID')}`),
     telnyxGet(`/messaging_profiles/${need('TELNYX_MESSAGING_PROFILE_ID')}`),
+    telegram('getWebhookInfo', {}),
   ]);
   const bad = [
     cc.webhook_event_url === `${target}/api/voice` ? null : `call control app is ${String(cc.webhook_event_url)}`,
     mp.webhook_url === `${target}/api/sms` ? null : `messaging profile is ${String(mp.webhook_url)}`,
+    tg.url === `${target}/api/telegram` ? null : `telegram bot is ${String(tg.url) || '(unset)'}`,
   ].filter(Boolean);
   if (bad.length) throw new Error(`read-back disagrees: ${bad.join('; ')}`);
-  console.log('  ok  read back from Telnyx, both stored\n');
+  console.log('  ok  read back from Telnyx and Telegram, all three stored');
+
+  // Telegram queues updates it could not deliver and reports the backlog here.
+  // A non-zero count on a fresh repoint is the outage being quantified: that is
+  // how many taps and replies were dropped while the old hostname was dead.
+  const pending = Number(tg.pending_update_count ?? 0);
+  if (pending > 0) console.log(`  note  Telegram had ${pending} update(s) queued from while the webhook was down`);
+  if (tg.last_error_message) console.log(`  note  Telegram's last delivery error: ${String(tg.last_error_message)}`);
+  console.log();
 
   console.log('One thing left, because the assistant carries its own copies of these URLs:\n');
   console.log('    pnpm assistant:sync\n');
