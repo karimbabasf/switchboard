@@ -81,6 +81,8 @@ export interface TelnyxMessagePayload {
   text: string | null;
   type: 'SMS' | 'MMS';
   media?: Array<{ url: string; content_type: string }>;
+  /** Present on a failed delivery receipt, and the only place the real reason appears. */
+  errors?: Array<{ code?: string | number; title?: string; detail?: string }>;
 }
 
 export interface TelnyxWebhookBody {
@@ -97,10 +99,18 @@ export interface TelnyxWebhookBody {
  * seen before (a Telnyx retry), in which case the caller must no-op: Telnyx
  * retries messaging webhooks up to 6 times on anything but a 2xx.
  */
-async function claimEvent(eventId: string, occurredAt: string): Promise<boolean> {
+async function claimEvent(eventId: string, eventType: string, occurredAt: string): Promise<boolean> {
+  // event_type is NOT NULL and was missing here, so EVERY inbound SMS webhook
+  // threw on this line: no message row, no card, no reply, and no delivery
+  // receipt either, which is what hid a separate carrier problem for a day.
+  // The voice path never had this because it upserts a whole row object; this
+  // one built its own literal and left the column out. Fixed 2026-08-03.
   const { data, error } = await db()
     .from('telnyx_events')
-    .upsert({ id: eventId, occurred_at: occurredAt }, { onConflict: 'id', ignoreDuplicates: true })
+    .upsert(
+      { id: eventId, event_type: eventType, occurred_at: occurredAt },
+      { onConflict: 'id', ignoreDuplicates: true },
+    )
     .select('id');
   if (error) throw new Error(`claimEvent: ${error.message}`);
   return (data?.length ?? 0) > 0;
@@ -325,10 +335,41 @@ async function orderChangePayload(input: {
 }
 
 /** `message.sent` / `message.finalized`: the delivery receipt for an outbound send. */
+/** Telnyx's own words for a send that did not arrive. */
+const FAILED_STATUSES = new Set(['delivery_failed', 'sending_failed', 'expired']);
+
 async function handleDeliveryReceipt(payload: TelnyxMessagePayload): Promise<void> {
   const status = payload.to?.[0]?.status ?? null;
+  const to = payload.to?.[0]?.phone_number ?? null;
   const { error } = await db().from('messages').update({ provider_status: status }).eq('provider_id', payload.id);
   if (error) throw new Error(`handleDeliveryReceipt: ${error.message}`);
+
+  if (!status || !FAILED_STATUSES.has(status)) return;
+
+  // Say it out loud. Telnyx accepting a message and the carrier delivering it
+  // are different events a second apart, so "sent" is true at the moment we say
+  // it and can be false immediately after. On 2026-08-03 every text to a
+  // T-Mobile number came back delivery_failed with error 40010 (the number was not yet linked to its campaign), while the phone agent had already told the caller it
+  // was sent. Writing the failure to a column nobody reads is how that goes
+  // unnoticed for a day.
+  const reason = payload.errors?.[0];
+  const lines = [
+    `⚠️ <b>Text failed to deliver</b>${to ? ` to ${formatE164(to)}` : ''}`,
+    `<i>${status}</i>`,
+  ];
+  if (reason) lines.push('', `${reason.title ?? ''}${reason.detail ? `: ${reason.detail}` : ''}`.trim());
+
+  const threadId = to ? await resolveTopic(to).catch(() => null) : null;
+  const { error: outboxError } = await db()
+    .from('outbox')
+    .insert({ thread_id: threadId, kind: 'text', payload: { text: lines.join('\n') } });
+  if (outboxError) console.error('[sms] could not report a failed delivery:', outboxError.message);
+}
+
+/** Display only, and deliberately forgiving: a malformed number still gets reported. */
+function formatE164(phone: string): string {
+  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(phone);
+  return m ? `(${m[1]}) ${m[2]}-${m[3]}` : phone;
 }
 
 /**
@@ -341,7 +382,7 @@ export async function handleTelnyxSmsEvent(
   deps: SmsEventDeps = smsEventDeps(),
 ): Promise<void> {
   const { id, event_type, occurred_at, payload } = body.data;
-  const isNew = await claimEvent(id, occurred_at);
+  const isNew = await claimEvent(id, event_type, occurred_at);
   if (!isNew) return;
 
   switch (event_type) {

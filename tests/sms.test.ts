@@ -496,3 +496,95 @@ describe('replyWithAgent (via smsEventDeps): a pricing text becomes a work item'
     expect(mockedRecordQuoteRequest).not.toHaveBeenCalled();
   });
 });
+
+describe('claimEvent writes a row the real table will actually accept', () => {
+  // Why this test exists. On 2026-08-03 every single inbound SMS webhook threw
+  // on its first line, because this upsert omitted `event_type` and that column
+  // is NOT NULL. No message row, no card, no reply, and no delivery receipt
+  // either, which then hid a completely separate carrier problem for a day.
+  //
+  // 323 tests were green through all of it. A mocked database does not enforce
+  // NOT NULL, so the only thing that can catch this class of bug in a unit test
+  // is asserting the SHAPE of what gets written against the columns the real
+  // schema requires. That list is duplicated here on purpose: if a migration
+  // adds a required column, this fails and names it, which is the whole point.
+  const REQUIRED_COLUMNS = ['id', 'event_type', 'occurred_at'] as const;
+
+  it('sends every NOT NULL column of telnyx_events', async () => {
+    const upsert = vi.fn((_row: Record<string, unknown>) => ({
+      select: async () => ({ data: [{ id: 'evt-1' }], error: null }),
+    }));
+    queueFrom([{ upsert }]);
+
+    await handleTelnyxSmsEvent(inboundEvent(), noAgent()).catch(() => {});
+
+    expect(upsert).toHaveBeenCalled();
+    const row = upsert.mock.calls[0][0];
+    for (const column of REQUIRED_COLUMNS) {
+      expect(row[column], `telnyx_events.${column} is NOT NULL and was not sent`).not.toBeUndefined();
+      expect(row[column], `telnyx_events.${column} is NOT NULL and was sent as null`).not.toBeNull();
+    }
+  });
+
+  it('carries the real event_type through, not a placeholder', async () => {
+    const upsert = vi.fn((_row: Record<string, unknown>) => ({
+      select: async () => ({ data: [{ id: 'evt-1' }], error: null }),
+    }));
+    queueFrom([{ upsert }]);
+
+    await handleTelnyxSmsEvent(inboundEvent(), noAgent()).catch(() => {});
+
+    expect(upsert.mock.calls[0][0].event_type).toBe('message.received');
+  });
+});
+
+describe('a failed delivery is reported, not just recorded', () => {
+  function receipt(status: string, errors?: { title?: string; detail?: string }[]): TelnyxWebhookBody {
+    return {
+      data: {
+        id: 'evt-dlr-1',
+        event_type: 'message.finalized',
+        occurred_at: '2026-08-03T18:00:00.000Z',
+        payload: {
+          id: 'msg-1',
+          direction: 'outbound',
+          from: { phone_number: '+14155550100' },
+          to: [{ phone_number: '+14155550142', status }],
+          text: 'anything',
+          type: 'SMS',
+          ...(errors ? { errors } : {}),
+        },
+      },
+    };
+  }
+
+  const claimed = () => ({ upsert: () => ({ select: async () => ({ data: [{ id: 'evt-dlr-1' }], error: null }) }) });
+  const updated = () => ({ update: () => ({ eq: async () => ({ error: null }) }) });
+
+  it('raises a card carrying the carrier\'s actual reason', async () => {
+    const insert = vi.fn(async (_row: { payload: { text: string } }) => ({ error: null }));
+    queueFrom([claimed(), updated(), { insert }]);
+
+    await handleTelnyxSmsEvent(
+      receipt('delivery_failed', [
+        { title: 'Not 10DLC registered', detail: 'The sending number is not 10DLC-registered but is required to be by the carrier.' },
+      ]),
+      noAgent(),
+    );
+
+    expect(insert).toHaveBeenCalledTimes(1);
+    const text = insert.mock.calls[0][0].payload.text;
+    expect(text).toContain('failed to deliver');
+    expect(text).toContain('Not 10DLC registered');
+    expect(text).toContain('(415) 555-0142'); // readable, not raw E.164
+  });
+
+  it('stays quiet on a delivered receipt, which is the common case', async () => {
+    const insert = vi.fn(async () => ({ error: null }));
+    queueFrom([claimed(), updated(), { insert }]);
+
+    await handleTelnyxSmsEvent(receipt('delivered'), noAgent());
+
+    expect(insert).not.toHaveBeenCalled();
+  });
+});
