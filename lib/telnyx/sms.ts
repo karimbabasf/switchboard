@@ -247,6 +247,19 @@ async function replyWithAgent(
       return;
     }
 
+    // The other direction, and the reason START must not share a branch with
+    // STOP: without this the door stays shut forever and the customer has no way
+    // back in short of someone editing the database by hand.
+    if (draft.intent === 'opt_in') {
+      const { error } = await db()
+        .from('contacts')
+        .update({ opted_out_at: null })
+        .eq('phone', phone)
+        .not('opted_out_at', 'is', null);
+      if (error) console.error('[sms] failed to clear opt-out:', error.message);
+      return;
+    }
+
     // Covers both triggers in one check: draftSmsReply maps the `quote`
     // template's hit to intent 'pricing', the same value the model uses for a
     // pricing question, so a template match and a model classification land

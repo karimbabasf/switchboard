@@ -47,6 +47,8 @@ export const SMS_INTENTS = [
   'complaint',
   'payment',
   'opt_out',
+  'opt_in',
+  'help',
   'bargaining',
   'order_change',
   'other',
@@ -65,6 +67,9 @@ const AUTO_SEND: ReadonlySet<SmsIntent> = new Set<SmsIntent>([
   'hours',
   'products',
   'acknowledge',
+  // Required by the carriers on a registered campaign. A HELP that waits for a
+  // human to tap Send is a HELP that did not happen.
+  'help',
 ]);
 
 /**
@@ -100,6 +105,10 @@ const TEMPLATE_INTENT: Readonly<Record<TemplateKey, SmsIntent>> = Object.freeze(
   // Not 'delivery_commitment'. The template commits to nothing, and labelling it
   // as a commitment would make every log and every card read as though it had.
   fulfilment: 'fulfilment',
+  // Present for completeness only. `help` is answered by the keyword check well
+  // before matchTemplate runs, and there is deliberately no matcher for it: HELP
+  // is an exact-word carrier keyword, not a phrase to pattern-match.
+  help: 'help',
 });
 
 /**
@@ -125,8 +134,24 @@ function commitsToADay(reply: string): boolean {
   return WHEN.test(reply) && SECOND_PERSON.test(reply);
 }
 
-/** Carriers handle STOP at the campaign level, but we must never auto-text back into one. */
-const OPT_OUT = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|start|unstop|help)\s*$/i;
+/**
+ * The three carrier keyword classes, which are three different things and were
+ * all one regex until 2026-08-03.
+ *
+ * That regex was named OPT_OUT and matched `help`, `start` and `unstop` as well
+ * as `stop`. Everything it caught returned intent `opt_out`, and the handler
+ * stamps `opted_out_at` and sends nothing, so **texting HELP silently
+ * blacklisted the customer forever**, and so did START and UNSTOP, which are
+ * opt-INS. Found while preparing the 10DLC campaign, which makes you declare
+ * this exact behaviour to the carriers.
+ *
+ * Carriers answer these at the network level on a registered campaign, so our
+ * job is mostly to not contradict them: never text into a STOP, always let a
+ * START undo it, and never treat a request for help as a request to leave.
+ */
+const OPT_OUT = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|revoke|optout|opt out)\s*$/i;
+const OPT_IN = /^\s*(start|unstop|optin|opt in|subscribe)\s*$/i;
+const HELP = /^\s*(help|info)\s*$/i;
 
 /**
  * Bargaining, caught deterministically on the INBOUND text, before anything can
@@ -350,6 +375,24 @@ export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDe
   // who just sent STOP is the one SMS mistake with a regulator attached to it.
   if (OPT_OUT.test(body)) {
     return { intent: 'opt_out', reply: '', autoSend: false, reason: 'opt-out keyword, carrier handles this' };
+  }
+
+  // Undoes the stamp the door reads. No reply: the carrier sends its own
+  // confirmation on a registered campaign and two messages for one word reads
+  // as a system that did not understand.
+  if (OPT_IN.test(body)) {
+    return { intent: 'opt_in', reply: '', autoSend: false, reason: 'opt-in keyword, clears the opt-out stamp' };
+  }
+
+  // Required by every carrier on this campaign, and the one reply that must go
+  // out unread by a human: a HELP that waits for a tap is a HELP that failed.
+  if (HELP.test(body)) {
+    return {
+      intent: 'help',
+      reply: renderTemplate('help'),
+      autoSend: true,
+      reason: 'HELP is a carrier requirement and answers itself',
+    };
   }
 
   // Bargaining stops the machine dead, ahead of the templates and the model.

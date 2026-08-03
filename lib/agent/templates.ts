@@ -37,7 +37,7 @@ export const QUOTE_CHANNELS = Object.freeze({
   text: 'reply to this text',
 });
 
-export type TemplateKey = 'catalogue' | 'hours' | 'quote' | 'contact' | 'fulfilment';
+export type TemplateKey = 'catalogue' | 'hours' | 'quote' | 'contact' | 'fulfilment' | 'help';
 
 /**
  * The product list, spoken of the way a customer asks for it: what it is called
@@ -93,12 +93,28 @@ const FULFILMENT_SMS = [
   'Tell us which you need and we will confirm it on your quote.',
 ].join(' ');
 
+/**
+ * The carrier-mandated answer to HELP, and the exact text declared on the 10DLC
+ * campaign. If you change it here, change it on the campaign too: a registered
+ * HELP reply that does not match what the number actually sends is the kind of
+ * mismatch that gets a campaign pulled.
+ *
+ * The required parts, all present: who we are, what the messages are, how to
+ * stop, that rates apply, and a way to reach a person.
+ */
+const HELP_SMS = [
+  `${BUSINESS.name}: moving and packing supplies.`,
+  'You are texting our order line. Msg and data rates may apply.',
+  `Reply STOP to opt out. Call ${BUSINESS.phone} or email ${BUSINESS.email}.`,
+].join(' ');
+
 const TEMPLATES: Readonly<Record<TemplateKey, string>> = Object.freeze({
   catalogue: CATALOGUE_SMS,
   hours: HOURS_SMS,
   quote: QUOTE_SMS,
   contact: CONTACT_SMS,
   fulfilment: FULFILMENT_SMS,
+  help: HELP_SMS,
 });
 
 export function renderTemplate(key: TemplateKey): string {

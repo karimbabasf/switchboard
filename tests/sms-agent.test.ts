@@ -17,6 +17,7 @@ const ALL_TEMPLATE_KEYS: Record<TemplateKey, true> = {
   quote: true,
   contact: true,
   fulfilment: true,
+  help: true,
 };
 const TEMPLATE_KEYS = Object.keys(ALL_TEMPLATE_KEYS) as TemplateKey[];
 
@@ -373,5 +374,49 @@ describe('lib/agent/templates.ts: every template is GSM-7 safe and short', () =>
     // means a template has drifted into an essay, not a text back.
     const segments = text.length <= 160 ? 1 : Math.ceil(text.length / 153);
     expect(segments).toBeLessThanOrEqual(3);
+  });
+});
+
+describe('the three carrier keywords are three different things', () => {
+  // Until 2026-08-03 one regex named OPT_OUT matched stop, help, start AND
+  // unstop, and every hit stamped opted_out_at and sent nothing. Texting HELP
+  // blacklisted the customer forever; so did START, which is an opt-IN. Found
+  // while preparing the 10DLC campaign, which makes you declare this behaviour.
+
+  it.each(['STOP', 'stop', ' Stop ', 'UNSUBSCRIBE', 'cancel', 'quit', 'END'])(
+    '%s opts out and says nothing back',
+    async (body) => {
+      const d = await draftSmsReply(body, neverCalled());
+      expect(d.intent).toBe('opt_out');
+      expect(d.autoSend).toBe(false);
+      expect(d.reply).toBe('');
+    },
+  );
+
+  it.each(['START', 'start', 'UNSTOP', 'subscribe'])('%s opts back IN, it does not opt out', async (body) => {
+    const d = await draftSmsReply(body, neverCalled());
+    expect(d.intent).toBe('opt_in');
+    expect(d.intent).not.toBe('opt_out');
+  });
+
+  it.each(['HELP', 'help', ' Help ', 'INFO'])('%s answers, and answers without a human', async (body) => {
+    const d = await draftSmsReply(body, neverCalled());
+    expect(d.intent).toBe('help');
+    expect(d.autoSend).toBe(true);
+    expect(d.reply).not.toBe('');
+  });
+
+  it('the HELP reply carries everything the carriers require', async () => {
+    const { reply } = await draftSmsReply('HELP', neverCalled());
+    expect(reply).toContain('Akme USA');       // who
+    expect(reply).toMatch(/STOP/);              // how to leave
+    expect(reply).toMatch(/rates may apply/i);  // the cost disclosure
+    expect(reply).toMatch(/\(555\)|@/);         // a way to reach a person
+  });
+
+  it('a sentence containing the word help is a question, not a keyword', async () => {
+    // "help" alone is the keyword. "can you help me with pricing" is a customer.
+    const d = await draftSmsReply('can you help me figure out what I need', model('other', 'Someone will be in touch.'));
+    expect(d.intent).not.toBe('help');
   });
 });
