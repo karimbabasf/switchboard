@@ -1,8 +1,11 @@
 import { db } from '../db';
 import { env, assertE164, toE164 } from '../env';
 import { resolveTopic } from '../telegram/topics';
-import { inboundSmsCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
+import { inboundSmsCard, orderChangeCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
+import type { TextCardPayload } from '../telegram/cards';
 import { draftFallback, draftSmsReply, smsAgentDeps } from '../agent/sms';
+import { proposeChange } from '../agent/order-change';
+import { identifyCaller, orderLinesFor, recentOrdersFor } from '../qbo/lookup';
 import { recordQuoteRequest } from '../quote-requests';
 import type { Contact, Message, MediaItem } from '../types';
 
@@ -262,20 +265,62 @@ async function replyWithAgent(
       return;
     }
 
-    await db()
-      .from('outbox')
-      .insert({
-        thread_id: threadId,
-        kind: 'text',
-        payload: await smsDraftCard({
-          phone,
-          intent: draft.intent,
-          reply: draft.reply,
-          reason: draft.reason,
-        }),
-      });
+    // A change request gets the order and its lines on the card, plus an Apply
+    // button when the message named a quantity clearly enough to parse one. The
+    // lookup is best effort: if it throws or finds nothing, the card still goes
+    // out carrying their words, which is strictly better than no card.
+    const payload =
+      draft.intent === 'order_change'
+        ? await orderChangePayload({ phone, body, draft })
+        : await smsDraftCard({
+            phone,
+            intent: draft.intent,
+            reply: draft.reply,
+            reason: draft.reason,
+          });
+
+    await db().from('outbox').insert({ thread_id: threadId, kind: 'text', payload });
   } catch (err) {
     console.error(`[sms-agent] reply for ${phone} failed:`, err);
+  }
+}
+
+/**
+ * The statuses where a quantity change is still worth proposing.
+ *
+ * Mirrors CHANGEABLE in Akme's requantify.ts, and is only an optimisation: the
+ * endpoint re-checks the real status on every apply, so a stale copy here shows
+ * a button that refuses on tap rather than one that changes something it should
+ * not. Kept in step anyway, because a button that never works is noise.
+ */
+const CHANGEABLE = new Set(['awaiting_approval', 'quote_sent', 'negotiating']);
+
+async function orderChangePayload(input: {
+  phone: string;
+  body: string | null;
+  draft: { intent: string; reply: string; reason: string };
+}): Promise<TextCardPayload> {
+  const { phone, body, draft } = input;
+  const base = { phone, intent: draft.intent, reply: draft.reply, reason: draft.reason };
+
+  try {
+    const identity = await identifyCaller(phone);
+    const orders = identity?.customer_id ? await recentOrdersFor(identity.customer_id, 5) : [];
+    const order = orders.find((o) => CHANGEABLE.has(o.status)) ?? null;
+    if (!order) return orderChangeCard({ ...base, order: null, lines: [], proposal: null });
+
+    const lines = await orderLinesFor(order.id);
+    return orderChangeCard({
+      ...base,
+      order: { id: order.id, reference: order.reference, status: order.status },
+      lines,
+      proposal: proposeChange(body, lines),
+    });
+  } catch (err) {
+    // Never lose the card over a failed lookup. The message is the thing that
+    // has to reach a human; the order context is what makes that easier.
+    console.error(`[sms-agent] order lookup for ${phone} failed:`, err);
+    return orderChangeCard({ ...base, order: null, lines: [], proposal: null });
   }
 }
 

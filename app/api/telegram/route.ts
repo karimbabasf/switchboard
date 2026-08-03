@@ -1,13 +1,14 @@
 import { env } from '../../../lib/env';
 import { db } from '../../../lib/db';
 import type {
+  ApplyOrderChangeParams,
   CallBackParams,
   CallbackActionName,
   MarkQuoteHandledParams,
   SendSmsParams,
   TextCardPayload,
 } from '../../../lib/telegram/cards';
-import { CALLBACK_ACTIONS } from '../../../lib/telegram/cards';
+import { CALLBACK_ACTIONS, escapeHtml } from '../../../lib/telegram/cards';
 import { telegram } from '../../../lib/telegram/client';
 import { contactByThreadId } from '../../../lib/telegram/topics';
 import type { CallbackAction, Message } from '../../../lib/types';
@@ -221,6 +222,33 @@ export async function executeAction(row: CallbackAction, cq: TelegramCallbackQue
         .insert({ thread_id: cq.message?.message_thread_id ?? null, kind: 'text', payload });
       if (error) throw new Error(`enqueue callback request: ${error.message}`);
       return 'Callback requested';
+    }
+    case CALLBACK_ACTIONS.APPLY_ORDER_CHANGE: {
+      const params = row.params as unknown as ApplyOrderChangeParams;
+      const by = cq.from.username ?? cq.from.first_name ?? String(cq.from.id);
+      const { applyOrderChange } = await import('../../../lib/akme/order-change');
+      const result = await applyOrderChange({
+        orderId: params.order_id,
+        sku: params.sku,
+        qty: params.qty,
+        actor: by,
+      });
+
+      // A refusal is left tappable on purpose. Akme refuses on the order's
+      // CURRENT state, so "order is confirmed and can no longer be changed here"
+      // is information, not a dead end, and the same tap after somebody moves the
+      // order back is the right thing to do.
+      if (!result.ok) return result.reason.slice(0, 200);
+
+      const message = cq.message;
+      if (message) {
+        await telegram.editMessageText(
+          message.message_id,
+          `${message.text ?? ''}\n\n✅ <i>Applied by ${escapeHtml(by)}. ${escapeHtml(result.reference)} is back in negotiating for a re-quote.</i>`,
+          { reply_markup: { inline_keyboard: [] } },
+        );
+      }
+      return `Applied to ${result.reference}`;
     }
     case CALLBACK_ACTIONS.MARK_QUOTE_HANDLED: {
       const params = row.params as unknown as MarkQuoteHandledParams;

@@ -26,6 +26,7 @@
 
 import { env, optionalEnv } from '../env';
 import { BUSINESS } from './brief';
+import { isOrderChangeRequest } from './order-change';
 import { matchTemplate, renderTemplate, nonGsm7 } from './templates';
 import type { TemplateKey } from './templates';
 
@@ -47,6 +48,7 @@ export const SMS_INTENTS = [
   'payment',
   'opt_out',
   'bargaining',
+  'order_change',
   'other',
 ] as const;
 
@@ -360,6 +362,25 @@ export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDe
       reply: 'Let me get someone from the team on that. They will be in touch shortly.',
       autoSend: false,
       reason: 'the customer is bargaining, which is always a human',
+    };
+  }
+
+  // Ahead of the templates for the same reason bargaining is: "can you change my
+  // order to 5 bundles instead" contains "how much" often enough to hit the quote
+  // template, and the template branch skips every guard. It also must not depend
+  // on the model classifying it, because what the order becomes is downstream of
+  // this line.
+  //
+  // The reply confirms receipt and nothing else. It deliberately does not say
+  // the change has been made, because at this point it has not: a person still
+  // has to tap it, and telling someone their order is updated before that is
+  // true is the one wrong answer here that a customer would act on.
+  if (isOrderChangeRequest(body)) {
+    return {
+      intent: 'order_change',
+      reply: 'Got it. Let me get someone on the team to update that and send you the revised quote.',
+      autoSend: false,
+      reason: 'the customer wants their order changed, which only a human commits',
     };
   }
 

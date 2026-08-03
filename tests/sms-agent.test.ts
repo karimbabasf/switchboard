@@ -26,6 +26,41 @@ const broken: SmsAgentDeps = {
   },
 };
 
+describe('draftSmsReply: a change request is noticed, never committed', () => {
+  // Karim's spec: answer questions about changing an order, and change it on our
+  // end too. The change itself happens on a tap in Telegram, through Akme's
+  // /api/order-change. Nothing on this path may tell a customer it is done.
+
+  it.each([
+    'can you change my order to 5 bundles',
+    'make it 5 instead of 3',
+    'I need to add another case to my order',
+    'wrong quantity on that order',
+  ])('holds %s for a human without spending a token', async (body) => {
+    const d = await draftSmsReply(body, neverCalled());
+    expect(d.intent).toBe('order_change');
+    expect(d.autoSend).toBe(false);
+  });
+
+  it('runs ahead of the template layer, which would otherwise answer it', async () => {
+    // "how much" is in there, and the quote template matches on it and skips
+    // every guard. Same shape of bug the bargaining check exists for.
+    const d = await draftSmsReply('how much to change my order to 5 bundles', neverCalled());
+    expect(d.intent).toBe('order_change');
+  });
+
+  it('never tells the customer the change has been made, because it has not', async () => {
+    const d = await draftSmsReply('make it 5 instead of 3', neverCalled());
+    expect(d.reply).not.toMatch(/updated|changed|done|all set|sorted/i);
+    expect(d.reply).toMatch(/someone|team/i);
+  });
+
+  it('is not on the auto-send list under any classification the model could return', async () => {
+    const d = await draftSmsReply('a message with no change words in it', model('order_change', 'Done, updated!'));
+    expect(d.autoSend).toBe(false);
+  });
+});
+
 describe('draftSmsReply: bargaining is always a human, at zero tolerance', () => {
   // Karim's rule, 2026-08-03: "as soon as the customer begins to bargain we ping
   // it in the tg group. no bargaining at all."

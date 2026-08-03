@@ -38,6 +38,7 @@ export const CALLBACK_ACTIONS = {
   CALL_BACK: 'call_back',
   SEND_SMS: 'send_sms',
   MARK_QUOTE_HANDLED: 'mark_quote_handled',
+  APPLY_ORDER_CHANGE: 'apply_order_change',
 } as const;
 
 export type CallbackActionName = (typeof CALLBACK_ACTIONS)[keyof typeof CALLBACK_ACTIONS];
@@ -90,6 +91,73 @@ export async function smsDraftCard(input: SmsDraftCardInput): Promise<TextCardPa
   } satisfies SendSmsParams);
 
   return { text: lines.join('\n'), reply_markup: { inline_keyboard: [[send]] } };
+}
+
+export interface ApplyOrderChangeParams {
+  order_id: string;
+  sku: string;
+  qty: number;
+}
+
+export interface OrderChangeCardInput extends SmsDraftCardInput {
+  /** Null when we could not tell which of their orders this is about. */
+  order: { id: string; reference: string | null; status: string } | null;
+  lines: { sku: string; name: string; qty: number; unit: string }[];
+  /** Null whenever the message did not contain one clear enough to offer. */
+  proposal: { sku: string; name: string; from: number; to: number } | null;
+}
+
+/**
+ * A change request, with everything needed to act on it on one card.
+ *
+ * The order and its lines are here because the alternative is somebody opening
+ * Akme in another window to find out what "make it 5" refers to. The Apply
+ * button is here because the parse already happened and making a person retype a
+ * number a machine already read is the whole thing this is meant to avoid.
+ *
+ * The button is frequently absent and that is the design working: no confident
+ * number, no button. The card is still worth sending, because it carries their
+ * words and their order.
+ */
+export async function orderChangeCard(input: OrderChangeCardInput): Promise<TextCardPayload> {
+  const lines = ['<b>Order change requested</b>'];
+
+  if (input.order) {
+    const ref = input.order.reference ?? input.order.id.slice(0, 8);
+    lines.push(`<i>${escapeHtml(ref)} · ${escapeHtml(input.order.status.replace(/_/g, ' '))}</i>`);
+  } else {
+    lines.push('<i>No open order matched this number.</i>');
+  }
+
+  if (input.lines.length) {
+    lines.push('', ...input.lines.map((l) => `· ${escapeHtml(l.name)} x ${l.qty} ${escapeHtml(l.unit)}`));
+  }
+
+  lines.push('', '<b>Draft reply</b>', escapeHtml(input.reply));
+
+  const buttons: InlineKeyboardButton[] = [];
+  if (input.proposal && input.order) {
+    const p = input.proposal;
+    lines.push('', `<b>Proposed</b>: ${escapeHtml(p.name)} ${p.from} to ${p.to}`);
+    buttons.push(
+      await makeCallbackButton(`Apply: ${p.name} to ${p.to}`, CALLBACK_ACTIONS.APPLY_ORDER_CHANGE, {
+        order_id: input.order.id,
+        sku: p.sku,
+        qty: p.to,
+      } satisfies ApplyOrderChangeParams),
+    );
+  }
+
+  buttons.push(
+    await makeCallbackButton('Send reply', CALLBACK_ACTIONS.SEND_SMS, {
+      phone: input.phone,
+      text: input.reply,
+    } satisfies SendSmsParams),
+  );
+
+  // One button per row: "Apply" changes an order and "Send reply" texts a
+  // customer, and side by side at thumb width they are one mis-tap apart.
+  return { text: lines.join('\n'), reply_markup: { inline_keyboard: buttons.map((b) => [b]) } };
 }
 
 export interface SmsAutoSentCardInput {
@@ -262,6 +330,6 @@ function formatDuration(durationSec: number | null): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

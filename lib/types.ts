@@ -144,6 +144,14 @@ export interface AkmeCustomer {
   external_ids: Record<string, unknown>;
 }
 
+export interface AkmeOrderLine {
+  sku: string;
+  name: string;
+  unit: string;
+  qty: number;
+  unit_price_cents: number | null;
+}
+
 export interface AkmeOrder {
   id: string;
   customer_id: string | null;

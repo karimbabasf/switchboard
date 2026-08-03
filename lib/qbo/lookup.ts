@@ -1,5 +1,5 @@
 import { db, unwrap } from '../db';
-import type { AkmeOrder } from '../types';
+import type { AkmeOrder, AkmeOrderLine } from '../types';
 
 /**
  * Everything the voice agent reads mid-call. Every function here is a single
@@ -100,6 +100,26 @@ export async function recentOrdersFor(customerId: string, limit = 5): Promise<Ak
     .order('created_at', { ascending: false })
     .limit(limit);
   return unwrap(res, 'recentOrdersFor') as AkmeOrder[];
+}
+
+/**
+ * The lines on one order. READ ONLY here, like everything else in this file:
+ * changing them goes through Akme's own /api/order-change, because the totals,
+ * the quote body and the approval card all move together and that logic lives
+ * over there.
+ *
+ * Read at all because a change request has to be grounded in what the customer
+ * actually ordered. Matching "make the bubble wrap 5" against their real lines
+ * is the difference between proposing a change to something they bought and
+ * inventing a sku.
+ */
+export async function orderLinesFor(orderId: string): Promise<AkmeOrderLine[]> {
+  const res = await db()
+    .from('order_lines')
+    .select('sku, name, unit, qty, unit_price_cents')
+    .eq('order_id', orderId)
+    .order('line_no', { ascending: true });
+  return unwrap(res, 'orderLinesFor') as AkmeOrderLine[];
 }
 
 export type CallerIdentity = {
