@@ -185,6 +185,30 @@ async function runCallbackAction(cq: TelegramCallbackQuery): Promise<void> {
   }
 }
 
+/**
+ * Whether this Telegram account may take an action that changes something
+ * outside Telegram.
+ *
+ * Every other button in this file acts on the conversation: sending a drafted
+ * text, marking a card handled. Applying an order change acts on the order, and
+ * a Telegram group has no per-button permissions, so anyone who is in the group
+ * can tap anything in it.
+ *
+ * Fails OPEN while no responder has a telegram_user_id, and CLOSED as soon as
+ * one does. That asymmetry is deliberate rather than lazy: the column has been
+ * in the schema since day one and has never been written, so enforcing it
+ * outright would lock Karim out of his own group on the first tap, with a toast
+ * that reads like a bug. Filling in one row is what turns the check on, and
+ * preflight says which state it is in rather than leaving that to be discovered.
+ */
+async function mayChangeOrders(telegramUserId: number): Promise<boolean> {
+  const res = await db().from('responders').select('telegram_user_id').not('telegram_user_id', 'is', null);
+  if (res.error) throw new Error(`mayChangeOrders: ${res.error.message}`);
+  const ids = (res.data ?? []).map((r) => Number((r as { telegram_user_id: number }).telegram_user_id));
+  if (ids.length === 0) return true; // nobody is identified yet, so nobody can be excluded
+  return ids.includes(telegramUserId);
+}
+
 export async function executeAction(row: CallbackAction, cq: TelegramCallbackQuery): Promise<string> {
   const action = row.action as CallbackActionName;
   switch (action) {
@@ -224,6 +248,7 @@ export async function executeAction(row: CallbackAction, cq: TelegramCallbackQue
       return 'Callback requested';
     }
     case CALLBACK_ACTIONS.APPLY_ORDER_CHANGE: {
+      if (!(await mayChangeOrders(cq.from.id))) return 'You are not set up to change orders';
       const params = row.params as unknown as ApplyOrderChangeParams;
       const by = cq.from.username ?? cq.from.first_name ?? String(cq.from.id);
       const { applyOrderChange } = await import('../../../lib/akme/order-change');

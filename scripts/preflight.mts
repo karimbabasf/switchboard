@@ -313,6 +313,57 @@ const checks: Check[] = [
     },
   },
   {
+    group: 'Telegram',
+    name: 'order-change taps are attributable',
+    run: async () => {
+      // Reports rather than fails. Anyone in the group can tap any button, and
+      // Apply changes an order, so this says out loud which of the two states
+      // that guard is in instead of leaving it to be found out.
+      const res = await fetch(
+        `${env('SUPABASE_URL')}/rest/v1/responders?select=name,telegram_user_id&active=is.true`,
+        {
+          headers: {
+            apikey: env('SUPABASE_SERVICE_ROLE_KEY'),
+            authorization: `Bearer ${env('SUPABASE_SERVICE_ROLE_KEY')}`,
+          },
+        },
+      );
+      if (!res.ok) return fail(`HTTP ${res.status}`);
+      const rows = (await res.json()) as { name: string; telegram_user_id: number | null }[];
+      const known = rows.filter((r) => r.telegram_user_id !== null);
+      if (known.length === 0) {
+        return pass('OFF: no responder has a telegram_user_id, so any group member can apply a change');
+      }
+      return pass(`ON: only ${known.map((r) => r.name).join(', ')} may apply order changes`);
+    },
+  },
+  {
+    group: 'Telnyx',
+    name: 'the app can place outbound calls',
+    run: async () => {
+      // Found null on 2026-08-03, and it is the quietest possible failure. This
+      // app only ever RECEIVES calls, so nothing about the inbound path notices,
+      // but every call this system places is outbound: each responder leg in the
+      // ring group, and the bridge behind escalate_to_human. Without a profile
+      // attached, Telnyx has nothing to bill those against and the dial fails, so
+      // "the phone rang and nobody's handset ever did" has no error anywhere near
+      // where it happened.
+      const app = await telnyx(`call_control_applications/${env('TELNYX_CONNECTION_ID')}`);
+      const profileId = app?.outbound?.outbound_voice_profile_id;
+      if (!profileId) {
+        const list = await telnyx('outbound_voice_profiles');
+        const usable = (Array.isArray(list) ? list : []).filter((p: { enabled?: boolean }) => p.enabled);
+        const hint = usable.length
+          ? `attach one, e.g. "${usable[0].name}" (${usable[0].id})`
+          : 'no enabled profile exists on the account, create one first';
+        return fail(`no outbound voice profile on the app, so every responder dial fails: ${hint}`);
+      }
+      const profile = await telnyx(`outbound_voice_profiles/${profileId}`);
+      if (profile?.enabled === false) return fail(`outbound profile "${profile.name}" is disabled`);
+      return pass(`-> "${profile?.name ?? profileId}"`);
+    },
+  },
+  {
     group: 'Telnyx',
     name: 'number is on the messaging profile',
     run: async () => {

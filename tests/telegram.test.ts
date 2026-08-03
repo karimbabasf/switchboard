@@ -30,6 +30,9 @@ vi.mock('../lib/telegram/client', async (importOriginal) => {
 // case calls markQuoteRequestHandled from it, stubbed here the same way
 // tests/sms.test.ts stubs modules it depends on but does not own.
 vi.mock('../lib/quote-requests', () => ({ markQuoteRequestHandled: vi.fn() }));
+// lib/akme/order-change.ts talks to Akme over HTTP; the guard under test runs
+// before it, so a stub is enough and a call to it is itself a failed assertion.
+vi.mock('../lib/akme/order-change', () => ({ applyOrderChange: vi.fn() }));
 
 import {
   detectInboundReply,
@@ -520,6 +523,73 @@ describe('executeAction: MARK_QUOTE_HANDLED (the Done button)', () => {
     const toast = await executeAction(callbackActionRow(), callbackQuery());
 
     expect(toast).toBe('Already marked handled');
+    expect(telegram.editMessageText).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('executeAction: APPLY_ORDER_CHANGE is the one button that changes an order', () => {
+  function row(): CallbackAction {
+    return {
+      id: 'cba-oc',
+      action: CALLBACK_ACTIONS.APPLY_ORDER_CHANGE,
+      params: { order_id: 'o-1', sku: 'CW-BUNDLE', qty: 5 },
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      created_at: new Date().toISOString(),
+    } as unknown as CallbackAction;
+  }
+
+  function tapBy(userId: number): TelegramCallbackQuery {
+    return {
+      id: 'cbq-oc',
+      data: 'cba-oc',
+      from: { id: userId, is_bot: false, username: 'someone' },
+      message: { message_id: 11, chat: { id: -100123456789, type: 'supergroup' }, text: 'Order change requested' },
+    };
+  }
+
+  /** Only the responders lookup the guard makes. */
+  function respondersReturning(rows: { telegram_user_id: number | null }[]): void {
+    mockedDb.mockReturnValue({
+      from: () => ({ select: () => ({ not: async () => ({ data: rows, error: null }) }) }),
+    } as never);
+  }
+
+  it('lets anyone tap while no responder has a telegram_user_id, or nobody could use their own group', async () => {
+    respondersReturning([]);
+    const { applyOrderChange } = await import('../lib/akme/order-change');
+    vi.mocked(applyOrderChange).mockResolvedValue({ ok: true, reference: 'AK-00007' });
+
+    expect(await executeAction(row(), tapBy(999))).toBe('Applied to AK-00007');
+  });
+
+  it('refuses a stranger once even one responder is identified', async () => {
+    respondersReturning([{ telegram_user_id: 555 }]);
+    const { applyOrderChange } = await import('../lib/akme/order-change');
+
+    const toast = await executeAction(row(), tapBy(999));
+
+    expect(toast).toMatch(/not set up/i);
+    expect(applyOrderChange).not.toHaveBeenCalled();
+    expect(telegram.editMessageText).not.toHaveBeenCalled();
+  });
+
+  it('still lets the identified responder through', async () => {
+    respondersReturning([{ telegram_user_id: 555 }]);
+    const { applyOrderChange } = await import('../lib/akme/order-change');
+    vi.mocked(applyOrderChange).mockResolvedValue({ ok: true, reference: 'AK-00007' });
+
+    expect(await executeAction(row(), tapBy(555))).toBe('Applied to AK-00007');
+  });
+
+  it("leaves the card tappable when Akme refuses, since the reason is about the order's current state", async () => {
+    respondersReturning([]);
+    const { applyOrderChange } = await import('../lib/akme/order-change');
+    vi.mocked(applyOrderChange).mockResolvedValue({ ok: false, reason: 'order is confirmed and can no longer be changed here' });
+
+    const toast = await executeAction(row(), tapBy(555));
+
+    expect(toast).toContain('confirmed');
     expect(telegram.editMessageText).not.toHaveBeenCalled();
   });
 });
