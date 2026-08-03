@@ -72,7 +72,18 @@ export interface AssistantConfig {
   model: string;
   instructions: string;
   greeting: string;
-  transcription: { model: string; settings: { keyterm: string } };
+  transcription: {
+    model: string;
+    settings: {
+      keyterm: string;
+      /** 0.5-0.9. Confidence needed to call a turn finished. */
+      eot_threshold: number;
+      /** 500-10000. Silence that forces a turn to end. */
+      eot_timeout_ms: number;
+      /** 0.3-0.9, and must be <= eot_threshold. See the comment at the value. */
+      eager_eot_threshold: number;
+    };
+  };
   interruption_settings: {
     enable: boolean;
     disable_greeting_interruption: boolean;
@@ -81,6 +92,15 @@ export interface AssistantConfig {
   };
   telephony_settings: {
     noise_suppression: 'krisp' | 'deepfilternet' | 'disabled';
+    /**
+     * Undocumented, like interrupt_prediction_threshold, and both are read back
+     * by assistant-sync so a field Telnyx drops fails the sync instead of going
+     * quiet. Written at their current values rather than changed: neither has
+     * any evidence against it, and the point of naming them here is that they
+     * stop being whatever Telnyx defaults to next.
+     */
+    time_limit_secs: number;
+    user_idle_reply_secs: number;
     /**
      * The assistant records the call itself unless told not to, and `enabled`
      * DEFAULTS TO TRUE. We already run our own dual-channel `record_start` from
@@ -96,6 +116,8 @@ export interface AssistantConfig {
    */
   voice_settings: {
     voice: string;
+    /** Also undocumented. 1 is the natural pace and what we want. */
+    voice_speed: number;
     background_audio: { type: 'predefined_media'; value: string; volume: number };
   };
   tools: WebhookTool[];
@@ -230,9 +252,33 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
     greeting: GREETING,
     transcription: {
       model: optionalEnv('TELNYX_STT', 'deepgram/flux'),
-      // Comma-separated string, not an array. Same terms the post-call
-      // transcript boosts, from the same function, so the two cannot drift.
-      settings: { keyterm: keyterms().join(',') },
+      settings: {
+        // Comma-separated string, not an array. Same terms the post-call
+        // transcript boosts, from the same function, so the two cannot drift.
+        keyterm: keyterms().join(','),
+
+        // Left at the Portal default. Lowering it makes the agent commit to a
+        // turn ending sooner, which is how you start talking over people, and
+        // nothing on a real call has argued for it.
+        eot_threshold: 0.8,
+
+        // Down from the 5000 default. This is the silence that forces a turn to
+        // end when Flux never gets confident, i.e. exactly the caller who trails
+        // off mid-sentence. Five seconds of that reads as a dropped line.
+        eot_timeout_ms: 3000,
+
+        // The one that was actually broken. This was sitting at 0.8, equal to
+        // eot_threshold, because nothing here ever set it and that is what the
+        // API stores by default. Telnyx documents what that means: "Setting both
+        // thresholds to the same value effectively disables eager end-of-turn
+        // behavior because the system waits for final end-of-turn confirmation
+        // before starting LLM processing." So the whole point of running Flux,
+        // starting the model early on a speculative end of turn, was off. 0.4 is
+        // the Portal default and the value in Telnyx's own example. Speculation
+        // that turns out wrong is discarded, so this cannot cut a caller off:
+        // the real commit still needs 0.8.
+        eager_eot_threshold: 0.4,
+      },
     },
     interruption_settings: {
       enable: true,
@@ -249,10 +295,19 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
       // interruption still lands. Read back by assistant-sync, so if Telnyx ever
       // drops the field the sync says so instead of going quiet.
       interrupt_prediction_threshold: 0.4,
-      start_speaking_plan: { wait_seconds: 0.3 },
+      // Down from 0.3, on the Flux guidance: "Flux works best with low start
+      // speaking delays, such as 0.1 seconds for wait time". 0.3 was picked as
+      // simply-below-the-0.4-default, before the model was Flux.
+      start_speaking_plan: { wait_seconds: 0.1 },
     },
     telephony_settings: {
       noise_suppression: 'krisp',
+      // Both unchanged, both now ours rather than Telnyx's. 30 minutes is a
+      // runaway guard, not a target, and a real call is with a human long before
+      // it. 10 seconds of silence before the agent speaks up is the difference
+      // between patient and pushy while somebody looks up an address.
+      time_limit_secs: 1800,
+      user_idle_reply_secs: 10,
       // Off, because our own record_start already covers the whole call. See the
       // field comment above: this defaults to TRUE and was the second recording.
       recording_settings: { enabled: false },
@@ -263,6 +318,7 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
       // finish. Format is <Provider>.<Model>.<VoiceId>, and the id must exist in
       // GET /v2/text-to-speech/voices.
       voice: agentVoice(),
+      voice_speed: 1,
       // "office" room tone was here so a pause during a tool call did not read as
       // a dropped line. On a real call it read as murmuring instead: Karim heard
       // the agent as full of "uhmms", and office ambience is chatter. The trade

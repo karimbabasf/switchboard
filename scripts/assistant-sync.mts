@@ -123,8 +123,18 @@ const checks: { name: string; sent: unknown; stored: unknown }[] = [
     sent: config.voice_settings.background_audio.value,
     stored: ((voiceSettings.background_audio ?? {}) as Record<string, unknown>).value,
   },
+  { name: 'voice_speed', sent: config.voice_settings.voice_speed, stored: voiceSettings.voice_speed },
   { name: 'model', sent: config.model, stored: got.model },
   { name: 'transcription.model', sent: config.transcription.model, stored: transcription.model },
+  ...(['eot_threshold', 'eot_timeout_ms', 'eager_eot_threshold'] as const).map((key) => ({
+    // Flux's own turn-taking knobs. eager_eot_threshold is the one worth failing
+    // over: at the API default it equals eot_threshold, which Telnyx documents as
+    // disabling eager end-of-turn entirely, and nothing about a call sounds
+    // broken when that happens. It is just slower, everywhere, forever.
+    name: `transcription.settings.${key}`,
+    sent: config.transcription.settings[key],
+    stored: ((transcription.settings ?? {}) as Record<string, unknown>)[key],
+  })),
   {
     name: 'interrupt_prediction_threshold',
     sent: config.interruption_settings.interrupt_prediction_threshold,
@@ -139,6 +149,12 @@ const checks: { name: string; sent: unknown; stored: unknown }[] = [
     name: 'noise_suppression',
     sent: config.telephony_settings.noise_suppression,
     stored: telephony.noise_suppression,
+  },
+  { name: 'time_limit_secs', sent: config.telephony_settings.time_limit_secs, stored: telephony.time_limit_secs },
+  {
+    name: 'user_idle_reply_secs',
+    sent: config.telephony_settings.user_idle_reply_secs,
+    stored: telephony.user_idle_reply_secs,
   },
   {
     // The one that produced two recordings and two call.recording.saved webhooks

@@ -546,6 +546,18 @@ async function onInitiated(event: TelnyxWebhook, deps: VoiceDeps): Promise<void>
   const p = event.data.payload;
   if (responderState(p)) return; // one of our own dialed legs, already recorded
 
+  // Answered BEFORE any of the bookkeeping below, which is the entire point of
+  // this ordering. upsertContact alone is three round trips (upsert, read back,
+  // match a Akme customer), and with createCall and createFlow behind it that is
+  // six sequential Supabase hops from the app server. Every one of them used to run
+  // while the caller sat listening to ringing: ~2.8s of the 5.8s measured between
+  // dialing and hearing anything. None of it is needed to open the line.
+  //
+  // The cost is that call.answered now reliably arrives while these writes are
+  // still in flight, so onAnswered waits for the row rather than assuming it.
+  // That trade is deliberate: the waiting moved to our side of the call.
+  await deps.commands.answer(p.call_control_id);
+
   const from = toE164(p.from ?? '') ?? ANONYMOUS_CALLER;
   await deps.store.upsertContact(from);
   const callId = await deps.store.createCall({
@@ -554,7 +566,37 @@ async function onInitiated(event: TelnyxWebhook, deps: VoiceDeps): Promise<void>
     started_at: event.data.occurred_at,
   });
   await deps.store.createFlow({ call_control_id: p.call_control_id, call_id: callId });
-  await deps.commands.answer(p.call_control_id);
+}
+
+/**
+ * Advances the flow stage, tolerating a row onInitiated has not written yet.
+ *
+ * A null from advanceStage means one of two very different things now: the row
+ * is in another stage (a duplicate webhook, which Telnyx sends freely and which
+ * must stay a no-op), or the row does not exist at all (onInitiated answered the
+ * call and is still writing). Only the second is worth waiting on, so the two are
+ * told apart by an explicit read rather than by retrying blindly.
+ *
+ * Bounded well under the write path it is waiting for. If onInitiated failed
+ * outright, its event was released for a Telnyx retry and no amount of waiting
+ * here would produce the row.
+ */
+export const FLOW_WAIT_ATTEMPTS = 4;
+export const FLOW_WAIT_MS = 250;
+
+async function advanceOnceWritten(
+  store: VoiceStore,
+  callControlId: string,
+  from: CallFlow['stage'][],
+  to: CallFlow['stage'],
+): Promise<CallFlow | null> {
+  for (let attempt = 0; attempt < FLOW_WAIT_ATTEMPTS; attempt++) {
+    const flow = await store.advanceStage(callControlId, from, to);
+    if (flow) return flow;
+    if (await store.getFlow(callControlId)) return null; // exists, wrong stage: a repeat
+    await new Promise((resolve) => setTimeout(resolve, FLOW_WAIT_MS));
+  }
+  return null;
 }
 
 async function onAnswered(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> {
@@ -562,7 +604,7 @@ async function onAnswered(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> 
   const responder = responderState(p);
   if (responder) return onResponderAnswered(event, responder, deps);
 
-  const flow = await deps.store.advanceStage(p.call_control_id, ['initiated'], 'answered');
+  const flow = await advanceOnceWritten(deps.store, p.call_control_id, ['initiated'], 'answered');
   if (!flow) return;
 
   // Started before the disclosure, not after it. In a few seconds the assistant

@@ -11,6 +11,8 @@ import type {
   TelnyxCommands,
 } from '../lib/telnyx/client';
 import {
+  FLOW_WAIT_ATTEMPTS,
+  FLOW_WAIT_MS,
   processTelnyxEvent,
   receiveTelnyxWebhook,
   type CallFlow,
@@ -483,6 +485,49 @@ describe('inbound flow ordering', () => {
     const fake = fakeCommands();
     await processTelnyxEvent(webhook('call.initiated', { from: '(415) 555-0123' }), { store, commands: fake.commands });
     expect([...store.contacts]).toEqual(['+14155550123']);
+  });
+
+  // The two halves of one trade. Answering first is worth ~2.8s of ringing the
+  // caller used to sit through, and it is only safe because the second test
+  // holds: call.answered now routinely overtakes the writes it used to follow.
+  it('answers before it writes anything', async () => {
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    let answeredFirst: boolean | null = null;
+    const write = store.upsertContact.bind(store);
+    store.upsertContact = async (phone: string) => {
+      answeredFirst ??= fake.of('answer').length === 1;
+      return write(phone);
+    };
+
+    await processTelnyxEvent(webhook('call.initiated', { from: '+14155550123' }), { store, commands: fake.commands });
+
+    expect(answeredFirst).toBe(true);
+  });
+
+  it('waits for the flow row when call.answered overtakes the writes', async () => {
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    // call.initiated has already answered the line and is still writing, so the
+    // row lands mid-wait. Under 4 x 250ms, which is the point of the bound.
+    setTimeout(() => void store.createFlow({ call_control_id: 'leg-a', call_id: 'call-1' }), 300);
+
+    await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), { store, commands: fake.commands });
+
+    expect(fake.of('speak')).toHaveLength(1);
+  });
+
+  it('does not wait when the row exists in a later stage, which is a redelivery', async () => {
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    await store.createFlow({ call_control_id: 'leg-a', call_id: 'call-1' });
+    await store.advanceStage('leg-a', ['initiated'], 'assistant');
+
+    const started = Date.now();
+    await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), { store, commands: fake.commands });
+
+    expect(fake.of('speak')).toHaveLength(0);
+    expect(Date.now() - started).toBeLessThan(FLOW_WAIT_ATTEMPTS * FLOW_WAIT_MS);
   });
 });
 

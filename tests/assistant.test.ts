@@ -17,8 +17,25 @@ describe('assistant.ts: the settings that make it feel real', () => {
     expect(cfg().interruption_settings.enable).toBe(true);
   });
 
-  it('waits a customer-service 0.3s before speaking, not the 0.4s default', () => {
-    expect(cfg().interruption_settings.start_speaking_plan.wait_seconds).toBe(0.3);
+  it('waits 0.1s before speaking, the delay Flux is documented to want', () => {
+    // Was 0.3, chosen only as below-the-0.4-default and before the model was
+    // Flux. Telnyx: "Flux works best with low start speaking delays, such as 0.1
+    // seconds for wait time and endpointing plan thresholds."
+    expect(cfg().interruption_settings.start_speaking_plan.wait_seconds).toBe(0.1);
+  });
+
+  it('keeps eager end-of-turn strictly below the final one, or it does nothing', () => {
+    // The whole reason Flux is here. Telnyx: "Setting both thresholds to the
+    // same value effectively disables eager end-of-turn behavior because the
+    // system waits for final end-of-turn confirmation before starting LLM
+    // processing." Both sat at 0.8 for a week because nothing sent either.
+    const { eot_threshold, eager_eot_threshold, eot_timeout_ms } = cfg().transcription.settings;
+    expect(eager_eot_threshold).toBeLessThan(eot_threshold);
+    expect(eot_threshold).toBeGreaterThanOrEqual(0.5); // documented range is 0.5-0.9
+    expect(eot_threshold).toBeLessThanOrEqual(0.9);
+    expect(eager_eot_threshold).toBeGreaterThanOrEqual(0.3); // documented range is 0.3-0.9
+    expect(eot_timeout_ms).toBeGreaterThanOrEqual(500); // documented range is 500-10000
+    expect(eot_timeout_ms).toBeLessThanOrEqual(10_000);
   });
 
   it('turns interruption prediction on, which is off by default', () => {
