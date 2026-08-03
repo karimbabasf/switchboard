@@ -248,7 +248,14 @@ async function complete(turns: Turn[]): Promise<Turn> {
     const res = await fetch(API, {
       method: 'POST',
       headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, messages: turns, tools: TOOLS, max_tokens: 400 }),
+      // No max_tokens. Telnyx rejects it alongside function tools with error
+      // 10015, "max_completion_tokens (former max_tokens) and function tools can
+      // not be used at the same time", which errored all 9 scenarios rather than
+      // failing them. The cap was only ever a guard against a runaway answer, and
+      // the turn cap in `run()` already bounds the conversation, so dropping it
+      // costs nothing. Read the error body before blaming a prompt change: a
+      // harness that reports ERROR on every scenario is never the prompt.
+      body: JSON.stringify({ model: MODEL, messages: turns, tools: TOOLS }),
     });
 
     if (res.ok) {

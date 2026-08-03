@@ -199,12 +199,53 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     expect(prompt).toMatch(/your NEXT sentence is the route/);
   });
 
-  it('forbids asking what they need a second time', () => {
-    // Same call: the greeting asked "how can I help", then the agent asked "what
-    // can I do for you" and then "what do you need". Three open questions, one
-    // caller, who had answered the first one.
-    expect(prompt).toMatch(/YOU HAVE ALREADY ASKED WHAT THEY NEED/);
+  it('answers a repeated statement instead of re-asking, but may clarify exactly once', () => {
+    // REVERSED 2026-08-03, and the reversal is the point. The old rule was a flat
+    // ban: "YOU HAVE ALREADY ASKED WHAT THEY NEED, never ask it a second time in
+    // an open form." It was written after a call where the agent asked three open
+    // questions in a row, and it fixed that. But it pairs with
+    // `disable_greeting_interruption: true`, which THROWS AWAY anything the caller
+    // says over the greeting. So a caller who starts talking during "How can I
+    // help you today?" is never heard, and the agent is then forbidden from
+    // asking. That deadlock is what produced the 21:38 call where roughly 40 of
+    // 116 seconds went to "Hello? / Who is this? / Who is this?".
+    //
+    // The half that was right survives: a caller repeating themselves means the
+    // last turn missed it, so answer it rather than asking again. The half that
+    // caused the deadlock is replaced by a budget of exactly one clarifying ask,
+    // available only when nothing reached the agent at all.
     expect(prompt).toMatch(/answer the thing they said instead of asking again/i);
+    expect(prompt).toMatch(/ask once and only once/i);
+    expect(prompt).not.toMatch(/YOU HAVE ALREADY ASKED WHAT THEY NEED/);
+  });
+
+  it('answers an identity challenge, every time it is asked', () => {
+    // The same call asked "who is this?" and got nothing back, twice. Nothing in
+    // the prompt covered it: the nearest rule was "never claim to be a person",
+    // which answers a different question and only fires if the caller asks
+    // whether they are talking to a human.
+    expect(prompt).toMatch(/if they ask who you are/i);
+    expect(prompt).toMatch(/every time it is asked/i);
+    expect(prompt).toMatch(/This is Robin, the automated assistant for/);
+  });
+
+  it('closes the turn after text_me_the_list instead of asking what else', () => {
+    // Caught by `pnpm rehearse` on 2026-08-03, not by any unit test: the agent
+    // routed correctly, fired the tool, and then said "What else can I get for
+    // you?", which is order-taking wearing a pleasantry. Two of nine scenarios
+    // failed on it. The existing ban on "what else" lives under the
+    // order-building rule, and the model read that as being about the list
+    // rather than about the closing question, so the post-tool turn needed
+    // saying out loud. This is the second time this exact regression has
+    // appeared, so it gets a test rather than another paragraph.
+    expect(prompt).toMatch(/once text_me_the_list has fired/i);
+    expect(prompt).toMatch(/never end that turn with "what else", "anything else"/i);
+  });
+
+  it('caps a failing thread at two turns rather than letting it run', () => {
+    // Three tries at the same question is how a 58 second call became a 116
+    // second one. The handoff has to be cheaper than the third attempt.
+    expect(prompt).toMatch(/two failed turns on the same question is a handoff/i);
   });
 
   it('knows the words callers actually use, so it cannot deny stocking bubble wrap', () => {
