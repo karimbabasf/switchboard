@@ -42,6 +42,7 @@ export const SMS_INTENTS = [
   'complaint',
   'payment',
   'opt_out',
+  'bargaining',
   'other',
 ] as const;
 
@@ -57,9 +58,23 @@ export type SmsIntent = (typeof SMS_INTENTS)[number];
 const AUTO_SEND: ReadonlySet<SmsIntent> = new Set<SmsIntent>([
   'hours',
   'products',
-  'order_status',
   'acknowledge',
 ]);
+
+/**
+ * `order_status` WAS on that list and had to come off, 2026-08-03.
+ *
+ * It is not a standing fact, it is a claim about one customer's order, and this
+ * agent has no way to look one up: the SMS path imports env, brief and templates
+ * and nothing else, so there is no order read anywhere in it. The voice agent's
+ * `check_order` tool is not reachable from here. So the only thing that could
+ * have produced an `order_status` reply was the model inventing one, and it was
+ * auto-sending it to a real customer with no test covering the path.
+ *
+ * Putting it back means giving this agent a real lookup first. Until then a
+ * status question is a human, which is the honest answer rather than a
+ * confident one.
+ */
 
 /**
  * What SmsIntent a template answers as. A caller downstream (lib/telnyx/sms.ts)
@@ -103,6 +118,59 @@ function commitsToADay(reply: string): boolean {
 
 /** Carriers handle STOP at the campaign level, but we must never auto-text back into one. */
 const OPT_OUT = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|start|unstop|help)\s*$/i;
+
+/**
+ * Bargaining, caught deterministically on the INBOUND text, before anything can
+ * answer it.
+ *
+ * Karim's rule is zero tolerance: the moment a customer starts to negotiate, a
+ * human is pinged and the machine stops talking. This has to run ahead of the
+ * TEMPLATES as well as the model, because "what's your best price on tape"
+ * matches the quote template, and the template branch deliberately skips every
+ * guard, so it would auto-send a cheerful form answer at someone opening a
+ * negotiation.
+ *
+ * Deliberately broad, and it fails OPEN the way notify.ts does rather than
+ * closed the way the send guards do. A false positive costs one glance at a
+ * card. A false negative is the machine haggling on the company's behalf.
+ */
+const BARGAINING = new RegExp(
+  [
+    'discount',
+    'bargain',
+    'haggl',
+    'negotiat',
+    'best price',
+    'best you can do',
+    'better price',
+    'better deal',
+    'better offer',
+    'price match',
+    'match that price',
+    'price break',
+    'bulk pricing',
+    'bulk rate',
+    'too expensive',
+    'too pricey',
+    'too high',
+    'too much',
+    'cheaper',
+    'come down',
+    'knock off',
+    'do better',
+    'your best',
+    'beat that',
+    'beat their',
+    'any deals',
+    'any deal',
+  ]
+    // Written as plain phrases and joined here so the list stays readable and a
+    // new phrase is a one-line change. \s+ so "best  price" across a line break
+    // still matches.
+    .map((phrase) => phrase.replace(/ /g, '\\s+'))
+    .join('|'),
+  'i',
+);
 
 export interface SmsDraft {
   intent: SmsIntent;
@@ -158,6 +226,9 @@ WHAT YOU MAY NEVER WRITE
 - Never a delivery date, a time window, or a day of the week. You may state the standard hours and nothing more.
 - Never a card number or a payment instruction.
 - Never invent an order number, an invoice number, or a stock level.
+
+NEVER NEGOTIATE
+Anything that is an attempt to get a better price is "bargaining": asking for a discount, asking what your best price is, saying it costs too much, comparing us to someone cheaper, or asking for a bulk rate. Do not answer it, do not explain that we do not discount, and do not soften it. Classify it as "bargaining" and draft one line saying someone from the team will be in touch.
 
 CLASSIFY HONESTLY
 The intent decides whether a human reads your reply before it sends. Choosing a
@@ -265,6 +336,19 @@ export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDe
   // who just sent STOP is the one SMS mistake with a regulator attached to it.
   if (OPT_OUT.test(body)) {
     return { intent: 'opt_out', reply: '', autoSend: false, reason: 'opt-out keyword, carrier handles this' };
+  }
+
+  // Bargaining stops the machine dead, ahead of the templates and the model.
+  // The reply is drafted rather than sent: the group gets a card and a human
+  // decides what to say to someone who is negotiating. Silence is not the
+  // answer either, so the draft is a plain handoff line they can tap.
+  if (BARGAINING.test(body)) {
+    return {
+      intent: 'bargaining',
+      reply: 'Let me get someone from the team on that. They will be in touch shortly.',
+      autoSend: false,
+      reason: 'the customer is bargaining, which is always a human',
+    };
   }
 
   // A template answers this outright. A human wrote and reviewed every one of

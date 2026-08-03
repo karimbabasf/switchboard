@@ -25,6 +25,71 @@ const broken: SmsAgentDeps = {
   },
 };
 
+describe('draftSmsReply: bargaining is always a human, at zero tolerance', () => {
+  // Karim's rule, 2026-08-03: "as soon as the customer begins to bargain we ping
+  // it in the tg group. no bargaining at all."
+
+  it('stops a bargaining text before the TEMPLATE layer can answer it', async () => {
+    // This is the case that made the check deterministic and put it ahead of the
+    // templates rather than after. "best price" also matches the quote template,
+    // and the template branch deliberately skips every guard because a human
+    // wrote those strings, so without this the machine would auto-send a
+    // cheerful form answer to someone opening a negotiation.
+    const d = await draftSmsReply("what's your best price on carton tape", neverCalled());
+    expect(d.intent).toBe('bargaining');
+    expect(d.autoSend).toBe(false);
+  });
+
+  it('catches the common phrasings without spending a token on any of them', async () => {
+    for (const text of [
+      'any chance of a discount on 10 pallets',
+      'that seems too expensive',
+      'can you do better on the film',
+      'I can get it cheaper down the road',
+      'do you do bulk pricing',
+      'willing to negotiate?',
+    ]) {
+      const d = await draftSmsReply(text, neverCalled());
+      expect(d.intent, text).toBe('bargaining');
+      expect(d.autoSend, text).toBe(false);
+    }
+  });
+
+  it('leaves the customer something rather than silence', async () => {
+    // Not answering at all reads as being ignored. The draft is a plain handoff
+    // line, and it still waits for a tap: the group decides what to say to
+    // someone who is negotiating.
+    const d = await draftSmsReply('any discount for cash', neverCalled());
+    expect(d.reply).toMatch(/team/i);
+    expect(d.autoSend).toBe(false);
+  });
+});
+
+describe('draftSmsReply: order_status can no longer auto-send', () => {
+  it('holds an order-status reply for a human, because nothing here can look one up', async () => {
+    // Removed from AUTO_SEND on 2026-08-03. It is not a standing fact, it is a
+    // claim about one customer's order, and this agent has no order lookup at
+    // all: the SMS path imports env, brief and templates and nothing else. So
+    // the only thing that could produce an order_status reply was the model
+    // inventing one, and it was auto-sending that to a real customer.
+    const d = await draftSmsReply(
+      'is my order ready to pick up',
+      model('order_status', 'Your order is packed and ready for will call.'),
+    );
+    expect(d.autoSend).toBe(false);
+    expect(d.reason).toMatch(/needs a human/i);
+  });
+});
+
+/** A deps object that fails the test if the model is called at all. */
+function neverCalled() {
+  return {
+    complete: async () => {
+      throw new Error('the model was called for a message that should never have reached it');
+    },
+  };
+}
+
 describe('draftSmsReply: what goes out without a human', () => {
   it('auto-sends the hours, which are already public on the website', async () => {
     // Phrased to avoid the "what time" / "hours" template trigger: this test is

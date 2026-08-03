@@ -89,6 +89,12 @@ beforeEach(() => {
   vi.stubEnv('TELNYX_API_KEY', 'test-key');
   vi.stubEnv('TELNYX_PUBLIC_KEY', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
   vi.stubEnv('TELNYX_NUMBER', '+14155550100');
+  // The door in sendSms fails closed on an unset SMS_ALLOWLIST, so every test
+  // that sends has to opt its recipient in. That is the guard working: before
+  // this existed, three of these tests passed while the codebase could text any
+  // number in the world. `*` here rather than a list, because these tests are
+  // about message handling and the allowlist has its own tests below.
+  vi.stubEnv('SMS_ALLOWLIST', '*');
   vi.stubGlobal('fetch', vi.fn());
 });
 
@@ -230,6 +236,82 @@ describe('handleTelnyxSmsEvent: inbound contact resolution', () => {
     expect(deps.reply).toHaveBeenCalledWith('+14155550111', 'hey', 42, false, 'Known Caller');
   });
 });
+
+describe('sendSms: the door', () => {
+  // These four cover the ONLY function in the codebase that talks to Telnyx
+  // messaging. Four callers reach it (the autopilot, a human tapping Send on a
+  // card, a human replying in a topic, and the voice agent's text_me_the_list
+  // mid-call), and before 2026-08-03 none of them were checked: every guard sat
+  // at the point a reply was decided. Akme's email CRM had the identical hole,
+  // where mayWriteTo lived in one branch and a human tap could mail a stranger.
+
+  it('sends to nobody when SMS_ALLOWLIST is unset, rather than to everybody', async () => {
+    // The fail-closed direction matters more than the check. An allowlist that
+    // defaults to open means forgetting to configure it texts the world, and
+    // that failure is silent and unbounded.
+    vi.stubEnv('SMS_ALLOWLIST', '');
+    await expect(sendSms('+14155550111', 'hi there')).rejects.toThrow(/unset, so no message may be sent/i);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it('refuses a number that is not on the list', async () => {
+    vi.stubEnv('SMS_ALLOWLIST', '+14155550999');
+    await expect(sendSms('+14155550111', 'hi there')).rejects.toThrow(/not on SMS_ALLOWLIST/i);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it('refuses an opted-out contact even when they are on the allowlist', async () => {
+    // Opt-out outranks the allowlist and outranks a human tap. Carriers also
+    // enforce STOP at the campaign level, but that is someone else's guarantee
+    // and it cannot be asserted here.
+    vi.stubEnv('SMS_ALLOWLIST', '*');
+    queueFrom([makeChain(ok({ ...contactFixture(), opted_out_at: '2026-08-02T10:00:00Z' }))]);
+    await expect(sendSms('+14155550111', 'hi there')).rejects.toThrow(/opted out at/i);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it('lets an allowlisted, non-opted-out number through', async () => {
+    // The negative tests above are only meaningful if the positive path works,
+    // otherwise a door that rejects everything would pass all three.
+    vi.stubEnv('SMS_ALLOWLIST', '+14155550111');
+    const contact = contactFixture();
+    const row = {
+      id: 'msg_row_ok',
+      contact_phone: contact.phone,
+      direction: 'outbound',
+      body: 'hi there',
+      media: [],
+      provider_id: null,
+      provider_status: null,
+      telegram_message_id: null,
+      created_at: 'now',
+    };
+    queueFrom([
+      makeChain(ok(contact)),
+      makeChain(ok(row)),
+      makeChain(ok({ ...row, provider_id: 'telnyx_ok', provider_status: 'sent' })),
+    ]);
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ data: { id: 'telnyx_ok' } }), { status: 200 }),
+    );
+
+    await expect(sendSms('+14155550111', 'hi there')).resolves.toMatchObject({ provider_status: 'sent' });
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+  });
+});
+
+function contactFixture() {
+  return {
+    phone: '+14155550111',
+    display_name: null,
+    customer_id: null,
+    telegram_topic_id: null,
+    topic_created_at: null,
+    opted_out_at: null,
+    created_at: 'now',
+    updated_at: 'now',
+  };
+}
 
 describe('sendSms: outbound', () => {
   it('records the message row before sending, then records provider_id', async () => {

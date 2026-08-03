@@ -94,10 +94,15 @@ finished. It is the channel a customer can be left alone with.
 
 A rule in a prompt is a preference. These are the checks that make them hold:
 
-- **The allowlist and every guard sit at the single function that talks to Telnyx**,
-  not at the point where a reply is decided. A human tapping send goes through the
-  same door as the agent. This exact hole was found and fixed in the Akme email
-  CRM; do not rebuild it here.
+- **The door decides WHO may be reached. The decision point decides WHAT the
+  machine may say.** `sendSms` is the only function that talks to Telnyx, and it
+  enforces the recipient allowlist and the opt-out stamp, so a human tapping Send
+  is covered exactly like the autopilot. It deliberately does NOT check content:
+  a human is allowed to quote a price, and that is the entire point of the tap.
+  The money and day-commitment guards therefore stay where the machine drafts.
+  (Corrected 2026-08-03. This section first said "every guard sits at the door",
+  which would have broken the one path that is supposed to be able to say
+  anything.)
 - **Bargaining and price detection have two rungs**, deterministic first so obvious
   cases cost no tokens, then the model for the phrasing no keyword catches. The
   deterministic rung fires on its own, it does not need the model to agree.

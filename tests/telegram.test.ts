@@ -234,6 +234,7 @@ function contactRow(overrides: Partial<Contact> = {}): Contact {
     customer_id: null,
     telegram_topic_id: null,
     topic_created_at: null,
+    opted_out_at: null,
     created_at: 'now',
     updated_at: 'now',
     ...overrides,

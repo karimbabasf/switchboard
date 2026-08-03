@@ -12,6 +12,10 @@ export interface Contact {
   customer_id: string | null; // -> customers.id, null for strangers
   telegram_topic_id: number | null; // nullable AND replaceable, topics can be deleted
   topic_created_at: string | null;
+  // Non-null means no outbound message may reach them by ANY path, machine or
+  // human. Enforced at the door in lib/telnyx/sms.ts sendSms, not at the point
+  // a reply is decided, because a human tapping Send has to be covered too.
+  opted_out_at: string | null;
   created_at: string;
   updated_at: string;
 }

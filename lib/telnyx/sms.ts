@@ -220,7 +220,19 @@ async function replyWithAgent(
       ? draftFallback('the message has an attachment the agent cannot see')
       : await draftSmsReply(body, smsAgentDeps());
 
-    if (draft.intent === 'opt_out') return;
+    // Record it, do not just decline to answer. Suppressing this one reply was
+    // all that used to happen, so the next inbound text started clean and
+    // nothing stopped a human, or the voice agent's text_me_the_list, texting
+    // them afterwards. The stamp is what the door reads.
+    if (draft.intent === 'opt_out') {
+      const { error } = await db()
+        .from('contacts')
+        .update({ opted_out_at: new Date().toISOString() })
+        .eq('phone', phone)
+        .is('opted_out_at', null); // first opt-out wins, so the date stays the date they asked
+      if (error) console.error('[sms] failed to record opt-out:', error.message);
+      return;
+    }
 
     // Covers both triggers in one check: draftSmsReply maps the `quote`
     // template's hit to intent 'pricing', the same value the model uses for a
@@ -300,14 +312,66 @@ export async function handleTelnyxSmsEvent(
   }
 }
 
+export class SmsBlocked extends Error {}
+
+/**
+ * Who we are allowed to text at all, checked at the door below.
+ *
+ * Unset means NOBODY, which is deliberate: an empty allowlist has to fail
+ * closed, or forgetting to configure it silently means "text the world". `*`
+ * turns it off, and typing that is the moment someone decides this line may
+ * reach real customers.
+ *
+ * Same shape and same reasoning as Akme's AUTOPILOT_ALLOWLIST, which exists
+ * because that CRM would otherwise have emailed strangers.
+ */
+function mayTextRecipient(to: string): boolean {
+  const raw = (process.env.SMS_ALLOWLIST ?? '').trim();
+  if (!raw) return false;
+  if (raw === '*') return true;
+  return raw
+    .split(',')
+    .map((entry) => toE164(entry.trim()))
+    .some((entry) => entry === to);
+}
+
 /**
  * Sends an SMS or MMS (pass `media`). Insert-then-send-then-record on purpose:
  * a send that succeeds but is never recorded is worse than a recorded send
  * that failed, because the second is visible and the first is not.
+ *
+ * THIS IS THE DOOR. Nothing else in the codebase talks to Telnyx messaging, and
+ * four different callers reach it: the SMS autopilot, a human tapping Send on a
+ * Telegram card, a human replying inside a contact's topic, and the voice
+ * agent's text_me_the_list tool mid-call. So the two checks below are the only
+ * ones that hold for all of them, and they live here rather than at any
+ * decision point. Akme's email CRM had exactly this bug in reverse: mayWriteTo
+ * was called from one branch, so a human tapping Send could mail a stranger.
+ *
+ * What is NOT checked here, on purpose: the content guards over money and day
+ * commitments. Those exist to stop the MACHINE making a promise, and a human
+ * tapping Send is allowed to quote a price. Guarding content here would break
+ * the one path that is supposed to be able to say anything. The door is about
+ * WHO may be reached; the decision point is about what the machine may say.
  */
 export async function sendSms(toPhone: string, body: string, media: MediaItem[] = []): Promise<Message> {
   const to = assertE164(toPhone, 'sendSms to');
+
+  if (!mayTextRecipient(to)) {
+    throw new SmsBlocked(
+      (process.env.SMS_ALLOWLIST ?? '').trim()
+        ? `${to} is not on SMS_ALLOWLIST`
+        : 'SMS_ALLOWLIST is unset, so no message may be sent to anyone',
+    );
+  }
+
   const contact = await resolveContact(to);
+
+  // An opt-out outranks everything, including a human tap. Carriers enforce STOP
+  // at the campaign level too, but that is someone else's guarantee.
+  if (contact.opted_out_at) {
+    throw new SmsBlocked(`${to} opted out at ${contact.opted_out_at}`);
+  }
 
   const inserted = await db()
     .from('messages')
