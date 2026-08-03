@@ -51,6 +51,25 @@ export function agentVoice(): string {
   return optionalEnv('TELNYX_TTS', 'Telnyx.Bayan.Amanda');
 }
 
+/**
+ * How fast Robin talks. 1 is the voice's natural pace, below 1 is slower.
+ *
+ * Down from 1 on Karim's read of a real call (2026-08-03): understandable, but
+ * enough faster than a person that a caller has to work to keep up, and a phone
+ * line is the one place you cannot ask someone to rewind.
+ *
+ * `voice_speed` is undocumented, like `interrupt_prediction_threshold`, so a 200
+ * from Telnyx proves nothing here and `pnpm assistant:sync` reading it back is
+ * what says it stored. Env-overridable because pace is a taste knob and finding
+ * the right one should not need a code change; the clamp is there so a typo in
+ * .env.local cannot put NaN in the request and fail the sync with a message
+ * about some other field.
+ */
+export function voiceSpeed(): number {
+  const parsed = Number(optionalEnv('TELNYX_VOICE_SPEED', '0.9'));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.9;
+}
+
 export interface WebhookTool {
   type: 'webhook';
   webhook: {
@@ -116,7 +135,7 @@ export interface AssistantConfig {
    */
   voice_settings: {
     voice: string;
-    /** Also undocumented. 1 is the natural pace and what we want. */
+    /** Also undocumented. 1 is the voice's natural pace; see voiceSpeed(). */
     voice_speed: number;
     background_audio: { type: 'predefined_media'; value: string; volume: number };
   };
@@ -318,7 +337,7 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
       // finish. Format is <Provider>.<Model>.<VoiceId>, and the id must exist in
       // GET /v2/text-to-speech/voices.
       voice: agentVoice(),
-      voice_speed: 1,
+      voice_speed: voiceSpeed(),
       // "office" room tone was here so a pause during a tool call did not read as
       // a dropped line. On a real call it read as murmuring instead: Karim heard
       // the agent as full of "uhmms", and office ambience is chatter. The trade

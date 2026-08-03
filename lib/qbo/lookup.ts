@@ -57,13 +57,20 @@ export type OpenInvoice = {
   balance_cents: number | null;
   due_date: string | null;
   status: string | null;
+  /**
+   * Selected so a caller can be checked against the invoice they just read out.
+   * The phone line answers invoice questions, an invoice number is four digits
+   * anybody can guess, and without an owner on the row there is nothing to
+   * compare the caller to. See `lookupInvoice` in lib/agent/tools.ts.
+   */
+  customer_id: string | null;
 };
 
 /** Unpaid invoices for a customer. Indexed by qbo_invoices_customer_idx. */
 export async function openInvoicesFor(customerId: string): Promise<OpenInvoice[]> {
   const res = await db()
     .from('qbo_invoices')
-    .select('qbo_id, doc_number, balance_cents, due_date, status')
+    .select('qbo_id, doc_number, balance_cents, due_date, status, customer_id')
     .eq('customer_id', customerId)
     .gt('balance_cents', 0)
     .order('due_date', { ascending: true });
@@ -81,7 +88,7 @@ export async function openInvoicesFor(customerId: string): Promise<OpenInvoice[]
 export async function findInvoiceByDocNumber(docNumber: string): Promise<OpenInvoice | null> {
   const res = await db()
     .from('qbo_invoices')
-    .select('qbo_id, doc_number, balance_cents, due_date, status')
+    .select('qbo_id, doc_number, balance_cents, due_date, status, customer_id')
     .eq('doc_number', docNumber.trim())
     .maybeSingle();
   if (res.error) throw new Error(`findInvoiceByDocNumber failed: ${res.error.message}`);

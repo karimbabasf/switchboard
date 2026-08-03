@@ -42,7 +42,13 @@ function testDeps(opts: Options = {}) {
   }));
 
   const store = {
-    activeAssistantCall: async () => (flow.stage === 'assistant' ? { ...flow } : null),
+    // Phone-aware, like the real one: supabaseStore filters call_flow on
+    // calls.contact_phone, so a number that is not on a live call finds nothing.
+    // The tools rely on exactly that to refuse a number the model invented, and a
+    // mock that ignored its argument would let every one of those tests pass
+    // against a gate that does nothing.
+    activeAssistantCall: async (phone: string) =>
+      flow.stage === 'assistant' && phone === CALLER ? { ...flow } : null,
     activeResponders: async () => responders,
     advanceStage: async (_id: string, from: CallFlow['stage'][], to: CallFlow['stage'], patch?: Partial<CallFlow>) => {
       if (!from.includes(flow.stage)) return null;
@@ -107,7 +113,11 @@ describe('runTool: escalate_to_human', () => {
     const out = await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'wants a person' }, t.deps);
 
     expect(t.dial).not.toHaveBeenCalled();
-    expect(out.speech).toMatch(/team|message/i);
+    // It used to be allowed to say "the team". It says "we" now (Karim,
+    // 2026-08-03), so what this asserts is that the caller is told their request
+    // survived, which is the thing that actually mattered here.
+    expect(out.speech).toMatch(/got this down|taken this down|message/i);
+    expect(out.speech).toMatch(/\bwe\b/i);
     expect(t.posted).toHaveLength(1);
   });
 
@@ -142,7 +152,7 @@ describe('runTool: lookup_invoice', () => {
 
   it('never returns a dollar amount, because the agent may not quote prices', async () => {
     const t = testDeps({
-      invoice: { qbo_id: 'i1', doc_number: '1043', balance_cents: 41250, due_date: null, status: 'open' },
+      invoice: { qbo_id: 'i1', doc_number: '1043', balance_cents: 41250, due_date: null, status: 'open', customer_id: 'cus-1' },
     });
     const out = await runTool('lookup_invoice', { caller_phone: CALLER, invoice_number: '1043' }, t.deps);
 
@@ -152,7 +162,7 @@ describe('runTool: lookup_invoice', () => {
 
   it('calls a zero balance paid', async () => {
     const t = testDeps({
-      invoice: { qbo_id: 'i1', doc_number: '1043', balance_cents: 0, due_date: null, status: 'paid' },
+      invoice: { qbo_id: 'i1', doc_number: '1043', balance_cents: 0, due_date: null, status: 'paid', customer_id: 'cus-1' },
     });
     const out = await runTool('lookup_invoice', { caller_phone: CALLER, invoice_number: '1043' }, t.deps);
     expect(out.speech).toMatch(/paid/i);
@@ -299,5 +309,126 @@ describe('runTool: text_me_the_list', () => {
     // recordQuoteRequest throws on an empty `wants`, and that throw would land
     // mid-sentence on a live call.
     expect(t.quotes[0].wants).toBeTruthy();
+  });
+});
+
+/**
+ * The tools against a caller who is trying it on.
+ *
+ * `caller_phone` is an argument, so the model writes it, so the prompt is the
+ * only thing telling it to write the real one. These tests are what say the
+ * prompt is not the only thing: they call every tool with a number that is not on
+ * the call, the way a caller who says "check my colleague's order on 555 555
+ * 0147" would get it filled in, and require the tool to do nothing.
+ *
+ * Karim, 2026-08-03: make sure the agent is not vulnerable to prompt injection
+ * exposing anything sensitive it has access to. A rule in the prompt is a request
+ * to a model. This is the part that holds when the request is ignored.
+ */
+describe('runTool: a number that is not on this call', () => {
+  const SOMEBODY_ELSE = '+15555550147';
+
+  it('will not look up an order for it', async () => {
+    const t = testDeps({
+      order: {
+        id: 'o1',
+        customer_id: 'cus-1',
+        seq: 41,
+        reference: 'AK-1041',
+        status: 'confirmed',
+        need_by: '2026-07-30',
+        total_cents: 41250,
+        created_at: '2026-07-25T10:00:00.000Z',
+      },
+    });
+    const out = await runTool('check_order', { caller_phone: SOMEBODY_ELSE }, t.deps);
+
+    expect(out.speech).toMatch(/only pull that up for the number you are calling from/i);
+    expect(out.speech).not.toContain('AK-1041');
+  });
+
+  it('will not text it, which would be our 10DLC number messaging a stranger', async () => {
+    const t = testDeps();
+    const out = await runTool(
+      'text_me_the_list',
+      { caller_phone: SOMEBODY_ELSE, wants: 'the full product list' },
+      t.deps,
+    );
+
+    expect(t.texted).toHaveLength(0);
+    expect(t.quotes).toHaveLength(0);
+    expect(out.speech).toMatch(/only pull that up for the number you are calling from/i);
+  });
+
+  it('will not file a message under it, which would rename somebody else', async () => {
+    const t = testDeps();
+    const out = await runTool(
+      'take_message',
+      { caller_phone: SOMEBODY_ELSE, message: 'call me back', callback_number: SOMEBODY_ELSE, caller_name: 'Dave' },
+      t.deps,
+    );
+
+    expect(t.posted).toHaveLength(0);
+    expect(out.speech).toMatch(/only pull that up for the number you are calling from/i);
+  });
+
+  it('will not look up an invoice for it', async () => {
+    const t = testDeps({
+      invoice: { qbo_id: 'i1', doc_number: '1043', balance_cents: 0, due_date: null, status: 'paid', customer_id: 'cus-1' },
+    });
+    const out = await runTool('lookup_invoice', { caller_phone: SOMEBODY_ELSE, invoice_number: '1043' }, t.deps);
+
+    expect(out.speech).not.toMatch(/\bpaid\b|\bopen\b/i);
+  });
+
+  it('still lets the caller leave a different callback number, which is not a lookup', async () => {
+    // The gate is on the identity, not on every number in the argument list. A
+    // caller ringing from the office who wants a call back on their mobile is the
+    // normal case and must keep working.
+    const t = testDeps();
+    const out = await runTool(
+      'take_message',
+      { caller_phone: CALLER, message: 'needs a call about a pallet', callback_number: SOMEBODY_ELSE },
+      t.deps,
+    );
+
+    expect(t.posted).toHaveLength(1);
+    expect(t.posted[0].text).toContain(SOMEBODY_ELSE);
+    expect(out.speech).toContain(SOMEBODY_ELSE);
+  });
+});
+
+describe('runTool: lookup_invoice belongs to the caller or to nobody', () => {
+  it('will not read out an invoice that is on another account', async () => {
+    const t = testDeps({
+      invoice: { qbo_id: 'i9', doc_number: '1043', balance_cents: 41250, due_date: '2026-08-30', status: 'open', customer_id: 'cus-OTHER' },
+    });
+    const out = await runTool('lookup_invoice', { caller_phone: CALLER, invoice_number: '1043' }, t.deps);
+
+    expect(out.speech).not.toMatch(/\bpaid\b|\bopen\b/i);
+    expect(out.speech).not.toContain('2026-08-30');
+  });
+
+  it('says the same thing whether the invoice is missing or is somebody else\'s', async () => {
+    // Two different sentences would answer "does invoice 1043 exist" for free,
+    // and an invoice number is four digits anybody can count up to.
+    const missing = testDeps({ invoice: null });
+    const theirs = testDeps({
+      invoice: { qbo_id: 'i9', doc_number: '1043', balance_cents: 41250, due_date: null, status: 'open', customer_id: 'cus-OTHER' },
+    });
+
+    const a = await runTool('lookup_invoice', { caller_phone: CALLER, invoice_number: '1043' }, missing.deps);
+    const b = await runTool('lookup_invoice', { caller_phone: CALLER, invoice_number: '1043' }, theirs.deps);
+
+    expect(a.speech).toBe(b.speech);
+  });
+
+  it('says it cannot find it when the caller has no account at all', async () => {
+    const t = testDeps({
+      customerId: null,
+      invoice: { qbo_id: 'i1', doc_number: '1043', balance_cents: 0, due_date: null, status: 'paid', customer_id: 'cus-1' },
+    });
+    const out = await runTool('lookup_invoice', { caller_phone: CALLER, invoice_number: '1043' }, t.deps);
+    expect(out.speech).not.toMatch(/\bpaid\b/i);
   });
 });
