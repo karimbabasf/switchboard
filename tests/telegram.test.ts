@@ -59,6 +59,11 @@ import type { CallbackAction, Contact } from '../lib/types';
 const OUR_CHAT = '-100123456789';
 const mockedDb = vi.mocked(db);
 
+// The shared surface passes the chat id to crm_claim_topic (it is part of the
+// topic's identity, not just a send parameter), so topic resolution now needs
+// this set. Same value the route tests already use as "our" chat.
+process.env.TELEGRAM_CHAT_ID = OUR_CHAT;
+
 afterEach(() => {
   vi.resetAllMocks();
 });
@@ -211,6 +216,7 @@ function makeChain(result: { data: unknown; error: { message: string } | null })
   const self = () => chain;
   chain.select = vi.fn(self);
   chain.eq = vi.fn(self);
+  chain.neq = vi.fn(self);
   chain.insert = vi.fn(self);
   chain.update = vi.fn(self);
   chain.upsert = vi.fn(self);
@@ -230,6 +236,52 @@ function queueFrom(chains: Record<string, unknown>[]) {
   return fromMock;
 }
 
+// --- The shared CRM surface talks to Postgres FUNCTIONS, so the fake has to ---
+// --- dispatch by rpc name and by table rather than replay one flat queue: ----
+// --- a single resolveTopic interleaves contacts reads with three rpc calls. ---
+
+type FakeResult = { data: unknown; error: { message: string } | null };
+
+function mockSurfaceDb(opts: {
+  rpc?: Record<string, (args: Record<string, unknown>) => unknown>;
+  tables?: Record<string, FakeResult[]>;
+}) {
+  const queues: Record<string, FakeResult[]> = {};
+  for (const [table, results] of Object.entries(opts.tables ?? {})) queues[table] = [...results];
+
+  // The last queued result for a table repeats, so a poll loop that reads the
+  // same row twice does not need the count of reads written into the test.
+  const fromMock = vi.fn((table: string) => {
+    const queue = queues[table];
+    if (!queue || queue.length === 0) return makeChain(ok(null));
+    return makeChain(queue.length === 1 ? queue[0] : (queue.shift() as FakeResult));
+  });
+
+  const rpcMock = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    const handler = opts.rpc?.[name];
+    if (!handler) throw new Error(`test fake: unexpected rpc ${name}`);
+    return { data: handler(args), error: null };
+  });
+
+  mockedDb.mockReturnValue({ from: fromMock, rpc: rpcMock } as never);
+  return { fromMock, rpcMock };
+}
+
+const PARTY = {
+  id: 'party-1',
+  display_name: '+14155550111',
+  customer_id: null,
+  primary_email: null,
+  primary_phone: '+14155550111',
+};
+
+/** A claim that says "you own this, go mint the topic". */
+const mustCreate = (topicId = 'topic-1') => [{ topic_id: topicId, thread_id: null, must_create: true }];
+/** A claim that says "it already exists, here it is". */
+const alreadyThere = (threadId: number, topicId = 'topic-1') => [
+  { topic_id: topicId, thread_id: threadId, must_create: false },
+];
+
 function contactRow(overrides: Partial<Contact> = {}): Contact {
   return {
     phone: '+14155550111',
@@ -244,31 +296,58 @@ function contactRow(overrides: Partial<Contact> = {}): Contact {
   };
 }
 
-describe('resolveTopic: never General for a first-time contact', () => {
+describe('resolveTopic: one thread per party, never General', () => {
   // Regression guard for this file's own export. tests/sms.test.ts already
   // covers the consumer side (a brand new SMS sender never lands in
   // General), but that suite mocks resolveTopic away entirely, so resolveTopic
   // itself -- the thing that actually opens the topic -- has never been
   // unit tested directly before this.
   it('opens a real topic for a brand new phone instead of returning null', async () => {
-    queueFrom([
-      makeChain(ok(null)), // getOrCreateContact: upsert (result unused, only .error is)
-      makeChain(ok(contactRow({ telegram_topic_id: null }))), // getOrCreateContact: select().single()
-      makeChain(ok(null)), // createAndStoreTopic: update contacts
-    ]);
+    const { rpcMock } = mockSurfaceDb({
+      rpc: {
+        crm_resolve_party: () => PARTY,
+        crm_claim_topic: () => mustCreate(),
+        crm_commit_topic: () => null,
+      },
+      tables: { contacts: [ok(contactRow())] },
+    });
     vi.mocked(telegram.createForumTopic).mockResolvedValue({ message_thread_id: 4242, name: 'x' });
 
     const threadId = await resolveTopic('+14155550111');
 
     expect(threadId).toBe(4242);
-    expect(telegram.createForumTopic).toHaveBeenCalledWith(formatPhoneForDisplay('+14155550111'));
+    // The title is the SHARED one (raw E.164 handle), not this repo's pretty
+    // format: Akme renames the topic to its own title, so the two have to agree.
+    expect(telegram.createForumTopic).toHaveBeenCalledWith('+14155550111');
+    expect(rpcMock).toHaveBeenCalledWith('crm_commit_topic', { p_topic_id: 'topic-1', p_thread_id: 4242 });
   });
 
-  it('reuses the stored topic id for a known contact without creating a new one', async () => {
-    queueFrom([
-      makeChain(ok(null)), // upsert
-      makeChain(ok(contactRow({ telegram_topic_id: 77 }))), // select().single()
-    ]);
+  it('resolves the party by phone so a caller who also emails gets ONE thread', async () => {
+    mockSurfaceDb({
+      rpc: {
+        // The party already carries a name and an email, i.e. Akme met this
+        // human first through their inbox. The phone must land on that party.
+        crm_resolve_party: () => ({
+          ...PARTY,
+          display_name: 'Jane Diaz',
+          primary_email: 'jane@example.com',
+        }),
+        crm_claim_topic: () => alreadyThere(61),
+      },
+      tables: { contacts: [ok(contactRow())] },
+    });
+
+    const threadId = await resolveTopic('+14155550111');
+
+    expect(threadId).toBe(61);
+    expect(telegram.createForumTopic).not.toHaveBeenCalled();
+  });
+
+  it('reuses the existing thread for a known party without creating a new one', async () => {
+    mockSurfaceDb({
+      rpc: { crm_resolve_party: () => PARTY, crm_claim_topic: () => alreadyThere(77) },
+      tables: { contacts: [ok(contactRow())] },
+    });
 
     const threadId = await resolveTopic('+14155550111');
 
@@ -278,130 +357,136 @@ describe('resolveTopic: never General for a first-time contact', () => {
 });
 
 describe('repairTopic: recovering a deleted topic', () => {
-  it('recreates a dead CONTACT topic by looking up contactByThreadId', async () => {
-    queueFrom([
-      makeChain(ok(contactRow({ phone: '+14155550111', telegram_topic_id: 111 }))), // contactByThreadId
-      makeChain(ok(null)), // recreateTopic: clear mapping
-      makeChain(ok(contactRow({ phone: '+14155550111', display_name: null }))), // recreateTopic: reload
-      makeChain(ok(null)), // createAndStoreTopic: update
-    ]);
+  it('marks the dead thread gone BEFORE re-claiming, then mints a fresh party topic', async () => {
+    const { rpcMock } = mockSurfaceDb({
+      rpc: {
+        crm_mark_topic_gone: () => null,
+        crm_claim_topic: () => mustCreate('topic-2'),
+        crm_commit_topic: () => null,
+      },
+      tables: {
+        crm_topics: [ok({ kind: 'party', party_id: 'party-1', index_key: null, thread_id: 111, title: 'x', status: 'active' })],
+        crm_parties: [ok(PARTY)],
+      },
+    });
     vi.mocked(telegram.createForumTopic).mockResolvedValue({ message_thread_id: 222, name: 'x' });
 
     const newId = await repairTopic(111);
+
     expect(newId).toBe(222);
+    // Order matters: crm_claim_topic hands back any row that is not `gone`, so
+    // claiming first would return the same dead thread forever.
+    const called = rpcMock.mock.calls.map((c) => c[0]);
+    expect(called.indexOf('crm_mark_topic_gone')).toBeLessThan(called.indexOf('crm_claim_topic'));
   });
 
-  // THE BUG: an index topic (e.g. Quote Requests) has no contacts row at all,
-  // so contactByThreadId returns null and the original repairTopic threw
-  // unconditionally. Reproduced against the pre-fix implementation (see the
-  // task report for the actual failing `pnpm vitest run` output) before this
-  // fallback was added; this is that reproduction, kept as the regression test.
-  it('recreates a dead INDEX topic instead of throwing "no contact maps to thread"', async () => {
-    queueFrom([
-      makeChain(ok(null)), // contactByThreadId: no contact owns this thread
-      makeChain(ok({ key: QUOTE_REQUESTS_TOPIC })), // indexTopicKeyByThreadId: found
-      makeChain(ok(null)), // recreateIndexTopic: persist new id
-    ]);
+  // A standing topic has no party at all, so the pre-consolidation version had
+  // to look in a second table for it and for a while did not, which wedged the
+  // outbox drain on every retry. One crm_topics row now answers both cases.
+  it('recreates a dead standing topic from the same crm_topics row', async () => {
+    mockSurfaceDb({
+      rpc: {
+        crm_mark_topic_gone: () => null,
+        crm_claim_topic: () => mustCreate('topic-3'),
+        crm_commit_topic: () => null,
+      },
+      tables: {
+        crm_topics: [ok({ kind: 'index', party_id: null, index_key: 'needs_you', thread_id: 999, title: '🔴 Needs You', status: 'active' })],
+      },
+    });
     vi.mocked(telegram.createForumTopic).mockResolvedValue({ message_thread_id: 333, name: 'x' });
 
     const newId = await repairTopic(999);
 
     expect(newId).toBe(333);
     expect(telegram.createForumTopic).toHaveBeenCalledTimes(1);
+    expect(telegram.createForumTopic).toHaveBeenCalledWith('🔴 Needs You');
   });
 
-  it('still throws when neither a contact nor an index topic maps to the thread', async () => {
-    queueFrom([
-      makeChain(ok(null)), // contactByThreadId: nothing
-      makeChain(ok(null)), // indexTopicKeyByThreadId: nothing either
-    ]);
+  it('still throws when no topic row maps to the thread', async () => {
+    mockSurfaceDb({ tables: { crm_topics: [ok(null)] } });
 
-    await expect(repairTopic(123456)).rejects.toThrow(/no contact or index topic maps to thread 123456/);
+    await expect(repairTopic(123456)).rejects.toThrow(/no crm_topics row maps to thread 123456/);
   });
 });
 
-describe('resolveIndexTopic: standing topics like Quote Requests', () => {
-  it('creates the topic once and reuses the stored id on the next call', async () => {
-    queueFrom([
-      makeChain(ok(null)), // read: not created yet
-      makeChain(ok([{ key: QUOTE_REQUESTS_TOPIC }])), // claim: won
-      makeChain(ok(null)), // persist the new thread id
-    ]);
+describe('resolveIndexTopic: the ONE queue, shared with Akme', () => {
+  it('sends a quote request to 🔴 Needs You, not to a second queue of its own', async () => {
+    mockSurfaceDb({
+      rpc: { crm_claim_topic: () => mustCreate(), crm_commit_topic: () => null },
+    });
     vi.mocked(telegram.createForumTopic).mockResolvedValue({ message_thread_id: 900, name: 'x' });
 
-    const first = await resolveIndexTopic(QUOTE_REQUESTS_TOPIC);
-    expect(first).toBe(900);
-    expect(telegram.createForumTopic).toHaveBeenCalledTimes(1);
+    const threadId = await resolveIndexTopic(QUOTE_REQUESTS_TOPIC);
 
-    queueFrom([makeChain(ok({ value: '900' }))]); // read: already created
-    const second = await resolveIndexTopic(QUOTE_REQUESTS_TOPIC);
-    expect(second).toBe(900);
-    expect(telegram.createForumTopic).toHaveBeenCalledTimes(1); // still just once total
+    expect(threadId).toBe(900);
+    // The retired '📋 Quote Requests' topic is the failure this asserts against:
+    // one place to look for work was the whole point of the consolidation.
+    expect(telegram.createForumTopic).toHaveBeenCalledWith('🔴 Needs You');
   });
 
-  it('handles concurrent first-use without creating two topics', async () => {
-    let storedValue: string | null = null;
-    let claimWinnerPicked = false;
+  it('reuses the committed thread instead of creating a second topic', async () => {
+    mockSurfaceDb({ rpc: { crm_claim_topic: () => alreadyThere(900) } });
 
-    // A hand-rolled, STATEFUL fake (not the FIFO queue above): two logical
-    // callers genuinely interleave here, so the fake has to behave like the
-    // real unique-constrained table would, not replay a fixed script.
-    const statefulChain = () => {
-      const chain: Record<string, unknown> = {};
-      chain.select = vi.fn(() => chain);
-      chain.eq = vi.fn(() => chain);
-      chain.maybeSingle = vi.fn(async () => ({
-        data: storedValue !== null ? { value: storedValue } : null,
-        error: null,
-      }));
-      chain.upsert = vi.fn(() => ({
-        select: vi.fn(async () => {
-          if (claimWinnerPicked) return { data: [], error: null };
-          claimWinnerPicked = true;
-          return { data: [{ key: QUOTE_REQUESTS_TOPIC }], error: null };
-        }),
-      }));
-      chain.update = vi.fn((patch: { value: string }) => ({
-        eq: vi.fn(async () => {
-          storedValue = patch.value;
-          return { data: null, error: null };
-        }),
-      }));
-      return chain;
-    };
-    mockedDb.mockReturnValue({ from: vi.fn(() => statefulChain()) } as never);
+    expect(await resolveIndexTopic(QUOTE_REQUESTS_TOPIC)).toBe(900);
+    expect(telegram.createForumTopic).not.toHaveBeenCalled();
+  });
 
-    vi.mocked(telegram.createForumTopic).mockImplementation(async () => {
-      // A real network call takes long enough that the loser's claim attempt
-      // genuinely races the winner's write, rather than this being an
-      // artifact of mock scheduling. 20ms vs. the poll's 150ms retry gives
-      // ample margin either way.
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      return { message_thread_id: 555, name: 'Quote Requests' };
+  it('keeps accepting the pre-consolidation key so an in-flight caller does not throw', async () => {
+    mockSurfaceDb({ rpc: { crm_claim_topic: () => alreadyThere(900) } });
+
+    expect(await resolveIndexTopic('quote_requests')).toBe(900);
+  });
+
+  it('throws on a key that is not one of the four standing topics', async () => {
+    mockSurfaceDb({});
+
+    await expect(resolveIndexTopic('invoices')).rejects.toThrow(/unknown standing topic "invoices"/);
+  });
+
+  // Concurrency is now decided in Postgres by crm_claim_topic, so what is left
+  // to prove on this side is that a caller told `must_create: false` with no
+  // thread id yet WAITS for the winner rather than minting a second topic.
+  it('a loser of the claim polls for the winner instead of creating its own topic', async () => {
+    mockSurfaceDb({
+      rpc: { crm_claim_topic: () => [{ topic_id: 'topic-1', thread_id: null, must_create: false }] },
+      tables: { crm_topics: [ok({ thread_id: 555, status: 'active' })] },
     });
 
-    const [a, b] = await Promise.all([
-      resolveIndexTopic(QUOTE_REQUESTS_TOPIC),
-      resolveIndexTopic(QUOTE_REQUESTS_TOPIC),
-    ]);
+    const threadId = await resolveIndexTopic(QUOTE_REQUESTS_TOPIC);
 
-    expect(a).toBe(555);
-    expect(b).toBe(555);
-    expect(telegram.createForumTopic).toHaveBeenCalledTimes(1);
+    expect(threadId).toBe(555);
+    expect(telegram.createForumTopic).not.toHaveBeenCalled();
   });
 });
 
 describe('learnContactName: renaming a topic when a name is learned later', () => {
-  it("updates display_name and renames the contact's existing topic", async () => {
-    queueFrom([makeChain(ok(contactRow({ telegram_topic_id: 77, display_name: 'Jane Diaz' })))]);
+  const namedParty = { ...PARTY, display_name: 'Jane Diaz' };
+
+  it("updates display_name and renames the party's existing topic", async () => {
+    mockSurfaceDb({
+      rpc: { crm_resolve_party: () => namedParty },
+      tables: {
+        contacts: [ok(contactRow({ display_name: 'Jane Diaz' }))],
+        crm_parties: [ok(namedParty)],
+        crm_topics: [ok({ thread_id: 77, title: '+14155550111' })],
+      },
+    });
 
     await learnContactName('+14155550111', 'Jane Diaz');
 
-    expect(telegram.editForumTopic).toHaveBeenCalledWith(77, `Jane Diaz${' · '}${formatPhoneForDisplay('+14155550111')}`);
+    expect(telegram.editForumTopic).toHaveBeenCalledWith(77, 'Jane Diaz · +14155550111');
   });
 
   it('updates the name but does not touch Telegram when there is no topic yet', async () => {
-    queueFrom([makeChain(ok(contactRow({ telegram_topic_id: null, display_name: 'Jane Diaz' })))]);
+    mockSurfaceDb({
+      rpc: { crm_resolve_party: () => namedParty },
+      tables: {
+        contacts: [ok(contactRow({ display_name: 'Jane Diaz' }))],
+        crm_parties: [ok(namedParty)],
+        crm_topics: [ok(null)],
+      },
+    });
 
     await learnContactName('+14155550111', 'Jane Diaz');
 
@@ -410,13 +495,21 @@ describe('learnContactName: renaming a topic when a name is learned later', () =
 
   it('keeps the combined title within 128 characters, truncating the name and never the number', async () => {
     const longName = 'A'.repeat(200);
-    queueFrom([makeChain(ok(contactRow({ telegram_topic_id: 88, display_name: longName })))]);
+    const longParty = { ...PARTY, display_name: longName };
+    mockSurfaceDb({
+      rpc: { crm_resolve_party: () => longParty },
+      tables: {
+        contacts: [ok(contactRow({ display_name: longName }))],
+        crm_parties: [ok(longParty)],
+        crm_topics: [ok({ thread_id: 88, title: '+14155550111' })],
+      },
+    });
 
     await learnContactName('+14155550111', longName);
 
     const [, title] = vi.mocked(telegram.editForumTopic).mock.calls[0];
     expect(title.length).toBeLessThanOrEqual(128);
-    expect(title.endsWith(formatPhoneForDisplay('+14155550111'))).toBe(true);
+    expect(title.endsWith('+14155550111')).toBe(true);
   });
 });
 

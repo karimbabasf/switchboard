@@ -77,15 +77,28 @@ silently dropping to 70.
 
 ## Telegram layout
 
+Since 2026-08-04 this is the SHARED group `Akme Ops (dev)` (`-1001000000001`),
+not a group of this repo's own, and the layout below is Akme's too.
+
 | Topic | What lives in it |
 |---|---|
-| One per contact, titled `Name · (555) 123-4567` | Every call summary and every text for that person, both directions |
-| `📋 Quote Requests` | One card per quote request: who, number, channel, what they asked for, and a Done button |
-| General | System messages only |
+| One per PARTY, titled `Name · +14155550142` | Every call summary and text for that person, both directions, plus Akme's email and order cards for the same human |
+| `🔴 Needs You` | The one queue: a pointer line per open decision, including every quote request |
+| `📈 Pipeline` | Orders moving without needing anybody |
+| `🤖 Handled` | What the automation answered on its own |
+| `🚨 System` | Alerts, never attached to a party |
+| General | Service messages only |
 
-One group, because a customer who calls and then texts is one conversation. The
-index topic exists because a per-contact topic answers "what did this person
-say" and nobody can work a queue out of that.
+One group, because a customer who calls, texts, and then emails is one
+conversation. One queue, because a per-party topic answers "what did this person
+say" and cannot answer "what do I owe somebody right now". A party is the
+customer as a person: `crm_resolve_party` matches an email address and a phone
+number onto one id, which is why a caller who already emailed lands in the
+thread that already exists rather than a second one. The retired pieces are this
+repo's `📋 Quote Requests` topic and the separate "Akme Phone assistant" group.
+
+`node --env-file=.env.local scripts/surface-check.mts` asserts all of that
+against the live group and exits non-zero if it stops being true.
 
 ## Proven with real services today
 

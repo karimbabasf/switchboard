@@ -15,9 +15,15 @@ first, it is the honest account of what is proven against what is only tested.
   and the ownership list at the top of `20260727000000_init.sql`). RLS on with
   zero policies, so the service role key is the only way in. Private `recordings`
   bucket, 100MB cap.
-- **Telegram**: bot `@your_phone_bot`, group "Akme Phone assistant"
-  (`-1001000000002`), Topics on, bot admin with Manage Topics, privacy off.
-  Verified end to end.
+- **Telegram**: bot `@your_phone_bot` in the SHARED group "Akme Ops
+  (dev)" (`-1001000000001`), Topics on, bot admin with Manage Topics, privacy
+  off. Verified end to end. Akme's `@your_dev_bot` is in the same group by
+  design: one topic per customer carries their calls, texts, emails and orders
+  together, and both bots keep their own webhook so a tap on either one's card
+  reaches the repo that owns the action. The old separate group "Akme Phone
+  assistant" (`-1001000000002`) was deleted on 2026-08-04, along with this
+  repo's own `📋 Quote Requests` topic: the queue is now the shared
+  `🔴 Needs You`. See `lib/crm/surface.ts` and Akme's `docs/crm-surface.md`.
 - **Code**: voice, SMS, Telegram routing, worker pipeline, QuickBooks mirror.
   176 tests, typecheck clean, production build green.
 

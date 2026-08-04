@@ -1,4 +1,4 @@
-import { env } from '../env';
+import { env } from '../env.ts';
 
 /**
  * Thin Bot API wrapper. Deliberately not a library: the surface we use is six
@@ -6,13 +6,22 @@ import { env } from '../env';
  */
 
 export class TelegramError extends Error {
-  constructor(
-    readonly method: string,
-    readonly code: number,
-    readonly description: string,
-    readonly retryAfter?: number,
-  ) {
+  // Fields declared and assigned rather than TypeScript parameter properties:
+  // Node runs a .mts script by stripping types, and a parameter property is
+  // syntax it cannot strip, so `constructor(readonly method: string)` here made
+  // every script that touches this module fail to load at all
+  // (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX). scripts/surface-check.mts needs it.
+  readonly method: string;
+  readonly code: number;
+  readonly description: string;
+  readonly retryAfter?: number;
+
+  constructor(method: string, code: number, description: string, retryAfter?: number) {
     super(`${method}: ${code} ${description}`);
+    this.method = method;
+    this.code = code;
+    this.description = description;
+    this.retryAfter = retryAfter;
   }
 
   /** 429. The caller must back off rather than retry immediately. */
