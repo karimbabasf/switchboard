@@ -146,8 +146,6 @@ export const QUOTE_REQUESTS_TOPIC = 'needs_you';
 
 const INDEX_KEYS: Record<string, IndexKey> = {
   needs_you: 'needs_you',
-  pipeline: 'pipeline',
-  handled: 'handled',
   system: 'system',
   // The pre-consolidation key, still accepted so an in-flight caller or an old
   // outbox row does not throw on a name that used to be right.

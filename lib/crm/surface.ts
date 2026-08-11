@@ -17,13 +17,11 @@ import { telegram } from '../telegram/client.ts';
  * the whole point: somebody who calls and also emails gets one thread.
  */
 
-export type IndexKey = 'needs_you' | 'pipeline' | 'handled' | 'system';
+export type IndexKey = 'needs_you' | 'system';
 
 /** Must stay identical to Akme's INDEX_TITLES: both repos claim the same rows. */
 export const INDEX_TITLES: Record<IndexKey, string> = {
   needs_you: '🔴 Needs You',
-  pipeline: '📈 Pipeline',
-  handled: '🤖 Handled',
   system: '🚨 System',
 };
 
