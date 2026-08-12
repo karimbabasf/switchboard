@@ -155,4 +155,23 @@ describe('assistant.ts: the settings that make it feel real', () => {
     expect(cfg().instructions).toBe(systemPrompt());
     expect(cfg().instructions).toContain('escalate_to_human');
   });
+
+  it('runs Haiku, and says so in code rather than in one machine\'s .env.local', () => {
+    // The bug this pins, found 2026-08-11 by reading the LIVE assistant back:
+    // the model answering the phone was moonshotai/Kimi-K2.6, set in .env.local
+    // and nowhere else. Every comment in this repo said Haiku, `pnpm rehearse`
+    // scored Haiku, and the thing customers actually spoke to was neither.
+    //
+    // Kimi is tuned to sound conversational and achieves it by performing
+    // hesitation: "uhm", trailing off, long run-on turns. That is most of what
+    // Karim heard as unprofessional. On a supply company's line, following the
+    // instructions beats sounding natural.
+    delete process.env.TELNYX_LLM_MODEL;
+    expect(cfg().model).toBe('anthropic/claude-haiku-4-5');
+  });
+
+  it('slows the voice down, because "rushing" was heard twice', () => {
+    delete process.env.TELNYX_VOICE_SPEED;
+    expect(cfg().voice_settings.voice_speed).toBe(0.85);
+  });
 });

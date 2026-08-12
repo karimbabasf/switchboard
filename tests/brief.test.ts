@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { BUSINESS, GREETING, SPOKEN_LIST, keyterms, systemPrompt } from '../lib/agent/brief';
+import { BUSINESS, GREETING, OPENER, SPOKEN_LIST, keyterms, systemPrompt } from '../lib/agent/brief';
 import { callerContext } from '../lib/agent/context';
 
 describe('brief.ts: the business facts are one source', () => {
@@ -76,24 +76,24 @@ describe('brief.ts: the prompt holds its guardrails', () => {
     // Telnyx sends the greeting straight to TTS without running it through the
     // model, so a meta-instruction would be read aloud word for word.
     expect(GREETING).not.toMatch(/^(greet|say|welcome the)/i);
-    expect(GREETING).toContain('Robin');
-    // The company name belongs HERE, not in the recording notice ahead of it
-    // (Karim, 2026-07-29): a caller should hear a person introduce themselves and
-    // where they work. This assertion was previously the exact opposite. The rule
-    // that survived the reversal is "named once across the two beats", which the
-    // disclosure suite below is what actually enforces.
-    //
-    // The SPOKEN name, not the written one (Karim, 2026-08-03). This string is
-    // TTS input that no model ever sees, so "Akme" here is read out as the
-    // stumble it looks like, and a prompt rule cannot reach it.
-    expect(GREETING).toContain(BUSINESS.spoken.name);
-    expect(GREETING).not.toContain(BUSINESS.name);
     expect(GREETING.trim().endsWith('?')).toBe(true);
   });
 
+  it('leaves the introducing to beat 1 and does not do it twice', () => {
+    // The introduction moved to OPENER on 2026-08-11, because beat 1 is the only
+    // beat that can start the instant we answer and Karim's complaint was that
+    // hearing a name took too long. This assertion has now been both ways round;
+    // the rule that survives every version is "named once across the two beats",
+    // enforced by the opener suite below.
+    expect(GREETING).not.toContain(BUSINESS.spoken.name);
+    expect(GREETING).not.toContain(BUSINESS.name);
+    expect(GREETING).not.toContain('Robin');
+  });
+
   it('keeps the greeting short enough to sound like a person answering', () => {
-    // Two clauses is what a human receptionist says. Four is a recording.
-    expect(GREETING.split(/[.?!]/).filter(Boolean).length).toBeLessThanOrEqual(2);
+    // One clause now that it is only the question. Beat 2 is uninterruptible and
+    // the caller has already been listening to beat 1 for several seconds.
+    expect(GREETING.split(/[.?!]/).filter(Boolean).length).toBe(1);
   });
 
   it('carries every product into the prompt, so the agent cannot invent a seventh', () => {
@@ -152,12 +152,50 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     expect(prompt).toMatch(/If a tool is running, say nothing at all/i);
   });
 
-  it('keeps the greeting short, because it is time before the caller can speak', () => {
-    // Fourteen words, not ten: naming the company here costs three of them and is
-    // the point of this line. It still has to stay one breath, because
-    // `disable_greeting_interruption` is true and anything a caller says over this
-    // line is thrown away.
-    expect(GREETING.split(/\s+/).length).toBeLessThanOrEqual(14);
+  it('bans PERFORMING human speech, which is the half a filler list misses', () => {
+    // The filler list above was already in the prompt on 2026-08-11 and Karim
+    // still heard "too many uhmms" and "trying to sound natural and it is not".
+    // Most of that was the model (see the assistant suite), but the prompt was
+    // banning a word list rather than the behaviour, so a model inclined to
+    // perform hesitation had nothing telling it not to.
+    expect(prompt).toMatch(/DO NOT PERFORM BEING HUMAN/);
+    expect(prompt).toMatch(/no hesitation noises/i);
+    expect(prompt).toMatch(/Trying to sound casual is exactly what makes you sound fake/i);
+  });
+
+  it('caps the turn length, which is what "rushing" actually is', () => {
+    // A model answering in one long comma-spliced breath sounds rushed at any
+    // voice speed, so the pace knob alone was never going to fix this.
+    expect(prompt).toMatch(/ONE TO THREE SENTENCES PER TURN/);
+    expect(prompt).toMatch(/Never chain clauses together/i);
+  });
+
+  it('opens by saying who Robin is and what the company does', () => {
+    // Karim, 2026-08-11: it has to have a clear personality and understanding of
+    // who it is. Persona first, before any rule, because it is the frame every
+    // other rule is read through.
+    expect(prompt.indexOf('WHO YOU ARE')).toBe(0);
+    expect(prompt).toMatch(/You are Robin/);
+    expect(prompt).toMatch(/packing and moving supply company/i);
+    expect(prompt).toMatch(/You are a professional receptionist/i);
+  });
+
+  it('tells the model the caller already heard the introduction', () => {
+    // The gap the two-beat split opens: OPENER is spoken by Call Control and is
+    // never in the model's context, so left to itself the model sees a
+    // conversation that begins "How can I help you today?" and can reasonably
+    // decide to introduce itself. On the phone that is the caller hearing "this
+    // is Robin from Acme USA" twice inside ten seconds.
+    expect(prompt).toMatch(/YOU HAVE ALREADY SAID HELLO/);
+    expect(prompt).toContain(OPENER);
+    expect(prompt).toContain(GREETING);
+    expect(prompt).toMatch(/Do not say hello again/i);
+  });
+
+  it('answers "who is this" with the company and what it sells, not just a name', () => {
+    expect(prompt).toMatch(/This is Robin, the automated assistant for/);
+    expect(prompt).toMatch(/We're a packing supplies company/);
+    expect(prompt).toMatch(/Never answer that question with just a name/i);
   });
 
   it('gives the caller all three places a quote actually happens', () => {
@@ -435,42 +473,61 @@ describe('brief.ts: what a caller cannot talk it into', () => {
   });
 });
 
-describe('the recording disclosure', () => {
-  /** The checked-in template. .env.local is not readable from a test and is not in git. */
-  const disclosure = (() => {
-    const file = readFileSync(new URL('../.env.example', import.meta.url), 'utf8');
-    const line = file.split('\n').find((l) => l.startsWith('RECORDING_DISCLOSURE='));
-    return (line ?? '').slice('RECORDING_DISCLOSURE='.length).replace(/^"|"$/g, '');
-  })();
-
+describe('the opener', () => {
   it('states that the call is recorded, which California requires of all parties', () => {
-    expect(disclosure).toMatch(/\brecorded\b/i);
+    expect(OPENER).toMatch(/\brecorded\b/i);
   });
 
   it('states that the caller is talking to a machine', () => {
-    expect(disclosure).toMatch(/automated|assistant|\bAI\b|machine|robot/i);
+    expect(OPENER).toMatch(/automated|assistant|\bAI\b|machine|robot/i);
   });
 
-  it('reads as the same person who says the greeting straight after it', () => {
-    const together = `${disclosure} ${GREETING}`;
-    expect(together).toContain(BUSINESS.spoken.name);
+  it('introduces in beat 1, which is the only beat that can start immediately', () => {
+    // The whole of Karim's "takes too long to actually say hello" (2026-08-11).
+    // Beat 2 cannot begin until this speak ends, a webhook round trips, the
+    // recording starts, the assistant boots and the context webhook answers. So
+    // whatever the caller most needs to hear first has to be in THIS string.
+    expect(OPENER).toContain('Robin');
+    expect(OPENER).toContain(BUSINESS.spoken.name);
+    // The SPOKEN name, never the written one. This is TTS input that no model
+    // ever sees, so "Akme" here is read out as the stumble it looks like and no
+    // prompt rule can reach it.
+    expect(OPENER).not.toContain(BUSINESS.name);
+  });
+
+  it('says what the company actually does, so a wrong number knows at once', () => {
+    expect(OPENER).toMatch(/packing/i);
+  });
+
+  it('reads as one person saying one thing, across both beats', () => {
+    const together = `${OPENER} ${GREETING}`;
     // One introduction, not two. Both halves naming the company, or both
     // introducing somebody, is the tell that two systems are talking. Counted on
     // the spoken name, because that is the form both beats are spoken in.
     expect(together.match(new RegExp(BUSINESS.spoken.name, 'g'))).toHaveLength(1);
-    expect(disclosure.length).toBeLessThan(200);
+    expect(together.match(/Robin/g)).toHaveLength(1);
   });
 
-  it('is the notice and only the notice, with the company name left to the greeting', () => {
-    // The split changed on 2026-07-29 so the caller hears a person introduce
-    // themselves and their company, which is the half a customer remembers. This
-    // is the assertion that keeps the pair from drifting back into saying "Akme
-    // USA" twice in six seconds; the test above only counts, this one says where.
-    expect(disclosure).not.toContain(BUSINESS.name);
-    expect(disclosure).not.toContain(BUSINESS.spoken.name);
-    expect(GREETING).toContain(BUSINESS.spoken.name);
-    // Nothing else belongs in the notice: no product talk, no offer of help.
-    expect(disclosure).not.toMatch(/how can i help|what can i/i);
+  it('stays inside the budget for words the caller cannot talk over', () => {
+    // Both beats are uninterruptible: a Call Control speak plays to completion,
+    // and disable_greeting_interruption protects beat 2. So this cap is the real
+    // constraint on the opener, not taste. Roughly 30 words is about 12 seconds
+    // at 0.85 voice speed, and anything past that is a caller waiting to talk.
+    const words = `${OPENER} ${GREETING}`.trim().split(/\s+/).length;
+    expect(words).toBeLessThanOrEqual(30);
+  });
+
+  it('leaves the offer of help to beat 2, so the question lands last', () => {
+    expect(OPENER).not.toMatch(/how can i help|what can i/i);
+    expect(GREETING).toMatch(/how can i help|what can i/i);
+  });
+
+  it('is the default, so the line is not one unreviewed env var away from wrong', () => {
+    // RECORDING_DISCLOSURE used to be REQUIRED and lived only in .env.local, so
+    // the first thing every caller heard was a string no test read and no review
+    // saw. It is an override now and the checked-in template ships it blank.
+    const file = readFileSync(new URL('../.env.example', import.meta.url), 'utf8');
+    expect(file).toMatch(/^RECORDING_DISCLOSURE=\s*$/m);
   });
 });
 
@@ -483,6 +540,24 @@ describe('the phone agent knows where will call actually is', () => {
   // the fact in any form.
   it('carries the will call address', () => {
     expect(systemPrompt()).toContain('1234 Example Way');
+  });
+
+  it('carries the SPOKEN address too, because a street number is not a quantity', () => {
+    // Karim, 2026-08-11, off a live call: the agent read 1234 as "one thousand
+    // two hundred thirty four". That is TTS doing the right thing to a cardinal
+    // number and the wrong thing to an address. It is the same bug as Akme being
+    // read "ack-mee", so it gets the same fix in the same place: a spoken form in
+    // BUSINESS.spoken, never a one-off patch in the prompt text.
+    expect(BUSINESS.spoken.address).toMatch(/twelve thirty-four/i);
+    expect(BUSINESS.spoken.address).not.toMatch(/\d/);
+    expect(systemPrompt()).toContain(BUSINESS.spoken.address);
+  });
+
+  it('names the rule, not just the one address it happens to have today', () => {
+    // A second warehouse, a suite number or a delivery address a caller gives
+    // must be read the same way, and only a rule generalises.
+    expect(systemPrompt()).toMatch(/A STREET NUMBER IS NOT A QUANTITY/);
+    expect(systemPrompt()).toMatch(/never digit by digit/i);
   });
 
   it('is told it knows it, so it cannot claim otherwise', () => {

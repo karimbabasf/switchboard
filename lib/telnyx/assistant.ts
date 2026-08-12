@@ -58,6 +58,14 @@ export function agentVoice(): string {
  * enough faster than a person that a caller has to work to keep up, and a phone
  * line is the one place you cannot ask someone to rewind.
  *
+ * Down again to 0.85 on 2026-08-11, same complaint a second time: "it seems to
+ * be rushing through its speech". Worth being honest that most of that is
+ * probably not this number. A model that answers in one long comma-spliced
+ * breath sounds rushed at any speed, which is why the turn-shape rules landed in
+ * the same pass (one to three sentences, no chained clauses). This is the
+ * smaller half of the fix and the easier one to undo: if 0.85 now sounds slow,
+ * put it back to 0.9 in .env.local and keep the prompt change.
+ *
  * `voice_speed` is undocumented, like `interrupt_prediction_threshold`, so a 200
  * from Telnyx proves nothing here and `pnpm assistant:sync` reading it back is
  * what says it stored. Env-overridable because pace is a taste knob and finding
@@ -66,8 +74,8 @@ export function agentVoice(): string {
  * about some other field.
  */
 export function voiceSpeed(): number {
-  const parsed = Number(optionalEnv('TELNYX_VOICE_SPEED', '0.9'));
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.9;
+  const parsed = Number(optionalEnv('TELNYX_VOICE_SPEED', '0.85'));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.85;
 }
 
 export interface WebhookTool {
@@ -216,7 +224,15 @@ const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'take_message',
     description:
-      'Save a message for the team with a callback number. Use at the end of any call needing follow-up.',
+      // NOT "use at the end of any call" any more, which is what it said until
+      // 2026-08-11. A rehearsal caller who asked for a message, said what it was
+      // about and read out a callback number got asked their name twice and the
+      // message was never filed. The system prompt says not to stall on an
+      // optional field, and it lost: for a tool-calling decision the tool's own
+      // description is the closer authority, so "at the end" beat it. The rule
+      // this is an instance of: a tool description is prompt, and a rule stated
+      // in only one of the two is a rule the model gets to choose between.
+      'Save a message for the team and send it to them. Call this as soon as you know what the caller wants and have a number to reach them on. Do not wait for the end of the call, and do not wait for a name: caller_name is optional and a message without one is complete.',
     properties: {
       ...CALLER_PHONE,
       message: { type: 'string', description: 'What the caller wants, in one or two sentences.' },

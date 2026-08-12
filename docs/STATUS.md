@@ -23,19 +23,30 @@ templates with no model call at all, but has still never handled a real text.
 
 ## What the caller hears now
 
-> "Just so you know, this call is recorded and you're speaking with an automated
-> assistant. Hi, this is Robin from Akme USA. How can I help you today?"
+> "Hi, this is Robin from Acme USA. We supply packing materials. I'm an
+> automated assistant, and this call is recorded. How can I help you today?"
 
-First sentence is our own `speak` command (`RECORDING_DISCLOSURE`), second is the
-assistant's greeting (`GREETING` in lib/agent/brief.ts), same voice, no gap.
+Everything up to "recorded" is our own `speak` command (`OPENER`), the question is
+the assistant's greeting (`GREETING`), both in lib/agent/brief.ts, same voice, no
+gap.
 
-The split is deliberate and tested: the notice half carries the recording and
-machine disclosures and **nothing else**, and the company name lives in the
-greeting so a caller hears a person introduce themselves and where they work.
-Akme USA is said exactly once across the two, and `tests/brief.test.ts` asserts
-both the count and which half has it. This block was stale before 2026-07-29,
-quoting an opener neither half had ever said, so treat it as load-bearing: if you
-change either string, change this quote in the same edit.
+**The introduction is in beat 1, and that is the whole point of the split.** Beat
+2 cannot start until beat 1 finishes playing, `call.speak.ended` round trips, the
+recording starts, the assistant boots and the context webhook answers. With the
+introduction in beat 2 the caller waited about five seconds to hear a name
+(Karim, 2026-08-11: "takes too long to actually say hello"). Beat 1 is the only
+half that can start the instant we answer, so whatever matters most goes there.
+
+What did NOT move is the consent ordering. California is all-party consent, so
+`record_start` still fires only after beat 1 has finished, and the notice is
+still inside beat 1. Folding the notice into the assistant's greeting would save
+another second and would start the recording before the disclosure. That is a
+compliance posture, not a latency knob.
+
+Acme USA is said exactly once across the two beats and `tests/brief.test.ts`
+asserts both the count and which half has it. This block was stale before
+2026-07-29, quoting an opener neither half had ever said, so treat it as
+load-bearing: if you change either string, change this quote in the same edit.
 
 ## The rule the agent runs on
 

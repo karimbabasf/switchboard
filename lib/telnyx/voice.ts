@@ -1,6 +1,7 @@
 import { db, unwrap } from '../db';
 import { prewarmCallerContext } from '../agent/context';
-import { env, optionalEnv, toE164 } from '../env';
+import { OPENER } from '../agent/brief';
+import { optionalEnv, toE164 } from '../env';
 import type { Responder } from '../types';
 import {
   decodeClientState,
@@ -21,7 +22,7 @@ import {
  * Sequence, and why it is this sequence:
  *
  *   call.initiated   -> answer
- *   call.answered    -> speak the recording disclosure
+ *   call.answered    -> speak the OPENER: who is calling, and the two notices
  *   call.speak.ended -> start a DUAL channel recording, then ring the responders
  *   call.answered    -> first responder leg to pick up is bridged, the rest are hung up
  *   (no answer)      -> next wave, then voicemail
@@ -615,8 +616,12 @@ async function onAnswered(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> 
   const caller = toE164(p.from ?? '');
   if (caller) (deps.prewarm ?? prewarmCallerContext)(caller);
 
+  // Beat 1 of the opener: the introduction AND the two notices, in one speak.
+  // The default is OPENER, from the brief, because everything a caller hears is
+  // reviewed content and belongs in the file the tests read. The env var stays
+  // as an override for a line that needs different wording without a deploy.
   await deps.commands.speak(p.call_control_id, {
-    payload: env('RECORDING_DISCLOSURE'),
+    payload: optionalEnv('RECORDING_DISCLOSURE', OPENER),
     client_state: encodeClientState({ speak: 'disclosure' } satisfies SpeakState),
   });
 }
