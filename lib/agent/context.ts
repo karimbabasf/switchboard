@@ -28,26 +28,24 @@ export function contextDeps(): ContextDeps {
   };
 }
 
-/** The shape Telnyx merges into the prompt. Flat strings only, by contract. */
+/**
+ * The shape Telnyx merges into the prompt. Flat strings only, by contract.
+ *
+ * `first_name` was here until 2026-08-12 and the agent said it in the opening
+ * line. Karim's rule now: no names, on any channel, spoken or written. What
+ * survives is `is_known_caller`, which is the half that was actually load
+ * bearing (whether to ask who is calling), without betting a customer's opening
+ * seconds on a display_name copied off a phone record.
+ */
 export type CallerVariables = {
-  first_name: string;
   is_known_caller: 'yes' | 'no';
   recent_order: string;
 };
 
 const STRANGER: CallerVariables = {
-  first_name: '',
   is_known_caller: 'no',
   recent_order: '',
 };
-
-/**
- * The agent says this out loud, so it is the first name only. "Hi Maria" is a
- * receptionist; "Hi Maria Delgado" is a machine reading a database row.
- */
-function firstName(displayName: string | null): string {
-  return displayName?.trim().split(/\s+/)[0] ?? '';
-}
 
 /**
  * One line the agent can say back. Deliberately carries no money: the agent may
@@ -74,7 +72,6 @@ async function lookup(phone: string, deps: ContextDeps): Promise<CallerVariables
     }
 
     return {
-      first_name: firstName(identity.display_name),
       // Known means we have a row for this number, with or without a name on it.
       // The agent uses it to decide whether to ask who is calling.
       is_known_caller: 'yes',

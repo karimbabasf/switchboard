@@ -51,13 +51,15 @@ describe('callerContext', () => {
   it('returns an empty-but-valid shape for a caller we have never seen', async () => {
     const ctx = await callerContext('+12125550188', stranger());
     expect(ctx.is_known_caller).toBe('no');
-    expect(ctx.first_name).toBe('');
     expect(ctx.recent_order).toBe('');
   });
 
-  it('gives the first name only, because the agent says it out loud', async () => {
+  it('carries no name at all, whatever the phone record holds', async () => {
+    // Karim's rule, 2026-08-12: no names on any channel. The agent knows it has
+    // met this number before and nothing more.
     const ctx = await callerContext('+14155550101', known('Maria Delgado'));
-    expect(ctx.first_name).toBe('Maria');
+    expect(ctx.is_known_caller).toBe('yes');
+    expect(JSON.stringify(ctx)).not.toContain('Maria');
   });
 
   it('never returns a null, which would render as the string null in the prompt', async () => {
@@ -119,7 +121,7 @@ describe('prewarmCallerContext', () => {
     prewarmCallerContext('+14155550101', counting);
     const ctx = await callerContext('+14155550101', counting);
 
-    expect(ctx.first_name).toBe('Maria');
+    expect(ctx.is_known_caller).toBe('yes');
     // One database round trip for the call, spent while the disclosure played,
     // instead of one the assistant holds the caller in silence for.
     expect(lookups).toBe(1);
@@ -144,7 +146,7 @@ describe('prewarmCallerContext', () => {
     const pending = callerContext('+14155550102', slow);
     release();
 
-    expect((await pending).first_name).toBe('Sam');
+    expect((await pending).is_known_caller).toBe('yes');
     expect(lookups).toBe(1);
   });
 
