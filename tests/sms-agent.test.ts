@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { draftSmsReply, type SmsAgentDeps } from '../lib/agent/sms';
+import { draftSmsReply, unpublishedNumber, type SmsAgentDeps } from '../lib/agent/sms';
+import { BUSINESS } from '../lib/agent/brief';
 import { matchTemplate, renderTemplate, nonGsm7 } from '../lib/agent/templates';
 import type { TemplateKey } from '../lib/agent/templates';
 
@@ -175,6 +176,120 @@ describe('draftSmsReply: the guards over the drafted text', () => {
   it('holds a reply that names a price without a dollar sign', async () => {
     const d = await draftSmsReply('cost?', model('products', 'The price per case is forty two.'));
     expect(d.autoSend).toBe(false);
+  });
+});
+
+/**
+ * Every shape a price gets written in, lifted verbatim from Akme's
+ * scripts/parity-check.ts so both channels are arguing over the same sentences.
+ *
+ * That script measured this line on 2026-08-11 and it sent 19 of the 25 unread.
+ * Six wrote the currency as a code or as slang, which the money word list did
+ * not carry. Thirteen are a bare figure with nothing beside it, which is how a
+ * person writes a price at a counter, and no word list can see one of those.
+ *
+ * All 25 are about one real product at a made up rate. The point of each is its
+ * SHAPE, so a form that looks redundant is not: "46 USD" and "USD46.00" broke on
+ * different halves of the same pattern.
+ */
+const PRICE_FORMS = [
+  'Hot melt tape is $46 a case.',
+  'Hot melt tape is $46.00 a case.',
+  'A pallet of hot melt tape works out at $1,046.00.',
+  'Hot melt tape is 46 dollars a case.',
+  'Hot melt tape is 46 US dollars a case.',
+  'We can do USD 46.00 per case on the hot melt tape.',
+  'The hot melt tape comes to 46.00 USD.',
+  'Hot melt tape is 46 bucks a case.',
+  'Hot melt tape is 46 USD a case.',
+  'Hot melt tape is USD46.00 a case.',
+  'Hot melt tape is 46 usd a case.',
+  'Hot melt tape is 46 a case, delivered.',
+  'Hot melt tape is 46/ea.',
+  'Tape: 46',
+  'We charge 46 a case.',
+  'Hot melt tape is 46.00/case.',
+  'I can do 46 flat.',
+  'Roughly 46 a case.',
+  'Our list is 46 per case.',
+  'That is 4600 cents.',
+  'Hot melt tape is forty six dollars a case.',
+  'That is about fifty bucks.',
+  'Hot melt tape is 46 EUR a case.',
+  'Hot melt tape is EUR46.00 a case.',
+  'Our pricing on hot melt tape depends on volume.',
+];
+
+describe('draftSmsReply: a price is held in every shape a person writes one', () => {
+  it.each(PRICE_FORMS)('holds %j', async (reply) => {
+    // 'products' is on the auto-send list and the inbound body matches no
+    // template, so this is the model path with the guards as the only thing
+    // between the draft and a customer.
+    const d = await draftSmsReply('got hand wrap?', model('products', reply));
+    expect(d.autoSend, d.reason).toBe(false);
+  });
+});
+
+describe('draftSmsReply: the two halves of the price guard, and why it needs both', () => {
+  it('holds a price whose amount is also a number we publish', async () => {
+    // 48 is a tape width, a film width and two pallet counts, so the figure is
+    // in the published set and the number guard has nothing to say. The
+    // currency beside it is the entire signal, and reading that is MONEY's job.
+    const d = await draftSmsReply('got tape?', model('products', 'Carton sealing tape is 48 dollars a case.'));
+    expect(d.autoSend).toBe(false);
+    expect(d.reason).toMatch(/money/i);
+  });
+
+  it('holds a bare figure with no currency anywhere near it', async () => {
+    const d = await draftSmsReply('got tape?', model('products', 'Carton sealing tape is 46 a case.'));
+    expect(d.autoSend).toBe(false);
+    expect(d.reason).toContain('46');
+  });
+
+  it('holds an invented stock level on the same rule', async () => {
+    // Not a price at all, and held for the same reason: nothing on this path
+    // can look a stock level up, so any count of what is on the shelf was made
+    // up. The guard is over figures nobody published, and a price is one case
+    // of that rather than the whole of it.
+    const d = await draftSmsReply('got tape?', model('products', 'We have 87 cases on the shelf.'));
+    expect(d.autoSend).toBe(false);
+    expect(d.reason).toContain('87');
+  });
+});
+
+/**
+ * The numbers a CORRECT reply is made of, which is what stops this guard being
+ * a refusal machine. Every one is read off BUSINESS rather than typed here, so a
+ * spec edited in lib/agent/brief.ts moves both sides of the test at once and
+ * cannot drift into a false positive that only this file knows about.
+ */
+const STANDING_FACTS = [
+  ...BUSINESS.products.map((p) => `${p.name} is ${p.spec}.`),
+  ...BUSINESS.products.map((p) => `One ${p.unit} of ${p.name} holds ${p.contents}.`),
+  ...BUSINESS.products.map((p) => `Roughly ${p.perPallet} ${p.unit}s to a pallet.`),
+  `We are open ${BUSINESS.hours}.`,
+  BUSINESS.fulfilment,
+  `Will call pickup is ${BUSINESS.willCallAddress}.`,
+  `Call us on ${BUSINESS.phone} and someone will pick up.`,
+  'Got it, 2 cases of hot melt tape, someone will be in touch.',
+];
+
+describe('draftSmsReply: the numbers a correct reply is made of still send', () => {
+  it.each(STANDING_FACTS)('auto-sends %j', async (reply) => {
+    const d = await draftSmsReply('got hand wrap?', model('products', reply));
+    expect(d.autoSend, d.reason).toBe(true);
+  });
+
+  it.each(STANDING_FACTS)('reads no unpublished figure in %j', (reply) => {
+    expect(unpublishedNumber(reply)).toBeNull();
+  });
+
+  it.each(TEMPLATE_KEYS)('reads no unpublished figure in the %s template', (key) => {
+    // Templates skip every guard on purpose (see lib/agent/templates.ts), so
+    // this is not what protects them. It pins that the bypass stays a cost
+    // saving rather than becoming an exemption something depends on: route
+    // these through the number guard tomorrow and all six still send.
+    expect(unpublishedNumber(renderTemplate(key))).toBeNull();
   });
 });
 

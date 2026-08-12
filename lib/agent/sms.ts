@@ -117,7 +117,95 @@ const TEMPLATE_INTENT: Readonly<Record<TemplateKey, SmsIntent>> = Object.freeze(
  * failure the allowlist alone would wave through, because the intent was safe
  * and the sentence was not.
  */
-const MONEY = /\$|\bdollars?\b|\bprice[sd]?\b|\bcost[s]?\b|\bquote[sd]?\b|\brate[s]?\b|\bper unit\b|\btotal\b/i;
+
+/**
+ * Money named as a word, or a currency sitting against a number.
+ *
+ * This was measured against the email desk's own scanner on 2026-08-11 (Akme
+ * scripts/parity-check.ts, 25 real price forms through both channels) and it
+ * held 6 of the 25. Six of the nineteen it sent wrote the currency as a code or
+ * as slang, which this list did not carry: "USD 46.00", "46.00 USD", "USD46.00",
+ * "46 usd", "46 USD", "46 bucks". Two more were missing for the same reason, a
+ * word list assembled out of the words somebody happened to think of: "pricing"
+ * is not "price", and "we charge 46 a case" contained no word this had at all.
+ * Widened, it holds 18 of the 25. The seven left carry no currency and no money
+ * word at all, and they belong to the guard below.
+ *
+ * The currency codes end in `(?![a-z])` rather than `\b`, so "USD46.00" reads as
+ * money and "USDA" does not.
+ *
+ * It still fires with no amount anywhere in the sentence, which is deliberate
+ * and is the one place this channel is stricter than the email desk: "our
+ * pricing depends on volume" names no figure and is still not ours to send.
+ */
+const MONEY = /\$|\b(?:usd|euros?|eur|gbp)(?![a-z])|\bdollars?\b|\bbucks?\b|\bcents?\b|\bpric(?:e|es|ed|ing)\b|\bcost(?:s|ed|ing)?\b|\bcharg(?:e|es|ed|ing)\b|\bfees?\b|\bquote[sd]?\b|\brates?\b|\bper unit\b|\btotal\b/i;
+
+/**
+ * The other half of the price defence, and the half a word list cannot be.
+ *
+ * A person writing a price at a counter writes no currency at all. "46/ea",
+ * "Tape: 46", "Roughly 46 a case", "I can do 46 flat", "Our list is 46 per
+ * case": seven of those 25 forms are that shape, and no widening of a word list
+ * will ever reach one of them. The email desk is not exposed to it, because a
+ * second guard there reads every number in a draft against the facts the draft
+ * was handed (Akme lib/ops/crm/guards.ts, the unknown_fact flag). Nothing stood
+ * behind MONEY here, so a bare figure went out unread.
+ *
+ * Holding every number instead would refuse nearly every correct answer we send.
+ * The drafts are full of numbers on purpose: pack sizes ("36 rolls"), specs
+ * ("48 millimeters by 110 yards"), pallet counts, the standing hours, a phone
+ * number and a street number. So the rule is the email desk's rule. Build the
+ * numbers BUSINESS actually publishes and hold anything else. That works here
+ * because everything this agent is allowed to state about the company is in that
+ * one object, which makes the complement of it a usable definition of "a figure
+ * nobody approved".
+ *
+ * BOTH HALVES ARE LOAD BEARING, and they fail in opposite directions. A price
+ * can land on a number we publish: "48 dollars a case" is a price, and 48 is a
+ * tape width, a film width and two pallet counts, so only MONEY sees that one. A
+ * price at a value we publish nothing near carries no money word, so only this
+ * sees that one.
+ *
+ * It is not only prices. A stock level and an invented order number are figures
+ * this agent was never given either, and they land here for the same reason.
+ */
+function numbersIn(text: string): number[] {
+  const out: number[] = [];
+  // Commas inside the run, so "1,046.00" is one number rather than two.
+  for (const m of text.matchAll(/\d[\d,]*(?:\.\d+)?/g)) {
+    const n = Number(m[0].replace(/,/g, ''));
+    if (Number.isFinite(n)) out.push(n);
+  }
+  return out;
+}
+
+const PUBLISHED_NUMBERS: ReadonlySet<number> = new Set(
+  [
+    BUSINESS.hours,
+    BUSINESS.fulfilment,
+    // The street number is a fact, not an invention. Without it every reply that
+    // gives out the collection address is held over the 1234.
+    BUSINESS.willCallAddress,
+    BUSINESS.phone,
+    // "1 case holds 36 rolls" is how a pack size is said, and how the catalogue
+    // template renders one, so the 1 is ours as much as the 36 is.
+    '1',
+    String(BUSINESS.products.length),
+    ...BUSINESS.products.flatMap((p) => [p.contents, p.spec, String(p.perPallet)]),
+  ].flatMap(numbersIn),
+);
+
+/**
+ * The first figure in the draft that BUSINESS does not state, or null.
+ *
+ * Returns the number rather than a boolean so the Telegram card names the figure
+ * a person is being asked to look at, instead of saying a number is wrong and
+ * making them find it.
+ */
+export function unpublishedNumber(reply: string): number | null {
+  const found = numbersIn(reply).find((n) => !PUBLISHED_NUMBERS.has(n));
+  return found === undefined ? null : found;
+}
 
 /**
  * A day reference alone is not a commitment: the standing hours are "Monday to
@@ -461,6 +549,17 @@ export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDe
   }
   if (commitsToADay(reply)) {
     return { intent: raw.intent, reply, autoSend: false, reason: 'the draft commits to a day' };
+  }
+  // Last, because it is the backstop rather than a diagnosis: a draft that a
+  // guard above can name is better named by that guard.
+  const unpublished = unpublishedNumber(reply);
+  if (unpublished !== null) {
+    return {
+      intent: raw.intent,
+      reply,
+      autoSend: false,
+      reason: `the draft states ${unpublished}, which is not a number we publish`,
+    };
   }
 
   return { intent: raw.intent, reply, autoSend: true, reason: `${raw.intent} is a standing fact` };
