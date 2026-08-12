@@ -7,6 +7,10 @@
  * gate for starting the build; a red one names the exact thing to go fix.
  * Secrets are read from the environment and never printed, only their shape.
  */
+// Explicit .ts extensions: this runs under node directly, whose ESM resolver
+// will not guess one. Same rule as scripts/assistant-sync.mts.
+import { OPENER } from '../lib/agent/brief.ts';
+import { optionalEnv } from '../lib/env.ts';
 
 type Result = { ok: boolean; detail: string };
 type Check = { group: string; name: string; run: () => Promise<Result> };
@@ -390,14 +394,24 @@ const checks: Check[] = [
   },
   {
     group: 'Telnyx',
-    name: 'recording disclosure is set',
+    name: 'the opener discloses recording and the machine',
     run: async () => {
-      // California is all-party consent. An empty disclosure is not a cosmetic
+      // California is all-party consent. A missing disclosure is not a cosmetic
       // problem, it is the difference between a legal recording and a crime.
-      const d = process.env.RECORDING_DISCLOSURE?.trim().replace(/^"|"$/g, '') ?? '';
-      return d.length >= 10
-        ? pass(`"${d}"`)
-        : fail('empty or too short. CA is all-party consent, this must be spoken before recording');
+      //
+      // Checks the EFFECTIVE opener, not the env var. This read the env var
+      // directly until 2026-08-11 and would now fail a correctly configured
+      // line: the default moved into OPENER in lib/agent/brief.ts so the first
+      // thing a caller hears is reviewed, tested content rather than a string
+      // living only in one machine's .env.local. Blank env is the normal state.
+      const d = optionalEnv('RECORDING_DISCLOSURE', OPENER);
+      const source = process.env.RECORDING_DISCLOSURE?.trim() ? 'env override' : 'OPENER in brief.ts';
+      if (d.length < 10) return fail(`empty or too short (${source})`);
+      if (!/\brecorded\b/i.test(d)) return fail(`does not say the call is recorded (${source}): "${d}"`);
+      if (!/automated|assistant|\bAI\b|machine|robot/i.test(d)) {
+        return fail(`does not say the caller is talking to a machine (${source}): "${d}"`);
+      }
+      return pass(`${source}: "${d}"`);
     },
   },
 
