@@ -86,9 +86,12 @@ const CONTACT_SMS = [
  * is a promise about one order and belongs to whoever taps Send.
  */
 const FULFILMENT_SMS = [
-  // Answers both halves regardless of which half was asked. "We do both" was
-  // shorter and read as a non-sequitur to anyone who only asked about delivery.
-  `We deliver and we do will call. Will call pickup is ${BUSINESS.willCallAddress}, ${BUSINESS.hours}.`,
+  // Answers both halves regardless of which half was asked, and in the same
+  // words the email opens its fulfilment block with (Akme lib/ops/crm/compose.ts,
+  // Karim's wording 2026-08-11). A bare "We do both" was tried and read as a
+  // non-sequitur to somebody who had only asked about delivery; naming both
+  // halves is what fixes that, not the extra words around it.
+  `We do both will call and delivery. Will call pickup is ${BUSINESS.willCallAddress}, ${BUSINESS.hours}.`,
   'For delivery, orders in by Tuesday go out on Thursday.',
   'Tell us which you need and we will confirm it on your quote.',
 ].join(' ');
