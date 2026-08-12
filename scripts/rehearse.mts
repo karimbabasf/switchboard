@@ -465,7 +465,16 @@ async function complete(turns: Turn[]): Promise<Turn> {
       const json = await res.json();
       const m = json.choices?.[0]?.message;
       if (!m) throw new Error(`no message in response: ${JSON.stringify(json).slice(0, 200)}`);
-      return { role: 'assistant', content: m.content ?? null, tool_calls: m.tool_calls };
+      // EMPTY STRING, NOT NULL. A model calling a tool with nothing to say first
+      // returns content: null, which is legal in the OpenAI schema and which
+      // Telnyx rejects the moment that message is sent BACK in the next request:
+      // 400, code 10026, "Expected string type", pointing at whichever message
+      // index it was. The scenario reads as ERROR rather than FAIL, so it looks
+      // like a flake, and it only appears when a prompt change happens to make
+      // the model stop narrating its tool calls. Latent here since the harness
+      // was written; found 2026-08-12 when the no-names prompt tripped it.
+      // '' is falsy, so `said` still ignores these turns exactly as before.
+      return { role: 'assistant', content: m.content ?? '', tool_calls: m.tool_calls };
     }
 
     // 429 and 5xx are worth one retry; anything else is a real problem and
