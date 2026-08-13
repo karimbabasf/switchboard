@@ -48,6 +48,7 @@ vi.mock('../lib/worker/summarize', () => ({ summarizeCall: vi.fn() }));
 import { handleTelnyxSmsEvent, sendSms, type SmsEventDeps, type TelnyxWebhookBody } from '../lib/telnyx/sms';
 import { runWorker } from '../lib/worker/run';
 import { summarizeCall } from '../lib/worker/summarize';
+import { classifyCallForTimeline } from '../lib/worker/conversation';
 
 // ---------------------------------------------------------------------------
 // The queued-chain db fake from tests/sms.test.ts: each test wires up the exact
@@ -300,7 +301,11 @@ function makeCall(overrides: Partial<Call> = {}): Call {
     was_answered: true,
     recording_url: null,
     storage_path: 'calls/call-1.mp3',
-    transcript: 'hello, do you deliver to Capital City',
+    // Speaker-labeled, which is what lib/worker/transcribe.ts really produces:
+    // one line per utterance, tagged with the physical channel. The flat string
+    // this used to hold is the fallback AssemblyAI only takes when it returns no
+    // utterances, and it is now its own case below.
+    transcript: 'Speaker 1: Akme, how can I help?\nSpeaker 2: hello, do you deliver to Capital City',
     summary: null,
     status: 'transcribing',
     attempts: 0,
@@ -377,6 +382,7 @@ describe('a finished call lands on the timeline', () => {
       callId: 'call-1',
       summary: SUMMARY,
       occurredAt: '2026-08-13T16:30:00.000Z', // ended_at, not the worker's clock
+      caveat: null, // both sides spoke, so there is nothing for a reader to discount
     });
   });
 
@@ -411,5 +417,169 @@ describe('a finished call lands on the timeline', () => {
     await runWorker(5, { drain: noDrain, callCard: async () => [] });
 
     expect(timeline.noteCallSummary).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The door in front of the three writers.
+//
+// All three are ADDITIVE, which is exactly why one is needed: every event that
+// arrives reaches them, and not every event is the customer talking. A carrier
+// keyword is a command aimed at the compliance machinery, and a dialer that
+// connects and never speaks is not a phone call anybody made. Both used to land
+// on the customer's shared thread as if they had said it.
+// ---------------------------------------------------------------------------
+
+describe('a carrier keyword text never reaches the timeline', () => {
+  for (const word of ['STOP', 'stop', 'STOPALL', ' Unsubscribe ', 'cancel', 'START', 'unstop', 'HELP', 'info', 'opt out']) {
+    it(`files "${word.trim()}" in messages and writes no timeline event`, async () => {
+      queueFrom(inboundChains());
+
+      await handleTelnyxSmsEvent(inboundEvent({ text: word }), noAgent());
+
+      // The book of record still gets it: only the reading surface is spared.
+      expect(fromCalls()).toEqual(['telnyx_events', 'contacts', 'messages', 'outbox']);
+      expect(timeline.noteInboundSms).not.toHaveBeenCalled();
+    });
+  }
+
+  // Closing the timeline door must not close the opt-out one. replyWithAgent is
+  // what stamps opted_out_at, and a STOP that never reaches it is a customer who
+  // asked to leave and keeps getting texted.
+  it('still hands a STOP to the reply path that records the opt-out', async () => {
+    queueFrom(inboundChains());
+    const deps = noAgent();
+
+    await handleTelnyxSmsEvent(inboundEvent({ text: 'STOP' }), deps);
+
+    expect(deps.reply).toHaveBeenCalledTimes(1);
+    expect(deps.reply).toHaveBeenCalledWith('+14155550111', 'STOP', 42, false, 'Jane Doe');
+  });
+
+  // The keywords are whole-message words. A sentence containing one is speech.
+  it('keeps a sentence that merely contains the word', async () => {
+    queueFrom(inboundChains());
+
+    await handleTelnyxSmsEvent(inboundEvent({ text: 'can you stop by with the pallet wrap' }), noAgent());
+
+    expect(timeline.noteInboundSms).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a text with nothing in it never reaches the timeline', () => {
+  it('writes no event when there is neither text nor an attachment', async () => {
+    queueFrom(inboundChains());
+
+    await handleTelnyxSmsEvent(inboundEvent({ text: null }), noAgent());
+
+    expect(fromCalls()).toEqual(['telnyx_events', 'contacts', 'messages', 'outbox']);
+    expect(timeline.noteInboundSms).not.toHaveBeenCalled();
+  });
+
+  it('writes no event for a whitespace-only body', async () => {
+    queueFrom(inboundChains());
+
+    await handleTelnyxSmsEvent(inboundEvent({ text: '   \n ' }), noAgent());
+
+    expect(timeline.noteInboundSms).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A short code is five or six digits, so toE164 returns null and assertE164
+   * throws before anything is filed. Pinned rather than fixed: it keeps carrier
+   * and A2P traffic off the timeline, which is this change's job, but it does it
+   * by dropping the message entirely, and claimEvent has already taken the id by
+   * then so the Telnyx retry no-ops. A short-code text is currently invisible to
+   * everyone. Making it visible is a contacts and messages FK question, not a
+   * timeline one.
+   */
+  it('never reaches the writer from a short code, because the phone never parses', async () => {
+    queueFrom([makeChain(ok([{ id: 'evt_1' }]))]); // only claimEvent runs
+
+    await expect(
+      handleTelnyxSmsEvent(inboundEvent({ from: { phone_number: '62792' } }), noAgent()),
+    ).rejects.toThrow(/not E.164/);
+
+    expect(timeline.noteInboundSms).not.toHaveBeenCalled();
+  });
+});
+
+describe('classifyCallForTimeline decides what a conversation is', () => {
+  it('drops a recording with no speech on it', () => {
+    expect(classifyCallForTimeline(makeCall({ transcript: '   \n ' }))).toEqual({
+      write: false,
+      reason: expect.stringContaining('no speech'),
+    });
+  });
+
+  it('drops a recording where the labels are there but every line is empty', () => {
+    expect(classifyCallForTimeline(makeCall({ transcript: 'Speaker 1:\nSpeaker 2:  ' })).write).toBe(false);
+  });
+
+  // The dialer case: it connected, heard the greeting, and never said a word.
+  it('drops a call where only one side ever spoke', () => {
+    const call = makeCall({
+      transcript: 'Speaker 1: Akme, how can I help?\nSpeaker 1: Hello? Anyone there?',
+    });
+
+    expect(classifyCallForTimeline(call)).toEqual({
+      write: false,
+      reason: expect.stringContaining('one side'),
+    });
+  });
+
+  it('writes a call both sides spoke on, with nothing to discount', () => {
+    expect(classifyCallForTimeline(makeCall())).toEqual({ write: true, caveat: null });
+  });
+
+  // Never a drop. duration_sec spans ring, disclosure and speech, so a real
+  // twelve second question sits under any threshold that would catch a dialer.
+  it('writes a twelve second real call clean', () => {
+    const call = makeCall({
+      duration_sec: 12,
+      transcript: 'Speaker 1: Akme, how can I help?\nSpeaker 2: hi do you deliver to Shelbyville',
+    });
+
+    expect(classifyCallForTimeline(call)).toEqual({ write: true, caveat: null });
+  });
+
+  // Cannot tell, so it is written and flagged rather than silently dropped.
+  it('writes an unlabeled transcript with a caveat instead of dropping it', () => {
+    const verdict = classifyCallForTimeline(makeCall({ transcript: 'hello, do you deliver to Capital City' }));
+
+    expect(verdict.write).toBe(true);
+    expect(verdict.write && verdict.caveat).toMatch(/not known whether the caller spoke/i);
+  });
+
+  it('writes a call that has no transcript field at all with a caveat, never dropping it silently', () => {
+    expect(classifyCallForTimeline(makeCall({ transcript: null })).write).toBe(false);
+  });
+});
+
+describe('the worker acts on the verdict', () => {
+  it('advances a one-sided call without putting it on the customer thread', async () => {
+    const calls = useCallsDb([
+      makeCall({ transcript: 'Speaker 1: Akme, how can I help?\nSpeaker 1: Hello? Anyone there?' }),
+    ]);
+    vi.mocked(summarizeCall).mockResolvedValue(SUMMARY);
+
+    const result = await runWorker(5, { drain: noDrain });
+
+    // The call itself is untouched: the summary is stored, the row advances, and
+    // the next step still builds the Telegram card a human reads.
+    expect(result.advanced).toBe(1);
+    expect(calls[0].status).toBe('summarizing');
+    expect(calls[0].summary).toEqual(SUMMARY);
+    expect(timeline.noteCallSummary).not.toHaveBeenCalled();
+  });
+
+  it('passes the caveat through to the writer when it cannot tell', async () => {
+    useCallsDb([makeCall({ transcript: 'hello, do you deliver to Capital City' })]);
+    vi.mocked(summarizeCall).mockResolvedValue(SUMMARY);
+
+    await runWorker(5, { drain: noDrain });
+
+    expect(timeline.noteCallSummary).toHaveBeenCalledTimes(1);
+    expect(timeline.noteCallSummary.mock.calls[0][0].caveat).toMatch(/not known whether the caller spoke/i);
   });
 });

@@ -242,6 +242,27 @@ const OPT_IN = /^\s*(start|unstop|optin|opt in|subscribe)\s*$/i;
 const HELP = /^\s*(help|info)\s*$/i;
 
 /**
+ * Whether a text is one of the three carrier keywords rather than something the
+ * customer said to us.
+ *
+ * Exported so lib/telnyx/sms.ts can keep these off the shared crm_timeline
+ * without a second copy of the patterns. What one copy of them drifting already
+ * cost is written above; a reader of the timeline asking the same question would
+ * be the third place to answer it, and the first two disagreeing is what caused
+ * the 2026-08-03 bug.
+ *
+ * All three classes together, deliberately. They are three different
+ * INSTRUCTIONS, which is why draftSmsReply keeps them apart, but to a thread of
+ * conversation they are the same thing: a command aimed at the compliance
+ * machinery, not a message to the business.
+ */
+export function isCarrierKeyword(body: string | null | undefined): boolean {
+  const text = body?.trim() ?? '';
+  if (!text) return false;
+  return OPT_OUT.test(text) || OPT_IN.test(text) || HELP.test(text);
+}
+
+/**
  * Bargaining, caught deterministically on the INBOUND text, before anything can
  * answer it.
  *

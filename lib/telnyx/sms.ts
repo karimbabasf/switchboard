@@ -3,7 +3,7 @@ import { env, assertE164, toE164 } from '../env';
 import { resolveTopic } from '../telegram/topics';
 import { inboundSmsCard, orderChangeCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
 import type { TextCardPayload } from '../telegram/cards';
-import { draftFallback, draftSmsReply, smsAgentDeps } from '../agent/sms';
+import { draftFallback, draftSmsReply, isCarrierKeyword, smsAgentDeps } from '../agent/sms';
 import { proposeChange } from '../agent/order-change';
 import { identifyCaller, orderLinesFor, recentOrdersFor } from '../qbo/lookup';
 import { recordQuoteRequest } from '../quote-requests';
@@ -205,9 +205,27 @@ async function handleMessageReceived(
   // the message is already filed by the line above, and a reading surface is
   // not allowed to cost a customer their text. See lib/crm/timeline.ts for the
   // ownership exception that lets this repo write a Akme-owned table at all.
+  //
+  // NOT everything that arrives is the customer talking. A carrier keyword is a
+  // command aimed at the compliance machinery: STOP, START and HELP belong to
+  // the opt-out ledger, which replyWithAgent still writes below, and a row
+  // reading "STOP" beside a customer's emails reads as them saying it in
+  // conversation. A text carrying neither words nor an attachment is a carrier
+  // artefact with nothing in it, and noteInboundSms would file it as
+  // "(no text, attachment only)", which claims an attachment that is not there.
+  // Both stay in `messages`, which owns the truth; only the reading surface is
+  // spared. The call half of the same problem is lib/worker/conversation.ts.
+  //
+  // Checked HERE and not inside replyWithAgent, where the opt_out and opt_in
+  // branches already live, for three reasons: that function is injectable, so a
+  // swapped reply path would silently stop writing the timeline; it runs after
+  // a model round trip, which an inbound record must not wait on; and it has
+  // neither the messages id nor the webhook's timestamp.
   const messageId = (inserted.data as { id: string } | null)?.id;
+  const isConversation =
+    !isCarrierKeyword(payload.text) && (Boolean(payload.text?.trim()) || media.length > 0);
   try {
-    if (messageId) {
+    if (messageId && isConversation) {
       await noteInboundSms({
         phone: contact.phone,
         body: payload.text ?? null,

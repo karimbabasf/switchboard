@@ -170,6 +170,13 @@ export interface CallSummaryEntry {
   callId: string;
   summary: CallSummary;
   occurredAt: string | null;
+  /**
+   * Set when the caller could not be confirmed to be a person. crm_timeline is
+   * Akme's table and this repo does not get to add a column to it, so the flag
+   * goes where a reader meets it first: the opening line of the body, which is
+   * prose read by a model alongside the customer's emails and texts.
+   */
+  caveat?: string | null;
 }
 
 /**
@@ -185,7 +192,7 @@ export async function noteCallSummary(input: CallSummaryEntry): Promise<Timeline
     partyId: party.id,
     channel: 'call',
     direction: 'in',
-    body: renderCallSummary(input.summary),
+    body: input.caveat ? `${input.caveat}\n${renderCallSummary(input.summary)}` : renderCallSummary(input.summary),
     occurredAt: at(input.occurredAt),
     sourceTable: 'calls',
     sourceId: input.callId,

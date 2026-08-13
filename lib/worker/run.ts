@@ -22,6 +22,7 @@ import { fetchRecording, RecordingExpiredError } from './recording';
 import { transcribeCall } from './transcribe';
 import { summarizeCall } from './summarize';
 import { noteCallSummary } from '../crm/timeline';
+import { classifyCallForTimeline } from './conversation';
 import type { AudioCardPayload, OutboxPayload } from '../telegram/cards';
 
 /** Generous headroom for the outbox drain's own backoff retries, well past the ~seconds it takes to actually send. */
@@ -163,13 +164,25 @@ async function runStep(call: Call, now: Date, options: RunWorkerOptions): Promis
         // down would send this row back round the retry loop and eventually
         // fail a call that was already summarized. See lib/crm/timeline.ts for
         // the ownership exception that lets this repo write crm_timeline.
+        //
+        // Not every call is a call the customer made. A dialer that connects and
+        // never speaks reaches this line looking exactly like a person did, so
+        // the verdict decides whether the row belongs on their thread at all,
+        // and tags it when it cannot tell. See lib/worker/conversation.ts for
+        // what counts and why. This only gates the reading surface: the summary
+        // above is already durable and the Telegram card below is unconditional,
+        // so a dropped row is still a call a human sees.
+        const verdict = classifyCallForTimeline(call);
         try {
-          await noteCallSummary({
-            phone: call.contact_phone,
-            callId: call.id,
-            summary,
-            occurredAt: call.ended_at ?? call.started_at,
-          });
+          if (verdict.write) {
+            await noteCallSummary({
+              phone: call.contact_phone,
+              callId: call.id,
+              summary,
+              occurredAt: call.ended_at ?? call.started_at,
+              caveat: verdict.caveat,
+            });
+          }
         } catch (err) {
           console.error(`[timeline] call ${call.id} not recorded:`, err);
         }

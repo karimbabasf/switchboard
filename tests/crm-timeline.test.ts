@@ -338,6 +338,25 @@ describe('the three writers put the right event on the timeline', () => {
     expect(rows[0].body).toContain('Asked whether we deliver to Capital City');
   });
 
+  // The tag for a call nobody could confirm was a conversation. crm_timeline is
+  // Akme's table and this repo does not get to add a column to it, so the flag
+  // goes where a reader will actually meet it: the first line of the body, which
+  // is prose read by a model alongside the customer's emails and texts.
+  it('leads with the caveat when the call could not be confirmed as a conversation', async () => {
+    const { rows } = createFakeDb();
+
+    await noteCallSummary({
+      phone: '+14155550111',
+      callId: 'call-3',
+      summary: summaryFixture(),
+      occurredAt: '2026-08-13T16:30:00.000Z',
+      caveat: 'Speakers could not be separated on this recording.',
+    });
+
+    expect(String(rows[0].body).split('\n')[0]).toBe('Speakers could not be separated on this recording.');
+    expect(rows[0].body).toContain('Asked whether we deliver to Capital City');
+  });
+
   it('falls back to now rather than losing the event to an unparseable timestamp', async () => {
     const { rows } = createFakeDb();
 
