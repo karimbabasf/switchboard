@@ -6,6 +6,14 @@
 -- Akme repo also migrates. switchboard owns exactly the tables created here plus
 -- the qbo_* mirror tables, and never alters a Akme table. Anything needed from
 -- Akme's side is read through a foreign key, never copied.
+--
+-- ONE EXCEPTION, added 2026-08-13: switchboard APPENDS rows to Akme's
+-- crm_timeline (Akme's 20260813000027_crm_timeline.sql). That table is a
+-- reading surface rather than a book of record, and it is worthless if only
+-- half of a customer's channels reach it: the agent has to see a text and a
+-- call next to an email. switchboard still owns no schema there, updates
+-- nothing, deletes nothing, and every row it writes points back at the
+-- switchboard table that owns the truth. The writers are lib/crm/timeline.ts.
 
 create extension if not exists pgcrypto;
 

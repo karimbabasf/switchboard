@@ -7,6 +7,7 @@ import { draftFallback, draftSmsReply, smsAgentDeps } from '../agent/sms';
 import { proposeChange } from '../agent/order-change';
 import { identifyCaller, orderLinesFor, recentOrdersFor } from '../qbo/lookup';
 import { recordQuoteRequest } from '../quote-requests';
+import { noteInboundSms, noteOutboundSms } from '../crm/timeline';
 import type { Contact, Message, MediaItem } from '../types';
 
 /**
@@ -173,6 +174,7 @@ export function smsEventDeps(): SmsEventDeps {
 
 async function handleMessageReceived(
   payload: TelnyxMessagePayload,
+  occurredAt: string,
   deps: SmsEventDeps,
 ): Promise<void> {
   const fromRaw = payload.from.phone_number;
@@ -181,15 +183,42 @@ async function handleMessageReceived(
 
   const media: MediaItem[] = (payload.media ?? []).map((m) => ({ url: m.url, content_type: m.content_type }));
 
-  const { error: insertError } = await db().from('messages').insert({
-    contact_phone: contact.phone,
-    direction: 'inbound',
-    body: payload.text ?? null,
-    media,
-    provider_id: payload.id,
-    provider_status: null,
-  });
-  if (insertError) throw new Error(`handleMessageReceived insert: ${insertError.message}`);
+  // The id comes back because crm_timeline points at the row that owns the
+  // truth, and `messages.id` is that pointer. Telnyx's own id is not usable
+  // there: source_id is a uuid column and provider_id is text.
+  const inserted = await db()
+    .from('messages')
+    .insert({
+      contact_phone: contact.phone,
+      direction: 'inbound',
+      body: payload.text ?? null,
+      media,
+      provider_id: payload.id,
+      provider_status: null,
+    })
+    .select('id')
+    .single();
+  if (inserted.error) throw new Error(`handleMessageReceived insert: ${inserted.error.message}`);
+
+  // Onto the shared timeline, so this text meets the customer's emails instead
+  // of living in a table only switchboard reads. Best effort and never fatal:
+  // the message is already filed by the line above, and a reading surface is
+  // not allowed to cost a customer their text. See lib/crm/timeline.ts for the
+  // ownership exception that lets this repo write a Akme-owned table at all.
+  const messageId = (inserted.data as { id: string } | null)?.id;
+  try {
+    if (messageId) {
+      await noteInboundSms({
+        phone: contact.phone,
+        body: payload.text ?? null,
+        messageId,
+        occurredAt,
+        displayName: contact.display_name,
+      });
+    }
+  } catch (err) {
+    console.error(`[timeline] inbound text ${messageId} from ${contact.phone} not recorded:`, err);
+  }
 
   // Resolve the topic HERE, not in the drain. A null thread_id is not "unknown",
   // it is a deliberate instruction to post in General, and the outbox row carries
@@ -400,7 +429,7 @@ export async function handleTelnyxSmsEvent(
 
   switch (event_type) {
     case 'message.received':
-      await handleMessageReceived(payload, deps);
+      await handleMessageReceived(payload, occurred_at, deps);
       break;
     case 'message.sent':
     case 'message.finalized':
@@ -508,5 +537,25 @@ export async function sendSms(toPhone: string, body: string, media: MediaItem[] 
     .select('*')
     .single();
   if (updateError) throw new Error(`sendSms record provider_id: ${updateError.message}`);
+
+  // Written at the DOOR, not at the Telegram route that asked for it, and for
+  // the same reason the two checks above live here: four callers reach this
+  // function (the SMS autopilot, a human tapping Send on a card, a human
+  // replying inside a topic, and the voice agent's text_me_the_list), and a
+  // timeline that carries only one of them shows the agent a customer asking
+  // twice and nobody answering. Only after the send succeeded, so the row
+  // always means a message that really went out, and swallowed, because the
+  // text has already reached the customer and cannot be taken back.
+  try {
+    await noteOutboundSms({
+      phone: to,
+      body,
+      messageId: row.id,
+      occurredAt: row.created_at ?? null,
+    });
+  } catch (err) {
+    console.error(`[timeline] outbound text ${row.id} to ${to} not recorded:`, err);
+  }
+
   return updated as Message;
 }

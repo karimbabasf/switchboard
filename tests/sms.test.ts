@@ -45,6 +45,17 @@ vi.mock('../lib/telegram/cards', () => ({
 // so this file only proves the SMS pipeline calls it, with the right
 // arguments, not what it does with them.
 vi.mock('../lib/quote-requests', () => ({ recordQuoteRequest: vi.fn(async () => ({ id: 'qr_1' })) }));
+// The shared crm_timeline writers hold their own db conversation (a party
+// resolver RPC, then an insert into a Akme-owned table) and their own tests in
+// tests/crm-timeline.test.ts. Mocked at the boundary for the same reason
+// resolveTopic is: this file asserts an exact sequence of .from(table) calls,
+// and threading two more tables through it would break these tests every time
+// something unrelated in the timeline changed. What the SMS paths hand those
+// writers is asserted in tests/crm-timeline-writers.test.ts.
+vi.mock('../lib/crm/timeline', () => ({
+  noteInboundSms: vi.fn(async () => {}),
+  noteOutboundSms: vi.fn(async () => {}),
+}));
 
 import { db } from '../lib/db';
 import { resolveTopic } from '../lib/telegram/topics';

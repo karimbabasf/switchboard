@@ -123,6 +123,12 @@ vi.mock('../lib/db', () => ({
   },
 }));
 
+// The summarize step now also puts the call on the shared crm_timeline. That
+// writer talks to a Akme-owned table this file's fake db does not model, and
+// it has its own tests in tests/crm-timeline.test.ts, so it is mocked at the
+// boundary. What run.ts hands it is asserted in tests/crm-timeline-writers.test.ts.
+vi.mock('../lib/crm/timeline', () => ({ noteCallSummary: vi.fn(async () => {}) }));
+
 function useFakeDb(seedCalls: Call[] = []) {
   const fake = createFakeDb(seedCalls);
   dbBox.client = fake.client;

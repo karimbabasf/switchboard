@@ -21,6 +21,7 @@ import type { Call, CallStatus } from '../types';
 import { fetchRecording, RecordingExpiredError } from './recording';
 import { transcribeCall } from './transcribe';
 import { summarizeCall } from './summarize';
+import { noteCallSummary } from '../crm/timeline';
 import type { AudioCardPayload, OutboxPayload } from '../telegram/cards';
 
 /** Generous headroom for the outbox drain's own backoff retries, well past the ~seconds it takes to actually send. */
@@ -152,6 +153,26 @@ async function runStep(call: Call, now: Date, options: RunWorkerOptions): Promis
       case 'transcribing': {
         const summary = await summarizeCall(call);
         await advance(call, 'summarizing', { summary });
+        // Onto the shared timeline as soon as the summary is durable, so the
+        // call joins the customer's texts and emails rather than only their
+        // Telegram topic. After advance() and not before: a row pointing at a
+        // summary that was never stored would be a reading surface that
+        // disagrees with the book of record. Stamped with when the CALL
+        // happened, not when the worker got to it, which can be several
+        // retries later. Swallowed rather than thrown, or a timeline that is
+        // down would send this row back round the retry loop and eventually
+        // fail a call that was already summarized. See lib/crm/timeline.ts for
+        // the ownership exception that lets this repo write crm_timeline.
+        try {
+          await noteCallSummary({
+            phone: call.contact_phone,
+            callId: call.id,
+            summary,
+            occurredAt: call.ended_at ?? call.started_at,
+          });
+        } catch (err) {
+          console.error(`[timeline] call ${call.id} not recorded:`, err);
+        }
         return 'advanced';
       }
       case 'summarizing': {
