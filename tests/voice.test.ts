@@ -2,7 +2,7 @@ import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { decodeClientState, telnyx } from '../lib/telnyx/client';
-import { agentVoice, assistantConfig } from '../lib/telnyx/assistant';
+import { agentVoice, assistantConfig, voiceSpeed } from '../lib/telnyx/assistant';
 import type {
   DialParams,
   RecordStartParams,
@@ -979,5 +979,64 @@ describe('one voice, start to finish', () => {
     expect(sent[0].body.voice).toBe(agentVoice());
     // Not a basic voice word. Those are the ones that sound like a phone tree.
     expect(sent[0].body.voice).not.toMatch(/^(male|female|man|woman)$/i);
+  });
+
+  it('speaks the disclosure at the same PACE the assistant answers at', async () => {
+    // Bug B, and the reason bug A's fix did not finish the job: same voice, two
+    // speeds. `speak` sent no voice_settings, so the opener ran at the voice's
+    // natural 1.0 and everything after it at voiceSpeed(). Karim, 2026-08-14:
+    // "the introduction felt extremely fast". Beat 1 carries the whole
+    // introduction now, so the mismatch lands on the first thing anyone hears.
+    //
+    // Nesting is the assertion that matters. A top-level voice_speed is accepted
+    // and ignored by the TTS API, so this checks the shape, not just the number.
+    process.env.TELNYX_API_KEY = 'test-api-key';
+    const sent: { body: Record<string, unknown> }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      sent.push({ body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ data: { result: 'ok' } }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await telnyx.speak('leg-a', { payload: 'This call is recorded.' });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    const assistant = assistantConfig({ publicBaseUrl: 'https://x.example', toolSecret: 's' });
+    expect(sent[0].body.voice_settings).toEqual({ voice_speed: voiceSpeed() });
+    expect((sent[0].body.voice_settings as { voice_speed: number }).voice_speed).toBe(
+      assistant.voice_settings.voice_speed,
+    );
+    expect(sent[0].body.voice_speed).toBeUndefined();
+  });
+
+  it('drops voice_settings when it falls back to the basic voice', async () => {
+    // The fallback has one job: keep the call alive when the premium voice id is
+    // rejected. A basic voice is a different engine, so handing it a
+    // premium-shaped setting is a second way to fail the retry that exists to
+    // not fail. `call.speak.ended` triggers record_start and the handoff, so a
+    // speak that never lands is a silent stuck call, not a bad-sounding one.
+    process.env.TELNYX_API_KEY = 'test-api-key';
+    const sent: Record<string, unknown>[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)));
+      return sent.length === 1
+        ? new Response(JSON.stringify({ errors: [{ detail: 'bad voice' }] }), { status: 422 })
+        : new Response(JSON.stringify({ data: { result: 'ok' } }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await telnyx.speak('leg-a', { payload: 'This call is recorded.' });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0].voice_settings).toEqual({ voice_speed: voiceSpeed() });
+    expect(sent[1].voice_settings).toBeUndefined();
+    expect(sent[1].payload).toBe('This call is recorded.');
   });
 });

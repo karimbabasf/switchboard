@@ -1,5 +1,5 @@
 import { env, optionalEnv } from '../env';
-import { agentVoice } from './assistant';
+import { agentVoice, voiceSpeed } from './assistant';
 
 /**
  * Telnyx Call Control v2 commands.
@@ -162,6 +162,29 @@ export const telnyx = {
    * The disclosure is spoken in the assistant's own voice so the caller hears one
    * person rather than a robot reading a legal notice followed by somebody else.
    *
+   * SAME VOICE WAS ONLY HALF OF IT. `voice_settings` carries the pace, and this
+   * command sent none, so the opener ran at the voice's natural 1.0 while every
+   * word after it ran at voiceSpeed(). That did not matter much while beat 1 was
+   * a bare notice. It matters a lot since 2026-08-11, when the whole
+   * introduction moved here: the densest sentence on the call, the one a first
+   * time caller has to parse cold, became the only sentence with no pace control
+   * on it. Karim, off a test call on 2026-08-14: "the introduction felt
+   * extremely fast... as if the words were being cut off".
+   *
+   * MEASURED, not read off the docs, because this API stores fields it ignores.
+   * Rendering the opener through POST /v2/text-to-speech/speech at 0.5: a
+   * top-level `voice_speed` changed the duration not at all (6.4s against a
+   * 6.7-7.4s baseline, inside the noise), and the same number nested under
+   * `voice_settings` took it to 15.1s. Nesting is the whole difference between
+   * a working pace control and a silently ignored one, on all three models
+   * tested. The assistant already nests it correctly; this did not send it.
+   *
+   * The fallback deliberately drops `voice_settings`. It exists for one job, a
+   * call that stays alive when the premium voice id is rejected, and a basic
+   * voice is a different engine with different settings, so sending it a
+   * premium-shaped setting is a second way to 4xx on the retry that is supposed
+   * to be the safe one.
+   *
    * The fallback is not defensive padding, it is the only thing standing between
    * a bad voice id and a dead phone line. `call.speak.ended` is what triggers
    * `record_start` and the agent handoff, so a speak that never succeeds means
@@ -175,7 +198,11 @@ export const telnyx = {
     const path = `/calls/${callControlId}/actions/speak`;
     const body = { ...params, language: optionalEnv('TELNYX_LANGUAGE', 'en-US') };
     try {
-      return await post<{ result: string }>(path, { ...body, voice: agentVoice() });
+      return await post<{ result: string }>(path, {
+        ...body,
+        voice: agentVoice(),
+        voice_settings: { voice_speed: voiceSpeed() },
+      });
     } catch (err) {
       if (!(err instanceof TelnyxError) || err.status >= 500 || err.isCallGone) throw err;
       console.error(`[telnyx] speak rejected voice "${agentVoice()}", retrying basic: ${err.detail}`);
