@@ -149,13 +149,87 @@ const MONEY = /\$|\bdollars?\b|\bcents\b|\bper (case|roll|bundle|pallet) is\b|\b
 const ORDER_TAKING =
   /what else|anything else|how many (do you|would you|cases|rolls|bundles)|how much do you need|what quantit|add(ing)? that to|put(ting)? (that|you) down for/i;
 
-/** Reciting measurements at somebody who asked what we sell. */
-const MEASUREMENT = /\b\d+\s*(inch|inches|mm|millimet|yard|yd|feet|ft|gauge|ga\b|mil\b|pound|lb)/i;
+/**
+ * Reciting measurements at somebody who asked what we sell.
+ *
+ * The two film WIDTHS are exempt from 2026-08-14. They are how the trade names
+ * those two products, they are in SPOKEN_LIST on purpose, and Karim wrote the
+ * target answer with them in it: "two types of plastic wrap: 5-inch and
+ * 18-inch". Everything else, gauges and roll counts and lengths and weights, is
+ * still the spec recital this pattern exists to catch. Only the inch half is
+ * relaxed, and only for those two numbers, so "80 gauge" and "250 feet" are
+ * caught in the same breath that says "five inch".
+ *
+ * IT HAS TO CATCH SPELLED-OUT NUMBERS, and until 2026-08-14 it did not. Specs
+ * are stored with digits ("48 inches by half an inch by 250 feet") but the agent
+ * is speaking, so what comes out is "forty-eight inches by half an inch by two
+ * hundred fifty feet". A digit-only pattern scored that as clean, which is how a
+ * rule that was in the prompt all along went unenforced on the exact turn it was
+ * written for.
+ */
+const NUM =
+  '(?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|half)';
+const UNIT = '(?:inch|inches|mm|millimet\\w*|yards?|yd|feet|ft|gauge|mil|pounds?|lb)';
+const SPEC = new RegExp(`\\b${NUM}(?:[- ]${NUM})*\\s+(?:an?\\s+)?${UNIT}\\b`, 'i');
+
+/** The two film widths, which are identifiers rather than specs. */
+const FILM_WIDTHS = /\b(5|five|18|eighteen)[- ]?inch(es)?\b/gi;
+
+/**
+ * Reciting a spec at somebody who did not ask for one. Widths are stripped
+ * before matching, so "five inch" is fine and "five inch, 80 gauge" is not.
+ */
+const saysNoSpec = (): Check => (t) => {
+  const hit = t.said.find((s) => SPEC.test(s.replace(FILM_WIDTHS, '')));
+  return hit ? `recited a spec nobody asked for: "${hit.trim().slice(0, 140)}"` : null;
+};
 
 /** Routing has to happen fast, not eventually. */
 const routesBy = (turn: number): Check => (t) => {
   const early = t.said.slice(0, turn).join(' ');
   return ROUTE.test(early) ? null : `did not offer the website, a text or email within ${turn} turn(s)`;
+};
+
+/**
+ * Answering is not advancing, and this is the check for the difference.
+ *
+ * Karim, 2026-08-14, after a call where every answer was correct: "there's no
+ * follow-up, no follow-back, I just feel like I want to end the call there."
+ * The prompt was a receptionist's script, so the agent answered and waited, and
+ * a caller who is waited at hangs up.
+ *
+ * The LAST turn is the one that decides it, because that is where a call either
+ * has somewhere to go or does not. Three things count as somewhere to go: a
+ * question, a route named out loud, or a tool that has already fired. Whether
+ * the question is a GOOD one is ORDER_TAKING's job, not this one: "what else can
+ * I get you" passes here and fails there, which is the correct split.
+ */
+const advances = (): Check => (t) => {
+  const last = t.said.at(-1) ?? '';
+  if (/\?/.test(last) || ROUTE.test(last) || t.called.length > 0) return null;
+  return `ended the call flat, with nothing for the caller to do next: "${last.trim().slice(0, 140)}"`;
+};
+
+/**
+ * Opening a turn with what we cannot do.
+ *
+ * The prompt has said "never open with what you cannot do" since 2026-07-29 and
+ * this check only ever looked for "unfortunately", "I am unable to" and "I
+ * can't". On 2026-08-14 the agent held the line on turn one and then opened turn
+ * two with "I don't price anything over the phone, even roughly", which is the
+ * same move in words the pattern had never been shown. A caller who pushes twice
+ * is exactly when this rule matters, so the check now reads the FIRST CLAUSE of
+ * every turn rather than hunting three phrasings.
+ *
+ * First clause only, deliberately. "Pricing comes back from a quote request, and
+ * I cannot give you one over the phone" is fine: it leads with the route and the
+ * limit is context. The banned shape is the limit arriving first.
+ */
+const CANNOT = "(?:can'?t|cannot|don'?t|do\\s+not|does\\s+not|doesn'?t|am\\s+not\\s+able|am\\s+unable|won'?t|will\\s+not)";
+const REFUSAL_OPENER = new RegExp(`^(?:i|we)\\s+${CANNOT}\\b|^(?:unfortunately|sorry)\\b`, 'i');
+const opensWithoutRefusing = (): Check => (t) => {
+  const hit = t.said.find((s) => REFUSAL_OPENER.test(s.trim().split(/[,.!?]/)[0].trim() + ' '));
+  return hit ? `opened with what we cannot do: "${hit.trim().slice(0, 120)}"` : null;
 };
 
 /** Counts open "so what do you want" questions. The greeting already asked once. */
@@ -179,8 +253,22 @@ const FILLER = /\b(um+|uh+|erm+|hmm+|ah+|er)\b|\blet me (see|think|check)\b|\byo
  * speech". Voice speed was already at 0.9, so the pace knob was not the whole
  * story: a model that answers in one long comma-spliced breath sounds rushed at
  * any speed. Four sentences is the fail, three is the documented budget.
+ *
+ * A SHORT TRAILING QUESTION DOES NOT COUNT, from 2026-08-14. The cap is a proxy
+ * for rambling, and "Do any of those sound like what you need?" is not rambling,
+ * it is the move that stops the call dying. Requiring the bridge and capping at
+ * three flat put four correct turns in conflict with each other, and the answer
+ * is not to delete either rule: it is to say what the cap always meant, which is
+ * three sentences of ANSWER. Only the last sentence, only if it is a question,
+ * and only up to twelve words, so this cannot become a licence to tack a speech
+ * on the end.
  */
-const sentencesIn = (s: string) => s.split(/[.?!]+/).map((x) => x.trim()).filter(Boolean).length;
+const sentencesIn = (s: string) => {
+  const parts = s.split(/[.?!]+/).map((x) => x.trim()).filter(Boolean);
+  const trailing = s.trim().endsWith('?') ? parts.at(-1) ?? '' : '';
+  const exempt = trailing && trailing.split(/\s+/).length <= 12 ? 1 : 0;
+  return parts.length - exempt;
+};
 
 /**
  * Re-introducing. The caller heard the OPENER before the model got the call, and
@@ -288,17 +376,37 @@ const SCENARIOS: Scenario[] = [
   },
   {
     name: 'what-do-you-stock',
-    why: 'Karim: the list should be titles, no prices and no measurements.',
+    why: 'Karim, 2026-08-14: the list in a caller\'s words, and it has to END SOMEWHERE.',
     caller: ['What do you guys sell?'],
     checks: [
       mustSay(/cushion/i, 'cushion wrap'),
-      mustSay(/newsprint/i, 'newsprint'),
-      mustSay(/hand wrap|hand film/i, 'hand wrap film'),
-      mustSay(/machine/i, 'machine wrap film'),
+      mustSay(/paper|newsprint/i, 'the paper'),
+      mustSay(/hand|five[- ]?inch|\b5[- ]?inch/i, 'the hand film, by width or by name'),
+      mustSay(/machine|eighteen[- ]?inch|\b18[- ]?inch/i, 'the machine film, by width or by name'),
       mustSay(/carton/i, 'carton sealing tape'),
       mustSay(/hot melt/i, 'hot melt tape'),
-      mustNotSay(MEASUREMENT, 'a measurement nobody asked for'),
+      saysNoSpec(),
       mustNotSay(MONEY, 'a price'),
+      // The whole point of the 2026-08-14 pass. A correct list that ends in
+      // silence is the turn Karim described as wanting to hang up on.
+      advances(),
+      mustNotSay(ORDER_TAKING, 'order-taker filler'),
+    ],
+  },
+  {
+    name: 'answers-then-advances',
+    why: 'Karim, 2026-08-14: "there is no follow-up, no follow-back, I just feel like I want to end the call there."',
+    // A caller who is plainly interested and is never asked for anything. Before
+    // this pass the agent answered both questions correctly and let him go.
+    caller: ['Do you carry bubble wrap?', 'Yeah, we go through a lot of it.'],
+    checks: [
+      mustSay(/cushion|bubble/i, 'that we have it'),
+      advances(),
+      routesBy(2),
+      mustNotSay(ORDER_TAKING, 'order-taker filler'),
+      // "Do you carry X" is a yes/no question. It answered yes and then read out
+      // the full spec, unprompted, which doubles the turn and buries the bridge.
+      saysNoSpec(),
     ],
   },
   {
@@ -323,7 +431,7 @@ const SCENARIOS: Scenario[] = [
       'Just give me a ballpark on a pallet of hand wrap film.',
       'I understand, I am not going to hold you to it. Roughly what does a pallet cost?',
     ],
-    checks: [mustNotSay(MONEY, 'a price'), routesBy(2), mustNotSay(/\bunfortunately\b|I am unable to|I can't\b/i, 'a refusal opener')],
+    checks: [mustNotSay(MONEY, 'a price'), routesBy(2), opensWithoutRefusing(), advances()],
   },
   {
     name: 'bubble-wrap-alias',
@@ -332,6 +440,10 @@ const SCENARIOS: Scenario[] = [
     checks: [
       mustSay(/cushion wrap/i, 'Cushion Wrap by name'),
       mustNotSay(/do not carry|don't carry|do not stock|don't stock|do not have|don't have|we do not sell/i, 'that we do not carry it'),
+      // "Do you carry X" is a yes/no question. It answered yes and then read the
+      // whole spec out, unprompted, which buries the question that moves them on.
+      saysNoSpec(),
+      advances(),
     ],
   },
   {

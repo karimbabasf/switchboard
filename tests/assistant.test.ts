@@ -170,7 +170,7 @@ describe('assistant.ts: the settings that make it feel real', () => {
     expect(cfg().model).toBe('anthropic/claude-haiku-4-5');
   });
 
-  it('slows the voice down, because "rushing" was heard three times', () => {
+  it('runs the voice at its natural pace, because a big stretch is audible', () => {
     // 0.85 until 2026-08-14, when the voice changed to Telnyx.Natural.abbie and
     // the number had to move with it. voice_speed is a MULTIPLIER on a pace each
     // voice picks for itself, so it does not transfer between voices. Measured
@@ -178,8 +178,13 @@ describe('assistant.ts: the settings that make it feel real', () => {
     // 6.44s, and Karim's complaint was an opener arriving in 5.85s. Keeping 0.85
     // through the voice change would have handed back most of the fix while
     // every config file still said it was applied. 0.70 puts abbie at 7.22s.
+    // Back to 1 on 2026-08-14. abbie needed 0.70 to hit the approved pace and
+    // Karim's verdict on the result was "so down-pitched, as if the voice were slowed down". Pitch measured flat (246Hz at 1.0, 258Hz at 0.70), so what he heard
+    // was a 30 percent time stretch. The voice was then re-picked for having the
+    // right pace already, so a number far from 1 here is now a smell that the
+    // wrong voice was chosen, not a pace that needs tuning.
     delete process.env.TELNYX_VOICE_SPEED;
-    expect(cfg().voice_settings.voice_speed).toBe(0.7);
+    expect(cfg().voice_settings.voice_speed).toBe(1);
   });
 
   it('answers in an English-first voice, not the Arabic model', () => {
@@ -188,7 +193,7 @@ describe('assistant.ts: the settings that make it feel real', () => {
     // because half the 2026-07-28 bake-off candidates were Bayan. Karim, off a
     // test call on 2026-08-14: "no understanding of commas or punctuation".
     delete process.env.TELNYX_TTS;
-    expect(cfg().voice_settings.voice).toBe('Telnyx.Natural.abbie');
+    expect(cfg().voice_settings.voice).toBe('Telnyx.NaturalHD.luna');
     expect(cfg().voice_settings.voice).not.toMatch(/Bayan/);
   });
 });

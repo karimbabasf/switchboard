@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { BUSINESS, GREETING, OPENER, SPOKEN_LIST, keyterms, systemPrompt } from '../lib/agent/brief';
+import { BRIDGE, BUSINESS, GREETING, OPENER, SPOKEN_LIST, keyterms, systemPrompt } from '../lib/agent/brief';
 import { callerContext } from '../lib/agent/context';
 
 describe('brief.ts: the business facts are one source', () => {
@@ -177,7 +177,7 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     expect(prompt.indexOf('WHO YOU ARE')).toBe(0);
     expect(prompt).toMatch(/You are Robin/);
     expect(prompt).toMatch(/packing and moving supply company/i);
-    expect(prompt).toMatch(/You are a professional receptionist/i);
+    expect(prompt).toMatch(/You are the inside sales desk/i);
   });
 
   it('tells the model the caller already heard the introduction', () => {
@@ -217,18 +217,47 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     }
   });
 
-  it('answers "what do you sell" with titles only, and no measurement leaks in', () => {
+  it('answers "what do you sell" in words a caller uses, and no spec leaks in', () => {
     expect(prompt).toContain(SPOKEN_LIST);
     // Every product has to be reachable from the one sentence the agent says, or
-    // adding a seventh SKU silently drops it off the phone line.
+    // adding a seventh SKU silently drops it off the phone line. Reachable by the
+    // catalogue name OR by one of the words callers actually use for it: the list
+    // was rewritten on 2026-08-14 to say "paper", which is what every caller calls
+    // Newsprint Sheets, and requiring the catalogue word would forbid that.
+    const spoken = SPOKEN_LIST.toLowerCase();
     for (const product of BUSINESS.products) {
-      const firstWord = product.name.split(' ')[0].toLowerCase();
-      expect(SPOKEN_LIST.toLowerCase()).toContain(firstWord);
+      const names = [product.name, ...product.alsoCalled].map((n) => n.toLowerCase().split(' ')[0]);
+      expect(names.some((n) => spoken.includes(n))).toBe(true);
     }
-    // No digits, no units: a spoken list with "48 millimeters" in it is the thing
-    // this sentence exists to prevent.
-    expect(SPOKEN_LIST).not.toMatch(/\d/);
-    expect(SPOKEN_LIST).not.toMatch(/inch|gauge|yard|feet|pound|mil\b|roll/i);
+    // The two film widths are identifiers, the way the trade asks for them, and
+    // they are the only numbers allowed. Everything else is the spec recital this
+    // sentence exists to prevent: "48 millimeters" belongs to a later question.
+    expect(SPOKEN_LIST).not.toMatch(/gauge|yard|feet|pound|mil\b|roll|millimet/i);
+    const numbers = SPOKEN_LIST.match(/\b(five|eighteen|\d+)\b/gi) ?? [];
+    expect(numbers.map((n) => n.toLowerCase()).sort()).toEqual(['eighteen', 'five']);
+  });
+
+  it('ends the stock answer with a question, because answering is not advancing', () => {
+    // Karim, 2026-08-14, after a call where the answer was right and the call
+    // still died: "there's no follow-up, no follow-back, I just feel like I want
+    // to end the call there." The list and the bridge ship together or the
+    // commonest turn on this line goes back to being a dead end.
+    expect(BRIDGE).toMatch(/\?$/);
+    expect(prompt).toContain(BRIDGE);
+    expect(prompt).toMatch(/NEVER END A TURN FLAT/);
+    expect(prompt).toMatch(/Never say the list and stop/i);
+    // The bridge must not be the order-taking question it replaces.
+    expect(BRIDGE).not.toMatch(/what else|anything else|how many/i);
+  });
+
+  it('tells the agent it is a sales desk, not a receptionist who waits', () => {
+    // "You are not a salesperson" was in this prompt until 2026-08-14 and is the
+    // single line most responsible for the passivity Karim heard: a correct
+    // answer, then silence. The job is to get a quote request in front of a human.
+    expect(prompt).not.toMatch(/you are not a salesperson/i);
+    expect(prompt).toMatch(/inside sales desk/i);
+    expect(prompt).toMatch(/YOUR JOB, IN ONE SENTENCE/);
+    expect(prompt).toMatch(/exactly four places/i);
   });
 
   it('forbids taking the order item by item, which is what it actually did', () => {

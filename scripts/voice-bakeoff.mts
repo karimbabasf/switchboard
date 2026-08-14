@@ -24,19 +24,28 @@
  * Phrasing English at clause boundaries is exactly the thing an Arabic-first
  * model is not tuned to do, so the voice is now a suspect and not a given.
  *
- * Amanda stays on the sheet as the control. A bake-off without the incumbent
- * tells you which candidate you like, not whether it beats what you have.
+ * SECOND RERUN, SAME DAY, because that sheet still got the pace wrong. Every
+ * candidate was rendered at one shared speed, so it silently tested two things
+ * at once: how a voice sounds, and how it survives being stretched to a target.
+ * abbie won it and then had to run at 0.70, because her natural opener is 5.23s
+ * against a 7.40s target. Karim, on the result: "the tone is not professional at
+ * all... so down-pitched, as if the voice were slowed down." A 30 percent stretch is
+ * where that comes from. The sheet now renders each candidate at the speed it
+ * would really ship at, and the shortlist is voices already near target at 1.0.
+ *
+ * The incumbent always stays on the sheet, at the speed it is running today. A
+ * bake-off without it tells you which candidate you like, not whether it beats
+ * what you have.
  *
  * THREE THINGS THIS RENDERS THAT THE OLD SHEET DID NOT
  *
  *  1. The OPENER, the actual sentence Karim could not follow. The old sheet
  *     rendered GREETING, five words long, which is the one line on this call
  *     that no voice can fail.
- *  2. At voiceSpeed(), nested under `voice_settings`. A top-level `voice_speed`
- *     is accepted and silently ignored: measured on 2026-08-14, the opener at
- *     top-level 0.5 came back 6.4s against a 6.7-7.4s baseline, and the same
- *     number nested came back 15.1s. A sheet rendered at the wrong pace is a
- *     sheet of a voice this line will never use.
+ *  2. Each candidate at its OWN pace, nested under `voice_settings`, which is
+ *     the only place the field works: a top-level `voice_speed` is accepted and
+ *     silently ignored, measured at 6.4s against a 6.7-7.4s baseline where the
+ *     nested form gave 15.1s.
  *  3. An 8kHz mu-law copy, which is the phone line. The old sheet said "play it
  *     on a phone speaker", which is a proxy for band-limiting and a bad one:
  *     laptop-to-phone-speaker keeps every frequency the codec throws away.
@@ -48,8 +57,7 @@
 import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { OPENER } from '../lib/agent/brief.ts';
-import { voiceSpeed } from '../lib/telnyx/assistant.ts';
+import { BRIDGE, OPENER, SPOKEN_LIST } from '../lib/agent/brief.ts';
 
 const run = promisify(execFile);
 
@@ -68,31 +76,53 @@ function env(name: string): string {
 /**
  * Two lines, and the second one decides it.
  *
- * The opener is what Karim complained about and what every caller hears cold,
- * before they have tuned into the voice at all. The order line carries two
- * product names, two quantities and a day, which is the exact shape of a real
- * Akme sentence and the thing this voice says all day. Plenty of voices handle
- * a warm hello and then fall apart on "four cases of hand wrap film".
+ * The opener is what every caller hears cold, before they have tuned into the
+ * voice at all, and it carries "Acme U S A", which Karim could not make out on
+ * 2026-08-14. The list answer is the most-asked question on the line and the
+ * longest thing this voice says, so it is where a character shows up.
  */
 const LINES: { slug: string; text: string }[] = [
   { slug: '1-opener', text: OPENER },
-  {
-    slug: '2-order',
-    text: 'I have got you down for four cases of hand wrap film and two bundles of newsprint, going out Thursday.',
-  },
+  // The single most-asked question on the line, in the words it now answers it
+  // with. This is the clip that carries the tone complaint: it is long enough to
+  // hear a character in, and it ends on the question the whole call turns on.
+  { slug: '2-list', text: `Yeah, definitely. ${SPOKEN_LIST} ${BRIDGE}` },
 ];
 
 interface Candidate {
   id: string;
   why: string;
+  /**
+   * The speed this candidate is judged at, defaulting to its natural pace.
+   *
+   * THE POINT OF THE 2026-08-14 SECOND RERUN. Every voice was being rendered at
+   * one shared number, which quietly made the sheet a test of two different
+   * things: how a voice sounds, and how it survives being stretched. abbie won
+   * that sheet and then had to run at 0.70 to hit the pace Karim approved,
+   * because her natural opener is 5.23s against a 7.40s target. A 30 percent
+   * stretch is where drawl comes from, and Karim's word for the result was that
+   * she sounded "down-pitched, as if the voice were slowed down".
+   *
+   * Measured, since pitch was the obvious suspect and pitch was innocent: median
+   * F0 is 246Hz at 1.0 and 258Hz at 0.70, so the stretch is not resampling and
+   * the voice is not being pitched down. What changes is duration alone, which
+   * is exactly what a drawl is.
+   *
+   * So the sheet now renders each candidate at the speed it would actually ship
+   * at, and the shortlist is voices whose NATURAL pace is already near target.
+   * Picking a voice and then fighting it with a multiplier is the mistake.
+   */
+  speed?: number;
 }
 
 const CANDIDATES: Candidate[] = [
-  { id: 'Telnyx.Bayan.Amanda', why: 'THE CONTROL: current line, Arabic model, English bolted on, 16kHz' },
-  { id: 'Telnyx.Natural.allison', why: 'Rime Mist, English-first, built for real-time agents' },
-  { id: 'Telnyx.Natural.abbie', why: 'second Mist read, in case allison is the wrong character' },
-  { id: 'Telnyx.NaturalHD.astra', why: 'Rime Arcana, the quality tier, 24kHz native' },
-  { id: 'Telnyx.NaturalHD.luna', why: 'second Arcana read' },
+  // The control is what Karim heard and disliked, at the speed he heard it.
+  { id: 'Telnyx.Natural.abbie', speed: 0.7, why: 'THE CONTROL: current line, stretched 30% to hit the pace' },
+  {
+    id: 'Telnyx.NaturalHD.luna',
+    why: 'Rime Arcana, 7.60s natural against a 7.40s target: the only one needing no stretch at all',
+  },
+  { id: 'Telnyx.NaturalHD.astra', why: 'Rime Arcana, 8.61s natural, the quality tier' },
   // Ultra ids are UUIDs. The docs name voices "Telnyx.Ultra.Clara" and no such
   // id exists on this account: every one of the 772 Ultra rows is a UUID, and a
   // name off a docs page rendered a 400. The human name is in the `name` field,
@@ -100,17 +130,21 @@ const CANDIDATES: Candidate[] = [
   // Expressive Mode, which the assistant already has a switch for and does not
   // use, so it is the one candidate that comes with a second lever behind it.
   {
-    id: 'Telnyx.Ultra.1242fb95-7ddd-44ac-8a05-9e8a22a6137d',
-    why: 'Ultra "Cindy - Receptionist", sub-100ms, literally the job',
+    id: 'Telnyx.Ultra.358e650d-ac0b-4a74-b14f-aca3daa40d79',
+    why: 'Ultra "Kendra - Smooth Communicator", 8.20s natural, labelled clear and professional',
   },
   {
-    id: 'Telnyx.Ultra.358e650d-ac0b-4a74-b14f-aca3daa40d79',
-    why: 'Ultra "Kendra - Smooth Communicator", clear and professional',
+    id: 'Telnyx.Ultra.1242fb95-7ddd-44ac-8a05-9e8a22a6137d',
+    why: 'Ultra "Cindy - Receptionist", 8.76s natural, literally the job',
+  },
+  {
+    id: 'Telnyx.Ultra.0ee8beaa-db49-4024-940d-c7ea09b590b3',
+    why: 'Ultra "Morgan - Executive Expert", for when professional is the whole complaint',
   },
   { id: 'AWS.Polly.Joanna-Neural', why: 'the cheap known-decent baseline, so the sheet has a floor' },
 ];
 
-async function render(voice: string, text: string, path: string): Promise<void> {
+async function render(voice: string, text: string, path: string, speed: number): Promise<void> {
   const res = await fetch(`${BASE}/text-to-speech/speech`, {
     method: 'POST',
     headers: {
@@ -118,7 +152,7 @@ async function render(voice: string, text: string, path: string): Promise<void> 
       'content-type': 'application/json',
     },
     // Nested, not top level. See the header comment: top level is ignored.
-    body: JSON.stringify({ voice, text, voice_settings: { voice_speed: voiceSpeed() } }),
+    body: JSON.stringify({ voice, text, voice_settings: { voice_speed: speed } }),
   });
 
   if (!res.ok) {
@@ -148,13 +182,13 @@ await mkdir(OUT, { recursive: true });
 const failures: string[] = [];
 let banded = 0;
 
-console.log(`\nRendering at voice_speed ${voiceSpeed()}, the pace the line actually runs at.\n`);
+console.log('\nEach candidate at its OWN pace: natural 1.0 unless the entry says otherwise.\n');
 
 for (const candidate of CANDIDATES) {
   for (const line of LINES) {
     const mp3 = `${OUT}/${candidate.id}.${line.slug}.mp3`;
     try {
-      await render(candidate.id, line.text, mp3);
+      await render(candidate.id, line.text, mp3, candidate.speed ?? 1);
       const phone = `${OUT}/${candidate.id}.${line.slug}.phone.wav`;
       if (await toPhoneBand(mp3, phone)) banded += 1;
       console.log(`  ok    ${mp3}`);

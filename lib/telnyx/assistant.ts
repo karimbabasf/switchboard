@@ -62,13 +62,30 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * not tuned to do.
  *
  * Rerun sheet, eight candidates including Amanda as the control, rendered on
- * the real opener at the real speed and band-limited to 8kHz mu-law. Karim
- * picked `Telnyx.Natural.abbie` by ear. Rime Mist underneath, English-first,
- * 186 English voices, 24kHz native, and built for real-time agents rather than
- * for narration, which is the right trade on a support line.
+ * the real opener and band-limited to 8kHz mu-law. Karim picked
+ * `Telnyx.Natural.abbie` by ear.
+ *
+ * AND THAT PICK LASTED ONE CALL, for a reason worth writing down. abbie is a
+ * fast talker: her natural opener is 5.23s against the 7.40s Karim approved, so
+ * running her meant a 30 percent stretch. Karim, hours later: "the tone is not
+ * professional at all... so down-pitched, as if the voice were slowed down." Pitch was
+ * measured and is innocent, median F0 246Hz at 1.0 against 258Hz at 0.70, so
+ * nothing is being resampled. What a 30 percent stretch changes is duration
+ * alone, and a drawl IS duration alone.
+ *
+ * THE RULE THAT COMES OUT OF IT: pick a voice whose NATURAL pace is right,
+ * never a voice you have to fight with a multiplier. The sheet had been
+ * rendering every candidate at one shared speed, which quietly made it a test of
+ * two things at once, so abbie won partly on how well she survived stretching.
+ *
+ * `Telnyx.NaturalHD.luna` runs the opener in 7.60s at 1.0, against a 7.40s
+ * target. It is the only candidate that needs no stretch at all. Rime Arcana
+ * underneath: English-first, 24kHz native, the quality tier rather than the
+ * low-latency one, which is the right trade when the complaint is that a caller
+ * cannot follow us.
  */
 export function agentVoice(): string {
-  return optionalEnv('TELNYX_TTS', 'Telnyx.Natural.abbie');
+  return optionalEnv('TELNYX_TTS', 'Telnyx.NaturalHD.luna');
 }
 
 /**
@@ -99,6 +116,14 @@ export function agentVoice(): string {
  * values, band-limit it, and pick by duration rather than by keeping the number
  * that worked for a different voice.
  *
+ * BACK TO 1 ON 2026-08-14, and the number moving back to its default is the
+ * point rather than a coincidence. A big stretch is audible: abbie at 0.70 drew
+ * "so down-pitched, as if the voice were slowed down" out of Karim, with the pitch
+ * measured flat, so what he heard was duration. The voice was then chosen for
+ * having the right pace ALREADY, and luna runs 7.60s against a 7.40s target at
+ * 1.0. A number far from 1 here now means the wrong voice was picked, not that
+ * the pace needs work: treat it as a smell, and change the voice instead.
+ *
  * `voice_speed` is undocumented, like `interrupt_prediction_threshold`, so a 200
  * from Telnyx proves nothing here, and `pnpm assistant:sync` reading it back
  * only proves it was STORED. It has to be nested under `voice_settings`: sent
@@ -109,8 +134,8 @@ export function agentVoice(): string {
  * NaN in the request and fail the sync with a message about some other field.
  */
 export function voiceSpeed(): number {
-  const parsed = Number(optionalEnv('TELNYX_VOICE_SPEED', '0.70'));
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.7;
+  const parsed = Number(optionalEnv('TELNYX_VOICE_SPEED', '1'));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
 }
 
 export interface WebhookTool {
