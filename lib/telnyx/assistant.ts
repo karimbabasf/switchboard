@@ -83,6 +83,12 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * underneath: English-first, 24kHz native, the quality tier rather than the
  * low-latency one, which is the right trade when the complaint is that a caller
  * cannot follow us.
+ *
+ * CONFIRMED BY EAR the same day, on the band-limited sheet: Karim picked luna
+ * and `Telnyx.NaturalHD.astra` over the rest, both Rime Arcana, which is the
+ * useful part of the result. The model was the thing that mattered, not the
+ * speaker. astra is the runner-up and is one env var away, 8.61s natural, a
+ * shade slower than target; try it before reopening the whole sheet.
  */
 export function agentVoice(): string {
   return optionalEnv('TELNYX_TTS', 'Telnyx.NaturalHD.luna');
