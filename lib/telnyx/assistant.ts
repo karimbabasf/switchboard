@@ -46,9 +46,29 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * disclosure default was `female`, Telnyx's legacy BASIC engine. A caller heard
  * a robot read a legal notice and then a different, human-sounding person say
  * hello. One function, one default, so they cannot drift apart again.
+ *
+ * WHY THIS IS NOT BAYAN ANY MORE (2026-08-14)
+ *
+ * `Telnyx.Bayan` is Telnyx's ARABIC model: 113 speakers across 13 Arabic
+ * dialects, a handful of English speakers bolted on the side, 16kHz native, and
+ * four English female voices out of 4494. It ran this line from day one because
+ * the 2026-07-28 bake-off had six candidates and three of them were Bayan, so
+ * Amanda won a race with only one kind of runner in it.
+ *
+ * Karim, off a test call on 2026-08-14: "there was no understanding of commas
+ * or punctuation, it was just like one straight sentence... if I didn't know
+ * Akme I don't think I would have understood a word of what she was saying."
+ * Phrasing English at clause boundaries is the thing an Arabic-first model is
+ * not tuned to do.
+ *
+ * Rerun sheet, eight candidates including Amanda as the control, rendered on
+ * the real opener at the real speed and band-limited to 8kHz mu-law. Karim
+ * picked `Telnyx.Natural.abbie` by ear. Rime Mist underneath, English-first,
+ * 186 English voices, 24kHz native, and built for real-time agents rather than
+ * for narration, which is the right trade on a support line.
  */
 export function agentVoice(): string {
-  return optionalEnv('TELNYX_TTS', 'Telnyx.Bayan.Amanda');
+  return optionalEnv('TELNYX_TTS', 'Telnyx.Natural.abbie');
 }
 
 /**
@@ -66,16 +86,31 @@ export function agentVoice(): string {
  * smaller half of the fix and the easier one to undo: if 0.85 now sounds slow,
  * put it back to 0.9 in .env.local and keep the prompt change.
  *
+ * THIS NUMBER IS PER VOICE, NOT ABSOLUTE, which is the trap that came with
+ * changing the voice on 2026-08-14. It is a multiplier on a pace each voice
+ * sets for itself, so the same 0.85 is a different speaking rate on every
+ * voice. Measured on the real opener, band-limited to 8kHz: Amanda at 0.85
+ * takes 7.40s and abbie at 0.85 takes 6.44s. Karim's complaint was the opener
+ * arriving in 5.85s, so shipping the new voice at the old number would have
+ * handed back most of the fix while every config file said it was still
+ * applied. 0.70 puts abbie at 7.22s, which is the pace he approved.
+ *
+ * So: RE-MEASURE THIS WHENEVER THE VOICE CHANGES. Render the opener at a few
+ * values, band-limit it, and pick by duration rather than by keeping the number
+ * that worked for a different voice.
+ *
  * `voice_speed` is undocumented, like `interrupt_prediction_threshold`, so a 200
- * from Telnyx proves nothing here and `pnpm assistant:sync` reading it back is
- * what says it stored. Env-overridable because pace is a taste knob and finding
- * the right one should not need a code change; the clamp is there so a typo in
- * .env.local cannot put NaN in the request and fail the sync with a message
- * about some other field.
+ * from Telnyx proves nothing here, and `pnpm assistant:sync` reading it back
+ * only proves it was STORED. It has to be nested under `voice_settings`: sent
+ * at the top level it is accepted and silently ignored, measured 2026-08-14 at
+ * 6.4s against a 6.7-7.4s baseline, where the same number nested gave 15.1s.
+ * Env-overridable because pace is a taste knob and finding the right one should
+ * not need a code change; the clamp is there so a typo in .env.local cannot put
+ * NaN in the request and fail the sync with a message about some other field.
  */
 export function voiceSpeed(): number {
-  const parsed = Number(optionalEnv('TELNYX_VOICE_SPEED', '0.85'));
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.85;
+  const parsed = Number(optionalEnv('TELNYX_VOICE_SPEED', '0.70'));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.7;
 }
 
 export interface WebhookTool {

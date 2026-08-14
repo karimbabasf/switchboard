@@ -511,8 +511,10 @@ describe('the opener', () => {
   it('stays inside the budget for words the caller cannot talk over', () => {
     // Both beats are uninterruptible: a Call Control speak plays to completion,
     // and disable_greeting_interruption protects beat 2. So this cap is the real
-    // constraint on the opener, not taste. Roughly 30 words is about 12 seconds
-    // at 0.85 voice speed, and anything past that is a caller waiting to talk.
+    // constraint on the opener, not taste. Measured on 2026-08-14 rather than
+    // estimated: the 22-word opener renders in 7.22s on the current voice at the
+    // current speed, so the 30-word cap is about 10 seconds, and anything past
+    // that is a caller waiting to talk. Both numbers move when the voice does.
     const words = `${OPENER} ${GREETING}`.trim().split(/\s+/).length;
     expect(words).toBeLessThanOrEqual(30);
   });

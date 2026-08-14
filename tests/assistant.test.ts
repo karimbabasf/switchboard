@@ -170,8 +170,25 @@ describe('assistant.ts: the settings that make it feel real', () => {
     expect(cfg().model).toBe('anthropic/claude-haiku-4-5');
   });
 
-  it('slows the voice down, because "rushing" was heard twice', () => {
+  it('slows the voice down, because "rushing" was heard three times', () => {
+    // 0.85 until 2026-08-14, when the voice changed to Telnyx.Natural.abbie and
+    // the number had to move with it. voice_speed is a MULTIPLIER on a pace each
+    // voice picks for itself, so it does not transfer between voices. Measured
+    // on the real opener at 8kHz: Amanda at 0.85 runs 7.40s, abbie at 0.85 runs
+    // 6.44s, and Karim's complaint was an opener arriving in 5.85s. Keeping 0.85
+    // through the voice change would have handed back most of the fix while
+    // every config file still said it was applied. 0.70 puts abbie at 7.22s.
     delete process.env.TELNYX_VOICE_SPEED;
-    expect(cfg().voice_settings.voice_speed).toBe(0.85);
+    expect(cfg().voice_settings.voice_speed).toBe(0.7);
+  });
+
+  it('answers in an English-first voice, not the Arabic model', () => {
+    // Telnyx.Bayan is the Arabic model: 13 Arabic dialects, a few English
+    // speakers on the side, 16kHz native. It answered this phone from day one
+    // because half the 2026-07-28 bake-off candidates were Bayan. Karim, off a
+    // test call on 2026-08-14: "no understanding of commas or punctuation".
+    delete process.env.TELNYX_TTS;
+    expect(cfg().voice_settings.voice).toBe('Telnyx.Natural.abbie');
+    expect(cfg().voice_settings.voice).not.toMatch(/Bayan/);
   });
 });
