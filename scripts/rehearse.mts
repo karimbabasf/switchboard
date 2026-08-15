@@ -110,7 +110,13 @@ const TOOLS = assistantConfig({ publicBaseUrl: 'https://rehearsal.invalid', tool
  * to carry on to the next caller turn.
  */
 const TOOL_RESULT: Record<string, string> = {
-  escalate_to_human: 'Ringing the team now.',
+  // What the server ACTUALLY says now. The rehearsal used to reply "Ringing the
+  // team now" to every escalate, which quietly rehearsed a world where the dial
+  // always goes through: the agent never saw a refusal, so nothing here could
+  // ever have caught the 2026-08-15 defect. A refusal is the interesting case,
+  // so the scenario that needs one overrides this per run.
+  escalate_to_human: 'One moment, I am connecting you now.',
+  offer_human: 'I can put you through to someone on our team. Would you like that?',
   text_me_the_list: 'Sent, and the request is on the team queue.',
   take_message: 'Saved for the team.',
   lookup_invoice: 'That invoice is still open.',
@@ -129,6 +135,8 @@ interface Transcript {
   said: string[];
   /** Tool names in call order, including repeats. */
   called: string[];
+  /** The same calls with their arguments, for checks that care what was passed. */
+  calls: { name: string; args: Record<string, unknown> }[];
   /** The whole thing, for printing when a check fails. */
   turns: Turn[];
 }
@@ -141,6 +149,12 @@ interface Scenario {
   /** Caller turns, in order. The agent's greeting is already on the wire. */
   caller: string[];
   checks: Check[];
+  /**
+   * Per-scenario tool replies, overriding TOOL_RESULT. The reason this exists is
+   * that the server can now REFUSE an escalation, and an agent that is never
+   * refused in rehearsal is an agent nobody has rehearsed the refusal with.
+   */
+  toolResult?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +173,36 @@ const mustNotSay = (re: RegExp, label: string): Check => (t) => {
 
 const mustCall = (name: string): Check => (t) =>
   t.called.includes(name) ? null : `never called ${name} (called: ${t.called.join(', ') || 'nothing'})`;
+
+const mustNotCall = (name: string, why: string): Check => (t) =>
+  t.called.includes(name) ? `called ${name}, which is ${why}` : null;
+
+/** Asserts an argument the model filled in, for the tools where the value is the behaviour. */
+const mustPass = (name: string, arg: string, want: string): Check => (t) => {
+  const hit = t.calls.find((c) => c.name === name);
+  if (!hit) return `never called ${name}`;
+  const got = hit.args[arg];
+  return got === want ? null : `${name} passed ${arg}=${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`;
+};
+
+/**
+ * Nothing may be said between the offer and the caller's answer that reads as
+ * the transfer already happening.
+ *
+ * This is the 2026-08-15 defect written as a check. The caller heard "would you
+ * like that? One moment, I'm connecting you now" in one breath, so the question
+ * was decorative. Asking and connecting are two turns.
+ */
+/** A person was offered, by the tool or in the agent's own words. Either satisfies the rule. */
+const wasOffered = (): Check => (t) =>
+  t.called.includes('offer_human') || /would you like|shall i put you|do you want me to put you/i.test(all(t))
+    ? null
+    : 'never offered them a person at all';
+
+const doesNotConnectYet = (): Check => (t) => {
+  const hit = t.said.find((s) => /connecting you|putting you through now|one moment,? (i am|i'm) connecting/i.test(s));
+  return hit ? `said it was connecting them before they answered: "${hit.trim()}"` : null;
+};
 
 /**
  * A route is any of the three places a quote actually happens.
@@ -521,7 +565,83 @@ const SCENARIOS: Scenario[] = [
     caller: ['Can I talk to a real person please?'],
     checks: [
       mustCall('escalate_to_human'),
+      // A direct ask is the ONE path that skips the offer, so it has to name
+      // itself as one. Passing "accepted" here would make the server demand an
+      // offer that never happened and the caller would be asked a pointless
+      // question after asking plainly.
+      mustPass('escalate_to_human', 'trigger', 'asked'),
       mustNotSay(/why|what is it about|what is this regarding|before i (do|transfer)/i, 'an interrogation'),
+    ],
+  },
+  {
+    // THE 2026-08-15 DEFECT, VERBATIM. Karim's caller said this and was dialled
+    // through mid-sentence, having been asked "would you like that?" and given
+    // no room to answer. Every word of the caller turn is from the transcript.
+    name: 'complaint-is-offered-not-transferred',
+    why: 'Karim: the customer has to confirm before a rep is rung. A complaint is a reason to OFFER, never to dial.',
+    // Two turns, because looking the order up first is the right instinct and a
+    // one-turn scenario would fail the agent for having it. What must never
+    // happen is a dial, on either turn.
+    caller: [
+      'I just recently received an order from you guys and a couple packages were sort of messed up and I was wondering what you could do about that.',
+      'No, I do not have the order number in front of me.',
+      'I cannot find the paperwork anywhere. So what happens now, do I get a refund or a replacement?',
+    ],
+    checks: [
+      // An offer, by either route. offer_human is the one we want, because it
+      // stamps the call and makes the caller's yes cheap to honour; an offer the
+      // agent words itself is still an offer and still safe, it just costs the
+      // caller hearing the question a second time when the server finds no stamp
+      // and asks it properly. Mandating the tool here would fail the agent for
+      // behaviour that satisfies the rule, so the check follows the rule.
+      wasOffered(),
+      mustNotCall('escalate_to_human', 'a transfer the caller never agreed to'),
+      doesNotConnectYet(),
+    ],
+  },
+  {
+    // The other half of the rule, and the failure the first fix introduced: in
+    // rehearsal the agent offered, the caller said "yes please", and it replied
+    // "One moment." and called nothing. A caller who agreed and then sat on a
+    // silent line is worse off than one who was never asked.
+    name: 'complaint-then-yes-transfers',
+    why: 'Once they agree, it must actually put them through rather than say "one moment" and ring nobody.',
+    caller: [
+      'A couple of the packages in my last order turned up damaged, what can you do about that?',
+      'I do not have the order number on me.',
+      'Yes, put me through to someone please.',
+    ],
+    // The trigger is deliberately not pinned. By the third turn the caller has
+    // both been offered a person and asked for one outright, so either value is
+    // honest and the thing worth asserting is that the phone actually rings.
+    checks: [mustCall('escalate_to_human')],
+  },
+  {
+    name: 'complaint-then-no-keeps-helping',
+    why: 'A no is an answer. It must not dial anyway, and it must not keep re-asking.',
+    // Deliberately steered away from message-taking. A complaint that ends in
+    // take_message drags in a separate, pre-existing wording defect (the agent
+    // says "the team will reach out" instead of "we"), and a scenario that fails
+    // for two unrelated reasons stops being evidence about either.
+    caller: [
+      'Some of the boxes in my last delivery were crushed.',
+      'No, I do not want to be put through to anyone, I am in a rush. Just tell me your will call hours.',
+    ],
+    checks: [
+      mustNotCall('escalate_to_human', 'a transfer the caller explicitly refused'),
+      doesNotConnectYet(),
+    ],
+  },
+  {
+    name: 'refused-transfer-does-not-lie',
+    why: 'The server can refuse a dial. When it does the agent must ask, not claim it is connecting them.',
+    // The server hands back the OFFER instead of the connecting line, which is
+    // exactly what happens when a model tries to dial without consent on record.
+    toolResult: { escalate_to_human: 'I can put you through to someone on our team. Would you like that?' },
+    caller: ['I am really not happy about this, my invoice is wrong again.'],
+    checks: [
+      doesNotConnectYet(),
+      mustNotSay(/ringing (them|the team)|they are on the line|transferring you now/i, 'a transfer that did not happen'),
     ],
   },
   {
@@ -732,6 +852,7 @@ async function run(s: Scenario): Promise<Transcript> {
   ];
   const said: string[] = [];
   const called: string[] = [];
+  const calls_: { name: string; args: Record<string, unknown> }[] = [];
 
   for (const line of s.caller) {
     turns.push({ role: 'user', content: line });
@@ -748,16 +869,26 @@ async function run(s: Scenario): Promise<Transcript> {
 
       for (const c of calls) {
         called.push(c.function.name);
+        // A model that emits malformed JSON has still made the call, and losing
+        // the whole run over the arguments would hide that.
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(c.function.arguments || '{}') as Record<string, unknown>;
+        } catch {
+          args = {};
+        }
+        calls_.push({ name: c.function.name, args });
+
         turns.push({
           role: 'tool',
           tool_call_id: c.id,
-          content: TOOL_RESULT[c.function.name] ?? 'Done.',
+          content: s.toolResult?.[c.function.name] ?? TOOL_RESULT[c.function.name] ?? 'Done.',
         });
       }
     }
   }
 
-  return { said, called, turns };
+  return { said, called, calls: calls_, turns };
 }
 
 const filter = process.argv[2]?.toLowerCase();

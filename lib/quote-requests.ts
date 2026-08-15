@@ -31,6 +31,27 @@ export interface QuoteRequestRow {
   created_at: string;
 }
 
+/**
+ * Whether this request is allowed to put a card in 🔴 Needs You.
+ *
+ * A CALL NEVER DOES. Karim, 2026-08-15: "the call only pings me if it has to
+ * pass through to a rep. other than that it shouldn't. pings only come to me
+ * through email or text." The trigger was far too loose to be a ping: the agent
+ * files a request whenever it texts somebody the catalogue, so a caller who said
+ * "could you help me place an order for a couple tapes" and was told to reply to
+ * the text produced a work item for a quote nobody had actually asked for yet.
+ * That is a queue that trains you to ignore it.
+ *
+ * The ROW is still written for every source, and that is the point: the record
+ * of what somebody wants is not the same thing as an interruption. Call-sourced
+ * requests stay findable through `openQuoteRequests`, they reach a human when
+ * the customer actually replies to the text or emails sales@, and the one thing
+ * a call is allowed to interrupt with is a phone ringing on an escalation.
+ */
+function queuesACard(source: NewQuoteRequest['source']): boolean {
+  return source !== 'call';
+}
+
 export interface NewQuoteRequest {
   phone: string;
   source: 'call' | 'sms';
@@ -69,6 +90,10 @@ export async function recordQuoteRequest(input: NewQuoteRequest): Promise<QuoteR
 
   if (inserted.error) throw new Error(`recordQuoteRequest: ${inserted.error.message}`);
   const row = inserted.data as QuoteRequestRow;
+
+  // Rendering a card nobody will be sent is a wasted round trip, so the source
+  // check comes before the render rather than only before the enqueue.
+  if (!queuesACard(input.source)) return row;
 
   const card = await quoteRequestCard({
     id: row.id,

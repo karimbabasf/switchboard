@@ -44,7 +44,32 @@ four". They live together in `BUSINESS.spoken` so a new one cannot be forgotten.
 - **Stock levels, lead times, minimums, returns, or payment terms.** Not in the facts, so not in the mouth.
 - **Anything invented.** If it is not a frozen fact or something a tool just returned, the answer is a person, not a guess.
 
-### Hands to a human, immediately
+### On a CALL, a human is offered, not imposed
+
+This list is the SMS half. On the phone, none of these dial anybody by themselves.
+Karim, 2026-08-15: **the customer has to confirm.** On 2026-08-15 a caller said a
+delivery arrived damaged and heard "I can put you through to someone on our team,
+would you like that? One moment, I'm connecting you now" as one sentence, then the
+phone rang at a responder. The question was decorative.
+
+So the voice agent has two tools, and only one of them can dial:
+
+- `offer_human` asks and stamps `call_flow.escalation_offered_at`. It cannot dial.
+- `escalate_to_human` dials, and takes a `trigger`. `asked` means the caller asked
+  for a person in their own words and goes straight through. Anything else needs
+  the stamp, at least 2.5 seconds old, or the server refuses, asks the question
+  itself, and gives the caller their turn.
+
+The check is server-side because the prompt already said "offer first, dial on a
+yes" and lost to a tool description that said to fire "when they are upset or
+disputing a charge". Two authorities disagreeing is not a rule. See the note above
+`escalate` in `lib/agent/tools.ts`.
+
+Why the phone is stricter than SMS: escalating a text pings a human, which costs a
+glance. Escalating a call yanks the customer out of the conversation and rings a
+phone. Those are not the same price, so they do not get the same default.
+
+### Hands to a human, immediately (SMS)
 
 1. Any price question that will not settle for "we quote it".
 2. **Any bargaining. Zero tolerance.** Asking for a discount, "what's your best price", "can you do better", "that's too expensive", a competitor comparison, a bulk-discount ask. The moment it starts, ping the group.
@@ -122,7 +147,15 @@ A rule in a prompt is a preference. These are the checks that make them hold:
   what is about to be said.
 - **Everything fails closed on send and fails open on escalation.** An unsure agent
   sends nothing and pings a human. Suppressing a real customer is invisible and
-  unbounded; one extra card costs a glance.
+  unbounded; one extra card costs a glance. **This is the SMS rule and it does not
+  cross to voice.** On a call, failing open means ringing a phone at a customer who
+  did not ask, so the voice agent fails closed on the dial too: it offers, and waits.
+- **A call pings the group only when it hands over to a person.** Karim, 2026-08-15.
+  A quote request raised on a call writes its row and queues no card, because the
+  agent files one every time it texts somebody the catalogue, and a caller told to
+  reply to that text has not asked to be priced yet. A queue full of work nobody
+  requested is a queue you learn to ignore. Texts still card, because a customer
+  asking in writing has actually asked. See `queuesACard` in `lib/quote-requests.ts`.
 
 ---
 

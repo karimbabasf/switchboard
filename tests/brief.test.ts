@@ -338,11 +338,26 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
   });
 
   it('offers a person instead of waiting to be asked for one', () => {
-    expect(prompt).toMatch(/I can put you through to someone on our team, would you like that\?/);
+    // The offer SENTENCE no longer lives here. It moved into offer_human on
+    // 2026-08-15, because a sentence the model speaks itself can be spoken in the
+    // same turn as the dial, and that is precisely what went wrong: "would you
+    // like that? One moment, I'm connecting you now." What the prompt owes now is
+    // the routing, and the tool owns the words.
+    expect(prompt).toMatch(/offer_human/);
+    expect(prompt).toMatch(/upset, disputing a charge/i);
     expect(prompt).toMatch(/Do not ask them why and do not talk them out of it/i);
     // "Whatever the title is" was Karim's phrasing, and the safe answer to it is
     // to have no title at all rather than a plausible invented one.
     expect(prompt).toMatch(/Do not invent a job title/i);
+  });
+
+  it('forbids asking and connecting in the same turn', () => {
+    // The 2026-08-15 defect. The prompt must say the wait out loud, because a
+    // model that reads "offer, then escalate on a yes" as one instruction will
+    // happily emit both in one turn, which is what it did.
+    expect(prompt).toMatch(/STOP AND WAIT/);
+    expect(prompt).toMatch(/never say "would you like that" and put them through in the same breath/i);
+    expect(prompt).toMatch(/NEVER PUT SOMEBODY THROUGH WHO HAS NOT AGREED/i);
   });
 
   it('says only what it knows for certain, and lists what it does not know', () => {

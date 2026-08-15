@@ -45,6 +45,11 @@ export interface ToolDeps {
   /** The work item a human prices. Owned by lib/quote-requests.ts. */
   recordQuote(input: NewQuoteRequest): Promise<QuoteRequestRow>;
   /**
+   * Clock, injectable so the escalation consent window is testable without
+   * sleeping. Optional because production only ever wants the real one.
+   */
+  now?: () => number;
+  /**
    * Records a name the caller gave us, which also retitles their Telegram topic.
    * Optional so a test can leave it out; production always supplies it.
    */
@@ -128,6 +133,8 @@ const NOT_THIS_CALLER =
 
 export async function runTool(name: ToolName, args: Args, deps: ToolDeps): Promise<ToolResult> {
   switch (name) {
+    case 'offer_human':
+      return offerHuman(args, deps);
     case 'escalate_to_human':
       return escalate(args, deps);
     case 'lookup_invoice':
@@ -151,8 +158,79 @@ const CONNECTING = 'One moment, I am connecting you now.';
  */
 const WILL_PASS_ON = 'Everyone is tied up right now, so I have got this down and we will get right back to you.';
 
+/** The question `offer_human` asks, and the one `escalate` falls back to asking. */
+const OFFER = 'I can put you through to someone on our team. Would you like that?';
+
+/**
+ * Whether an offer exists and is old enough that a caller could have answered it.
+ *
+ * Unparseable timestamps are a no, like a missing one: the whole point is that
+ * only a stamp we can positively read counts as consent.
+ */
+export function offerWasAnswerable(offeredAt: string | null, nowMs: number): boolean {
+  if (!offeredAt) return false;
+  const at = Date.parse(offeredAt);
+  if (Number.isNaN(at)) return false;
+  return nowMs - at >= OFFER_MIN_AGE_MS;
+}
+
+/**
+ * How old an offer must be before a "yes" to it is believable.
+ *
+ * The bug this defends against is the offer and the dial landing in ONE model
+ * turn, which is milliseconds apart: on 2026-08-15 the caller heard "would you
+ * like that? One moment, I'm connecting you now" as a single sentence. A real
+ * yes cannot be that fast. The offer has to be spoken (about three seconds of
+ * speech), heard, answered, and the answer has to come back through the model,
+ * so the honest path is five seconds or more and the bug path is under one.
+ * 2500ms sits between them with room on both sides.
+ *
+ * Deliberately a floor and not a ceiling. An offer made two minutes ago and
+ * accepted late is still an accepted offer.
+ */
+const OFFER_MIN_AGE_MS = 2500;
+
+/**
+ * Asks, and only asks. This tool cannot dial, which is the entire reason it
+ * exists as a separate tool rather than a flag on the other one.
+ *
+ * The stamp it leaves is what `escalate` checks. Recording it is best effort:
+ * failing to write the stamp must not cost the caller the question, and the
+ * consequence of a lost stamp is one extra "would you like that?", which is the
+ * safe direction to fail in.
+ */
+async function offerHuman(args: Args, deps: ToolDeps): Promise<ToolResult> {
+  const phone = callerPhone(args);
+  if (!phone) return { speech: OFFER };
+
+  const flow = await deps.store.activeAssistantCall(phone);
+  if (flow) {
+    try {
+      await deps.store.recordEscalationOffer(flow.call_control_id);
+    } catch (err) {
+      console.error(`[agent] recordEscalationOffer for ${flow.call_control_id} failed:`, err);
+    }
+  }
+  return { speech: OFFER };
+}
+
 /**
  * The only tool that changes call state, and the only one that can dial.
+ *
+ * A CALLER MUST HAVE AGREED. Two paths reach a dial and no third one exists:
+ * they asked for a person themselves (`trigger: 'asked'`, nothing to verify,
+ * because there is no earlier state a direct ask could leave behind), or they
+ * said yes to an offer, which we can verify, because `offer_human` stamped the
+ * row. Anything else, including a missing or unrecognised trigger, is treated as
+ * the second case and therefore needs the stamp.
+ *
+ * The stamp is checked rather than trusted for the reason every other gate in
+ * this file exists: an instruction is not a control. Until 2026-08-15 the rule
+ * lived only in the prompt and the tool description, the two disagreed, and a
+ * caller with a damaged delivery got dialled through mid-sentence. Now the
+ * server refuses, asks the question itself, and the caller gets their turn. The
+ * failure mode is one redundant offer, never a phone ringing at somebody who
+ * did not ask for it.
  *
  * Idempotency is free: the compare-and-set from `assistant` to `ringing` is what
  * dials, so a retried tool call finds the stage already moved, updates nothing,
@@ -170,6 +248,17 @@ async function escalate(args: Args, deps: ToolDeps): Promise<ToolResult> {
   // No call in the assistant stage means it already escalated, already ended, or
   // the number did not resolve. All three are "do not dial".
   if (!flow) return { speech: CONNECTING };
+
+  // Only an explicit "asked" skips the consent check. A missing trigger, a typo
+  // or a value from a future prompt all land here and are made to prove consent.
+  if (str(args, 'trigger') !== 'asked' && !offerWasAnswerable(flow.escalation_offered_at, deps.now?.() ?? Date.now())) {
+    try {
+      await deps.store.recordEscalationOffer(flow.call_control_id);
+    } catch (err) {
+      console.error(`[agent] recordEscalationOffer for ${flow.call_control_id} failed:`, err);
+    }
+    return { speech: OFFER };
+  }
 
   const responders = await deps.store.activeResponders();
   const first = responders[0];

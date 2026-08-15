@@ -1,0 +1,18 @@
+-- A caller must AGREE before we ring a person at them.
+--
+-- On 2026-08-15 a caller mentioned a damaged delivery and the agent said "I can
+-- put you through to someone on our team, would you like that? One moment, I'm
+-- connecting you now" in one breath, then dialled. The offer and the dial were
+-- the same turn, so the caller never got to answer. `call_flow` row
+-- v3:EXAMPLE-call-control-id reached wave 0.
+--
+-- The prompt already said "on a yes". It lost to the tool description, which
+-- said to fire "when they are upset or disputing a charge". Both were fixed, but
+-- an instruction is not a control: this column is what makes the rule structural.
+-- `offer_human` stamps it and cannot dial; `escalate_to_human` on the accepted
+-- path refuses to dial unless the stamp is there and old enough that a human
+-- could have spoken in between.
+--
+-- Nullable with no default and no backfill: an in-flight call that predates this
+-- column simply has no offer on record, which is the correct reading of it.
+alter table call_flow add column if not exists escalation_offered_at timestamptz;

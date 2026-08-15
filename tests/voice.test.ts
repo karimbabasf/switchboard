@@ -192,7 +192,13 @@ class FakeStore implements VoiceStore {
 
   async createFlow(row: { call_control_id: string; call_id: string }) {
     if (this.flows.has(row.call_control_id)) return;
-    this.flows.set(row.call_control_id, { ...row, stage: 'initiated', wave: null, recording_started: false });
+    this.flows.set(row.call_control_id, {
+      ...row,
+      stage: 'initiated',
+      wave: null,
+      recording_started: false,
+      escalation_offered_at: null,
+    });
   }
 
   async getFlow(callControlId: string) {
@@ -233,6 +239,11 @@ class FakeStore implements VoiceStore {
 
   async markConversationStarted(callControlId: string, conversationId: string) {
     this.conversations.set(callControlId, conversationId);
+  }
+
+  async recordEscalationOffer(callControlId: string) {
+    const f = this.flows.get(callControlId);
+    if (f) f.escalation_offered_at = new Date().toISOString();
   }
 
   async activeAssistantCall(callerPhone: string) {

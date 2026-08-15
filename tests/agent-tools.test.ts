@@ -22,6 +22,8 @@ interface Options {
   customerId?: string | null;
   /** Makes the SMS send throw, the way a carrier rejection does. */
   smsFails?: boolean;
+  /** An offer already on record, as an ISO string. Null means none was ever made. */
+  offeredAt?: string | null;
 }
 
 function testDeps(opts: Options = {}) {
@@ -31,9 +33,11 @@ function testDeps(opts: Options = {}) {
     stage: opts.stage ?? 'assistant',
     wave: null,
     recording_started: true,
+    escalation_offered_at: opts.offeredAt ?? null,
   };
   const responders = opts.responders ?? [responder('r1')];
   const posted: { phone: string; text: string }[] = [];
+  const offers: string[] = [];
 
   const dial = vi.fn(async () => ({
     call_control_id: 'leg-b1',
@@ -54,6 +58,12 @@ function testDeps(opts: Options = {}) {
       if (!from.includes(flow.stage)) return null;
       Object.assign(flow, { stage: to }, patch ?? {});
       return { ...flow };
+    },
+    // Writes the stamp the consent gate reads, so a test that offers and then
+    // escalates goes through the same state the real call does.
+    recordEscalationOffer: async (id: string) => {
+      offers.push(id);
+      flow.escalation_offered_at = new Date().toISOString();
     },
     addLeg: async () => {},
   } as unknown as VoiceStore;
@@ -87,13 +97,13 @@ function testDeps(opts: Options = {}) {
     },
   };
 
-  return { deps, dial, flow, posted, commands, texted, quotes };
+  return { deps, dial, flow, posted, commands, texted, quotes, offers };
 }
 
 describe('runTool: escalate_to_human', () => {
   it('rings the responders using the existing wave code, not a Telnyx transfer', async () => {
     const t = testDeps();
-    await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'wants a person' }, t.deps);
+    await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'wants a person', trigger: 'asked' }, t.deps);
 
     expect(t.dial).toHaveBeenCalled();
     // We own no transfer command at all, deliberately: escalation is
@@ -104,13 +114,13 @@ describe('runTool: escalate_to_human', () => {
 
   it('returns something for the agent to say while the phone rings', async () => {
     const t = testDeps();
-    const out = await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'upset' }, t.deps);
+    const out = await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'upset', trigger: 'asked' }, t.deps);
     expect(out.speech).toMatch(/moment|connecting|one second/i);
   });
 
   it('takes a message instead when nobody is on the rota', async () => {
     const t = testDeps({ responders: [] });
-    const out = await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'wants a person' }, t.deps);
+    const out = await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'wants a person', trigger: 'asked' }, t.deps);
 
     expect(t.dial).not.toHaveBeenCalled();
     // It used to be allowed to say "the team". It says "we" now (Karim,
@@ -123,21 +133,114 @@ describe('runTool: escalate_to_human', () => {
 
   it('is idempotent, because a retried tool call must not dial twice', async () => {
     const t = testDeps();
-    await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'x' }, t.deps);
-    await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'x' }, t.deps);
+    await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'x', trigger: 'asked' }, t.deps);
+    await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'x', trigger: 'asked' }, t.deps);
     expect(t.dial).toHaveBeenCalledTimes(1);
   });
 
   it('does not dial when the call already left the assistant stage', async () => {
     const t = testDeps({ stage: 'bridged' });
-    await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'x' }, t.deps);
+    await runTool('escalate_to_human', { caller_phone: CALLER, reason: 'x', trigger: 'asked' }, t.deps);
     expect(t.dial).not.toHaveBeenCalled();
   });
 
   it('tolerates a caller number the model reformatted', async () => {
     const t = testDeps();
-    await runTool('escalate_to_human', { caller_phone: '(415) 555-0101', reason: 'x' }, t.deps);
+    await runTool('escalate_to_human', { caller_phone: '(415) 555-0101', reason: 'x', trigger: 'asked' }, t.deps);
     expect(t.dial).toHaveBeenCalled();
+  });
+});
+
+/**
+ * The 2026-08-15 defect, in tests.
+ *
+ * A caller said a delivery arrived damaged. The agent said "I can put you
+ * through to someone on our team, would you like that? One moment, I'm
+ * connecting you now" as one sentence and dialled. The caller never got the turn
+ * the question implied. What follows pins the rule that came out of it: a dial
+ * needs consent, and the server checks for it rather than believing the model.
+ */
+describe('escalation needs the caller to agree', () => {
+  const UPSET = { caller_phone: CALLER, reason: 'damaged delivery' };
+
+  it('does not dial on the agent own judgment, and asks instead', async () => {
+    const t = testDeps();
+    const out = await runTool('escalate_to_human', { ...UPSET, trigger: 'accepted' }, t.deps);
+
+    expect(t.dial).not.toHaveBeenCalled();
+    expect(t.flow.stage).toBe('assistant');
+    expect(out.speech).toMatch(/would you like/i);
+  });
+
+  it('refuses a missing trigger the same way, because an omission is not consent', async () => {
+    const t = testDeps();
+    const out = await runTool('escalate_to_human', UPSET, t.deps);
+
+    expect(t.dial).not.toHaveBeenCalled();
+    expect(out.speech).toMatch(/would you like/i);
+  });
+
+  it('refuses a trigger it does not recognise, so a future prompt cannot fail open', async () => {
+    const t = testDeps();
+    await runTool('escalate_to_human', { ...UPSET, trigger: 'ASKED!' }, t.deps);
+    expect(t.dial).not.toHaveBeenCalled();
+  });
+
+  it('records the offer it was forced to make, so the next yes works', async () => {
+    const t = testDeps();
+    await runTool('escalate_to_human', { ...UPSET, trigger: 'accepted' }, t.deps);
+    expect(t.offers).toEqual([CALL_CONTROL_ID]);
+  });
+
+  it('dials once the offer is old enough to have been answered', async () => {
+    const t = testDeps({ offeredAt: new Date(Date.now() - 10_000).toISOString() });
+    await runTool('escalate_to_human', { ...UPSET, trigger: 'accepted' }, t.deps);
+
+    expect(t.dial).toHaveBeenCalled();
+    expect(t.flow.stage).toBe('ringing');
+  });
+
+  it('will not accept an offer made in the same breath, which is the actual bug', async () => {
+    const t = testDeps();
+    // offer_human then escalate_to_human with no caller turn in between: exactly
+    // what one model turn emitting both looks like from the server side.
+    await runTool('offer_human', UPSET, t.deps);
+    await runTool('escalate_to_human', { ...UPSET, trigger: 'accepted' }, t.deps);
+
+    expect(t.dial).not.toHaveBeenCalled();
+  });
+
+  it('lets a direct ask through with no offer on record', async () => {
+    const t = testDeps();
+    await runTool('escalate_to_human', { ...UPSET, trigger: 'asked' }, t.deps);
+    expect(t.dial).toHaveBeenCalled();
+  });
+});
+
+describe('runTool: offer_human', () => {
+  it('asks, and never dials', async () => {
+    const t = testDeps();
+    const out = await runTool('offer_human', { caller_phone: CALLER, reason: 'upset' }, t.deps);
+
+    expect(t.dial).not.toHaveBeenCalled();
+    expect(t.flow.stage).toBe('assistant');
+    expect(out.speech).toMatch(/would you like/i);
+    expect(out.speech).toMatch(/someone on our team/i);
+  });
+
+  it('stamps the call, which is what makes a later yes believable', async () => {
+    const t = testDeps();
+    await runTool('offer_human', { caller_phone: CALLER, reason: 'upset' }, t.deps);
+    expect(t.offers).toEqual([CALL_CONTROL_ID]);
+  });
+
+  it('still asks when the stamp cannot be written, because the question is what the caller needs', async () => {
+    const t = testDeps();
+    (t.deps.store as unknown as { recordEscalationOffer: () => Promise<void> }).recordEscalationOffer = async () => {
+      throw new Error('postgres is down');
+    };
+    const out = await runTool('offer_human', { caller_phone: CALLER, reason: 'upset' }, t.deps);
+    expect(out.speech).toMatch(/would you like/i);
   });
 });
 

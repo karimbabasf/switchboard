@@ -149,6 +149,12 @@ export interface CallFlow {
   stage: 'initiated' | 'answered' | 'assistant' | 'ringing' | 'bridged' | 'voicemail' | 'ended';
   wave: number | null;
   recording_started: boolean;
+  /**
+   * When the agent last offered this caller a person. Null means it never did,
+   * which is the only reading that is safe to act on: `escalate_to_human` will
+   * not dial on the "they accepted" path without a stamp here.
+   */
+  escalation_offered_at: string | null;
 }
 
 export interface CallLeg {
@@ -198,6 +204,12 @@ export interface VoiceStore {
   markConversationStarted(callControlId: string, conversationId: string): Promise<void>;
   /** The call the agent is currently holding for this caller, newest first. */
   activeAssistantCall(callerPhone: string): Promise<CallFlow | null>;
+  /**
+   * Stamps that the caller was offered a person. Deliberately NOT a stage move:
+   * an offer changes nothing about the call, it only starts the clock that
+   * `escalate_to_human` checks before it is allowed to dial.
+   */
+  recordEscalationOffer(callControlId: string): Promise<void>;
 
   activeResponders(): Promise<Responder[]>;
   addLeg(leg: Omit<CallLeg, 'status'>): Promise<void>;
@@ -342,6 +354,19 @@ export function supabaseStore(): VoiceStore {
         .maybeSingle();
       if (res.error) throw new Error(`activeAssistantCall: ${res.error.message}`);
       return (res.data as CallFlow) ?? null;
+    },
+
+    /**
+     * Last write wins on purpose. A second offer in the same call restarts the
+     * clock, which is right: the caller is being asked again, so the answer we
+     * are waiting for is the new one.
+     */
+    async recordEscalationOffer(callControlId) {
+      const res = await db()
+        .from('call_flow')
+        .update({ escalation_offered_at: new Date().toISOString() })
+        .eq('call_control_id', callControlId);
+      if (res.error) throw new Error(`recordEscalationOffer: ${res.error.message}`);
     },
 
     async activeResponders() {

@@ -23,12 +23,13 @@
 import { optionalEnv } from '../env.ts';
 import { GREETING, keyterms, systemPrompt } from '../agent/brief.ts';
 
-/** The five tools, in the order the prompt introduces them. */
+/** The six tools, in the order the prompt introduces them. */
 export const TOOL_NAMES = [
   'lookup_invoice',
   'check_order',
   'text_me_the_list',
   'take_message',
+  'offer_human',
   'escalate_to_human',
 ] as const;
 
@@ -332,14 +333,53 @@ const TOOL_SPECS: ToolSpec[] = [
     required: ['caller_phone', 'message', 'callback_number'],
   },
   {
+    name: 'offer_human',
+    description:
+      // The tool that exists because the OTHER one used to do this job badly.
+      // Until 2026-08-15 `escalate_to_human` said to fire "when they are upset or
+      // disputing a charge", so a caller who mentioned a damaged delivery was
+      // dialled through mid-sentence, having been asked "would you like that?"
+      // and never given room to answer. Judgment now gets its own tool, and that
+      // tool cannot dial. See the note above `escalate_to_human`.
+      // The second sentence about the yes is not padding. In rehearsal the agent
+      // offered, the caller said "yes please", and it answered "One moment." and
+      // called nothing, leaving them holding a line nobody was ringing. An offer
+      // that cannot be completed is a worse failure than the one this tool was
+      // built to stop, so the follow-through is spelled out where the decision
+      // is made.
+      'Ask the caller whether they would like to be put through to a person, and wait for their answer. This only ASKS: it never connects anyone, so it is always safe. Use it whenever you think a person would help but the caller has not asked for one: they are upset, disputing a charge or an amount, changing or cancelling an order, pushing for pricing you cannot give, or your answer has not landed twice. If they then say yes, you MUST call escalate_to_human with trigger "accepted": that is the only thing that connects anybody, and saying "one moment" on its own rings nobody.',
+    properties: {
+      ...CALLER_PHONE,
+      reason: { type: 'string', description: 'Why you think they need a person, in a few words.' },
+    },
+    required: ['caller_phone', 'reason'],
+  },
+  {
     name: 'escalate_to_human',
     description:
-      'Ring the team and connect the caller to a person. Use the moment the caller asks for a human, immediately after they accept your offer of one, or when they are upset or disputing a charge.',
+      // NOT "or when they are upset or disputing a charge" any more. That clause
+      // contradicted the system prompt, which said to offer first and dial on a
+      // yes, and the tool description won: same failure shape as `take_message`
+      // and "use at the end of any call" on 2026-08-11. A rule stated in only one
+      // of the two places is a rule the model gets to choose between, so the two
+      // now say the same thing, and `trigger` makes the model name which case it
+      // believes it is in rather than blur them.
+      'Ring the team and connect the caller to a person. Only two things may lead here: the caller asked for a person in their own words, or they said yes to an offer you already made with offer_human on an earlier turn. Never call this on your own reading of the situation, and never in the same turn as the offer: if you are asking, use offer_human and wait.',
     properties: {
       ...CALLER_PHONE,
       reason: { type: 'string', description: 'Why the caller needs a person, in a few words.' },
+      // A plain string rather than a JSON Schema enum: Telnyx documents
+      // body_parameters loosely and an unverified field is how a sync starts
+      // failing. It costs nothing to leave it open, because the server treats
+      // anything that is not exactly "asked" as "accepted" and then demands the
+      // offer on record. An unrecognised value therefore fails closed.
+      trigger: {
+        type: 'string',
+        description:
+          'Exactly one of: "asked" if the caller asked for a person in their own words, or "accepted" if they said yes to an offer you made with offer_human on an earlier turn.',
+      },
     },
-    required: ['caller_phone', 'reason'],
+    required: ['caller_phone', 'reason', 'trigger'],
   },
 ];
 
