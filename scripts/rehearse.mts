@@ -43,6 +43,7 @@ import { assistantConfig } from '../lib/telnyx/assistant.ts';
  */
 const API = process.env.REHEARSE_API?.trim() || 'https://api.telnyx.com/v2/ai/chat/completions';
 const VIA_PROXY = !API.includes('api.telnyx.com');
+const TEMPERATURE = Number(process.env.REHEARSE_TEMPERATURE ?? '0.7');
 const MODEL = process.env.TELNYX_LLM_MODEL?.trim() || 'anthropic/claude-haiku-4-5';
 const KEY = VIA_PROXY ? process.env.LLM_PROXY_SECRET?.trim() : process.env.TELNYX_API_KEY?.trim();
 
@@ -639,7 +640,13 @@ async function complete(turns: Turn[]): Promise<Turn> {
       // the turn cap in `run()` already bounds the conversation, so dropping it
       // costs nothing. Read the error body before blaming a prompt change: a
       // harness that reports ERROR on every scenario is never the prompt.
-      body: JSON.stringify({ model: MODEL, messages: turns, tools: TOOLS }),
+      // TEMPERATURE MATCHES WHAT TELNYX SENDS ON A REAL CALL, and leaving it off
+      // was scoring a configuration that does not ship. Measured 2026-08-15 on
+      // the turn "tell me more about the tape, how much does it cost": MiniMax
+      // describes the tape 0 times in 6 at its server default and 5 times in 6
+      // at 0.7. A harness that omits it marks the model down for a setting
+      // production actually sets.
+      body: JSON.stringify({ model: MODEL, messages: turns, tools: TOOLS, temperature: TEMPERATURE }),
     });
 
     if (res.ok) {
