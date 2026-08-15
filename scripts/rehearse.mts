@@ -29,12 +29,25 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { BUSINESS, GREETING, systemPrompt } from '../lib/agent/brief.ts';
 import { assistantConfig } from '../lib/telnyx/assistant.ts';
 
-const API = 'https://api.telnyx.com/v2/ai/chat/completions';
+/**
+ * Where to score.
+ *
+ * Default is Telnyx direct, which is what the assistant used to call. Set
+ * REHEARSE_API to the gateway instead and this scores the path the phone line
+ * actually takes now, reasoning-markup strip included:
+ *
+ *   REHEARSE_API=http://localhost:3000/api/llm/v1/chat/completions pnpm rehearse
+ *
+ * That matters because the strip is the difference between 18/21 and a usable
+ * line: scoring the model directly measures a model we do not ship.
+ */
+const API = process.env.REHEARSE_API?.trim() || 'https://api.telnyx.com/v2/ai/chat/completions';
+const VIA_PROXY = !API.includes('api.telnyx.com');
 const MODEL = process.env.TELNYX_LLM_MODEL?.trim() || 'anthropic/claude-haiku-4-5';
-const KEY = process.env.TELNYX_API_KEY?.trim();
+const KEY = VIA_PROXY ? process.env.LLM_PROXY_SECRET?.trim() : process.env.TELNYX_API_KEY?.trim();
 
 if (!KEY) {
-  console.error('TELNYX_API_KEY is missing. Run this through pnpm rehearse, which loads .env.local.');
+  console.error(`${VIA_PROXY ? 'LLM_PROXY_SECRET' : 'TELNYX_API_KEY'} is missing. Run this through pnpm rehearse, which loads .env.local.`);
   process.exit(1);
 }
 
