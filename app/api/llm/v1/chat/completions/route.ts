@@ -1,4 +1,4 @@
-import { droppedFields, forwardBody } from '@/lib/agent/gateway';
+import { blockedPresent, forwardBody, minimalBody } from '@/lib/agent/gateway';
 import { Stripper, stripMarkup } from '@/lib/agent/strip';
 import { env, optionalEnv } from '@/lib/env';
 
@@ -30,9 +30,15 @@ import { env, optionalEnv } from '@/lib/env';
  * WHAT THAT FALLBACK DOES NOT COVER, learned by taking the line down with it on
  * 2026-08-15: a malformed REQUEST. Primary and fallback share one body, so both
  * failed identically on a field Telnyx's assistant sends and Telnyx's inference
- * rejects. Swapping the model cannot fix a request. That class is handled before
- * either attempt, by the allowlist in lib/agent/gateway.ts, and the fallback is
- * only ever a defence against the model itself.
+ * rejects. Swapping the model cannot fix a request. That class is handled per
+ * model instead, by `callUpstream` retrying on a 400 with a stripped body, and
+ * the model fallback is only ever a defence against the model itself.
+ *
+ * AND THE FIX FOR THAT HAS ITS OWN LESSON, because it broke quality instead.
+ * The first version answered the outage with a four-field allowlist, which threw
+ * away `temperature` and made the agent recite scripts rather than answer the
+ * caller. Nothing errored; it just got worse. Blocking is now limited to the two
+ * fields proven to be rejected. See lib/agent/gateway.ts.
  *
  * This does not add a new single point of failure. `/api/agent/context` and
  * `/api/agent/tools/*` are already on this call's critical path, so Vercel being
@@ -79,22 +85,45 @@ interface ChatBody {
   [k: string]: unknown;
 }
 
-/** Logged once per cold start so a new field Telnyx starts sending is visible. */
+/** Logged once per cold start so a change in what Telnyx sends is visible. */
 let loggedShape = false;
 
-async function callUpstream(body: ChatBody, model: string, signal: AbortSignal): Promise<Response> {
-  if (!loggedShape) {
-    loggedShape = true;
-    const dropped = droppedFields(body as Record<string, unknown>);
-    if (dropped.length > 0) console.log(`llm proxy: dropped non-forwarded fields: ${dropped.join(', ')}`);
-  }
-
+function post(payload: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
   return fetch(UPSTREAM, {
     method: 'POST',
     headers: { Authorization: `Bearer ${env('TELNYX_API_KEY')}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(forwardBody(body as Record<string, unknown>, model)),
+    body: JSON.stringify(payload),
     signal,
   });
+}
+
+/**
+ * One model, two shots at a body it will accept.
+ *
+ * The full body first, because `temperature` and friends are what make the
+ * agent answer the question instead of reciting at the caller. A 400 means
+ * Telnyx sent a field its own inference refuses, which has happened once
+ * already, so the retry strips back to the fields the API cannot refuse. That
+ * turns a future dialect drift into a little latency rather than a dead line.
+ */
+async function callUpstream(body: ChatBody, model: string, signal: AbortSignal): Promise<Response> {
+  const raw = body as Record<string, unknown>;
+
+  if (!loggedShape) {
+    loggedShape = true;
+    const blocked = blockedPresent(raw);
+    console.log(
+      `llm proxy: telnyx sends [${Object.keys(raw).join(', ')}]` +
+        (blocked.length ? `; blocking [${blocked.join(', ')}]` : ''),
+    );
+  }
+
+  const full = await post(forwardBody(raw, model), signal);
+  if (full.status !== 400) return full;
+
+  const detail = (await full.text()).slice(0, 200).replace(/\s+/g, ' ');
+  console.error(`llm proxy: ${model} rejected the full body (400: ${detail}); retrying minimal`);
+  return post(minimalBody(raw, model), signal);
 }
 
 /**

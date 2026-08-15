@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { FORWARD_FIELDS, droppedFields, forwardBody } from '../lib/agent/gateway.ts';
+import { BLOCKED_FIELDS, blockedPresent, forwardBody, minimalBody } from '../lib/agent/gateway.ts';
 
 /**
- * The body below is the one Telnyx's assistant actually sends. It is not
- * invented: `stream_options.continuous_usage_stats` is the field that took the
- * phone line down on 2026-08-15, named in the 400 Telnyx inference returned.
+ * The body below is what Telnyx's assistant actually sends, read off the
+ * gateway's own "dropped non-forwarded fields" log on 2026-08-15:
+ * stream_options, extra_metadata, parallel_tool_calls, temperature.
  */
 const TELNYX_BODY = {
   model: 'MiniMaxAI/MiniMax-M3-MXFP8',
-  messages: [{ role: 'user', content: 'What are your hours?' }],
+  messages: [{ role: 'user', content: 'How much is the tape?' }],
   tools: [{ type: 'function', function: { name: 'text_me_the_list' } }],
   tool_choice: 'auto',
   stream: true,
@@ -19,50 +19,69 @@ const TELNYX_BODY = {
 };
 
 describe('forwardBody', () => {
-  it('never forwards the field that killed the line', () => {
+  it('KEEPS temperature, because dropping it changed how the agent answers', () => {
+    // Regression on a real call: without this the agent skipped "tell me more
+    // about the tape" and recited the pricing routes instead.
+    expect(forwardBody(TELNYX_BODY, 'x').temperature).toBe(0.7);
+  });
+
+  it('blocks the field that took the phone line down', () => {
     const out = forwardBody(TELNYX_BODY, 'x');
     expect(out.stream_options).toBeUndefined();
     expect(JSON.stringify(out)).not.toContain('continuous_usage_stats');
   });
 
-  it('forwards only the allowlist, whatever else arrives', () => {
-    const out = forwardBody(TELNYX_BODY, 'x');
-    expect(Object.keys(out).sort()).toEqual(['messages', 'model', 'stream', 'tool_choice', 'tools']);
+  it('blocks max_tokens, which Telnyx refuses alongside tools', () => {
+    expect(forwardBody({ ...TELNYX_BODY, max_tokens: 200 }, 'x').max_tokens).toBeUndefined();
+    expect(forwardBody({ ...TELNYX_BODY, max_completion_tokens: 200 }, 'x').max_completion_tokens).toBeUndefined();
   });
 
-  it('drops anything new Telnyx starts sending, without being taught it', () => {
-    const out = forwardBody({ ...TELNYX_BODY, some_field_invented_next_quarter: true }, 'x');
-    expect(out.some_field_invented_next_quarter).toBeUndefined();
+  it('forwards every other field Telnyx sends, verified accepted upstream', () => {
+    const out = forwardBody(TELNYX_BODY, 'x');
+    expect(out.parallel_tool_calls).toBe(true);
+    expect(out.extra_metadata).toEqual(TELNYX_BODY.extra_metadata);
+    expect(out.tools).toEqual(TELNYX_BODY.tools);
+    expect(out.tool_choice).toBe('auto');
+    expect(out.stream).toBe(true);
+  });
+
+  it('blocks exactly two things and nothing else', () => {
+    expect([...BLOCKED_FIELDS].sort()).toEqual(['max_completion_tokens', 'max_tokens', 'stream_options']);
+    const sent = new Set(Object.keys(TELNYX_BODY));
+    const got = new Set(Object.keys(forwardBody(TELNYX_BODY, 'x')));
+    const missing = [...sent].filter((k) => !got.has(k));
+    expect(missing).toEqual(['stream_options']);
   });
 
   it('overrides the caller-supplied model, so the choice lives in one place', () => {
     expect(forwardBody(TELNYX_BODY, 'anthropic/claude-haiku-4-5').model).toBe('anthropic/claude-haiku-4-5');
   });
 
-  it('keeps the conversation and the tools, which are the whole point', () => {
-    const out = forwardBody(TELNYX_BODY, 'x');
-    expect(out.messages).toEqual(TELNYX_BODY.messages);
-    expect(out.tools).toEqual(TELNYX_BODY.tools);
-    expect(out.tool_choice).toBe('auto');
-    expect(out.stream).toBe(true);
+  it('reports which blocked fields were present, for the log', () => {
+    expect(blockedPresent(TELNYX_BODY)).toEqual(['stream_options']);
+    expect(blockedPresent({ messages: [] })).toEqual([]);
   });
+});
 
-  it('omits absent fields rather than sending undefined', () => {
-    const out = forwardBody({ messages: [] }, 'x');
-    expect('tools' in out).toBe(false);
-    expect('stream' in out).toBe(false);
-  });
-
-  it('reports what it dropped, so drift is visible in the logs', () => {
-    expect(droppedFields(TELNYX_BODY).sort()).toEqual([
-      'extra_metadata',
-      'parallel_tool_calls',
-      'stream_options',
-      'temperature',
+describe('minimalBody, the retry after an upstream 400', () => {
+  it('keeps only what the API cannot refuse', () => {
+    expect(Object.keys(minimalBody(TELNYX_BODY, 'x')).sort()).toEqual([
+      'messages',
+      'model',
+      'stream',
+      'tool_choice',
+      'tools',
     ]);
   });
 
-  it('has an allowlist that is actually a list of names, not a passthrough', () => {
-    expect(FORWARD_FIELDS.length).toBeLessThan(8);
+  it('survives a field Telnyx has not invented yet', () => {
+    const out = minimalBody({ ...TELNYX_BODY, some_future_field: { nested: true } }, 'x');
+    expect(out.some_future_field).toBeUndefined();
+    expect(out.messages).toEqual(TELNYX_BODY.messages);
+  });
+
+  it('omits absent fields rather than sending undefined', () => {
+    const out = minimalBody({ messages: [] }, 'x');
+    expect('tools' in out).toBe(false);
   });
 });
