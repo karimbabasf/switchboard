@@ -39,6 +39,40 @@ if (!KEY) {
 }
 
 /**
+ * What the run cost, which nothing measured until 2026-08-15.
+ *
+ * The prompt is resent in full on every turn, so tokens scale with prompt size
+ * times turns, and a rehearsal is roughly fifteen times the model spend of a real
+ * call. That was invisible while this script recorded only pass and fail, which
+ * is how the harness became the largest line on the bill without anyone noticing.
+ *
+ * Prices are Telnyx's published per-million rates, including the cached-input
+ * rate, because caching turns out to be the single biggest lever on this bill
+ * and it is NOT uniform across models.
+ *
+ * MEASURED 2026-08-15, AND IT DECIDES THE MODEL CHOICE. Telnyx caches the prompt
+ * automatically on its OWN hosted models: one rehearsal on MiniMax-M3 came back
+ * with 293,760 of 302,133 input tokens cached, 97 percent, with nothing asked for
+ * and no flag set. The Anthropic passthrough gets NONE of it: Haiku reports
+ * `cached_tokens: 0` on identical back-to-back requests, and sending an Anthropic
+ * `cache_control` block returns 200 and is silently ignored.
+ *
+ * So the prompt being resent every turn is only expensive on the models that will
+ * not cache it, and a Telnyx-hosted model beats the passthrough by more than its
+ * sticker price suggests. Price a run with the base rate alone and you overstate
+ * the hosted models by roughly 3x, which is what this table existed to stop.
+ */
+const PRICES: Record<string, { in: number; cached: number; out: number }> = {
+  'anthropic/claude-haiku-4-5': { in: 1.0, cached: 0.1, out: 5.0 },
+  'MiniMaxAI/MiniMax-M3-MXFP8': { in: 0.27, cached: 0.08, out: 1.1 },
+  'moonshotai/Kimi-K2.6': { in: 0.665, cached: 0.08, out: 4.0 },
+  'zai-org/GLM-5.2': { in: 1.0, cached: 0.2, out: 4.0 },
+  'Qwen/Qwen3-235B-A22B': { in: 0.6, cached: 0.12, out: 2.0 },
+};
+
+const spend = { prompt: 0, completion: 0, cached: 0, requests: 0 };
+
+/**
  * The assistant's webhook tools, in the shape chat completions wants.
  *
  * Read off `assistantConfig()` rather than redeclared, so a tool renamed or
@@ -597,6 +631,13 @@ async function complete(turns: Turn[]): Promise<Turn> {
 
     if (res.ok) {
       const json = await res.json();
+      const u = json.usage;
+      if (u) {
+        spend.requests += 1;
+        spend.prompt += u.prompt_tokens ?? 0;
+        spend.completion += u.completion_tokens ?? 0;
+        spend.cached += u.prompt_tokens_details?.cached_tokens ?? 0;
+      }
       const m = json.choices?.[0]?.message;
       if (!m) throw new Error(`no message in response: ${JSON.stringify(json).slice(0, 200)}`);
       // EMPTY STRING, NOT NULL. A model calling a tool with nothing to say first
@@ -707,10 +748,31 @@ for (const s of chosen) {
 }
 
 const passed = results.filter((r) => r.failures.length === 0).length;
+
+// Cost, printed every run so a prompt edit is scored on price as well as on
+// behaviour. `promptPerRequest` is the number that matters: it is the whole
+// prompt, resent on every turn, and it is what a prompt cut actually moves.
+const price = PRICES[MODEL];
+// Cached tokens bill at the cached rate, so they come out of the full-price
+// count rather than being charged twice.
+const fresh = Math.max(0, spend.prompt - spend.cached);
+const cost = price
+  ? (fresh / 1e6) * price.in + (spend.cached / 1e6) * price.cached + (spend.completion / 1e6) * price.out
+  : null;
+const usage = {
+  ...spend,
+  promptPerRequest: spend.requests ? Math.round(spend.prompt / spend.requests) : 0,
+  usd: cost === null ? null : Number(cost.toFixed(4)),
+};
+console.log(
+  `\ntokens: ${spend.prompt.toLocaleString()} in (${usage.promptPerRequest.toLocaleString()}/request, ${spend.cached.toLocaleString()} cached) + ${spend.completion.toLocaleString()} out over ${spend.requests} requests`,
+);
+console.log(cost === null ? `cost: no published price for ${MODEL}` : `cost: $${cost.toFixed(4)}`);
+
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 mkdirSync('out/rehearse', { recursive: true });
 const path = `out/rehearse/${stamp}.json`;
-writeFileSync(path, `${JSON.stringify({ model: MODEL, passed, total: results.length, results }, null, 2)}\n`);
+writeFileSync(path, `${JSON.stringify({ model: MODEL, passed, total: results.length, usage, results }, null, 2)}\n`);
 
 console.log(`\n${passed}/${results.length} passed. Full transcripts: ${path}`);
 process.exit(passed === results.length ? 0 : 1);
