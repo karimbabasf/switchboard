@@ -163,6 +163,22 @@ export interface WebhookTool {
 export interface AssistantConfig {
   name: string;
   model: string;
+  /**
+   * Route the model call through our own gateway instead of calling Telnyx's
+   * model directly. Omitted entirely unless configured, so an unset env var is
+   * the old behaviour rather than a half-applied one.
+   *
+   * `base_url` is ours and Telnyx appends `/chat/completions`. `llm_api_key_ref`
+   * is a Telnyx integration secret id holding the bearer token the gateway
+   * checks. `model` is what Telnyx puts in the request body, which the gateway
+   * overrides from its own env: the model lives in one place, and rolling it
+   * back is an env var rather than an assistant write.
+   */
+  external_llm?: {
+    base_url: string;
+    llm_api_key_ref: string;
+    model: string;
+  };
   instructions: string;
   greeting: string;
   transcription: {
@@ -342,13 +358,31 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
     },
   }));
 
+  // The gateway is opt-in and both halves must be present, because half of it is
+  // an assistant that points somewhere it cannot authenticate to.
+  const gatewayBase = process.env.TELNYX_EXTERNAL_LLM_BASE_URL?.trim();
+  const gatewayKeyRef = process.env.TELNYX_EXTERNAL_LLM_KEY_REF?.trim();
+  const gateway =
+    gatewayBase && gatewayKeyRef
+      ? {
+          base_url: gatewayBase,
+          llm_api_key_ref: gatewayKeyRef,
+          model: optionalEnv('LLM_PROXY_MODEL', 'MiniMaxAI/MiniMax-M3-MXFP8'),
+        }
+      : undefined;
+
   return {
     name: 'Akme line',
     // Latency is the product on a phone line, so this defaults to a native
     // Telnyx-hosted model with no external hop. NEAR AI Cloud stays the default
     // everywhere latency is free (summaries, SMS drafting) and Task 11 measures
     // it here as a custom LLM before this default changes.
+    //
+    // WHEN THE GATEWAY IS ON, THIS IS THE FALLBACK RATHER THAN THE MODEL: Telnyx
+    // calls `external_llm` and this value is what it falls back to. Leaving it
+    // at the model that has always answered this phone is deliberate.
     model: optionalEnv('TELNYX_LLM_MODEL', 'anthropic/claude-haiku-4-5'),
+    ...(gateway ? { external_llm: gateway } : {}),
     instructions: systemPrompt(),
     greeting: GREETING,
     transcription: {
