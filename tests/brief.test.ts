@@ -430,7 +430,30 @@ describe('brief.ts: the agent says "we", because it works here', () => {
   });
 
   it('says the routing line the way Karim wrote it', () => {
-    expect(prompt).toContain("we'll get right back to you with pricing and availability");
+    // Case-insensitive: the phrase moved to the front of its own sentence on
+    // 2026-08-14 when the three routes were levelled up, so it is capitalised now.
+    expect(prompt).toMatch(/we'll get right back to you with pricing and availability/i);
+  });
+
+  it('offers all three routes together, not the website with two afterthoughts', () => {
+    // Karim, 2026-08-14, on a call he otherwise scored 9 out of 10: the line was
+    // "very emphasis-heavy on getting a quote through Acme USA dot com. The
+    // emphasis has to be on Acme USA dot com, emailing, or texting. Those are
+    // the three." A caller who is driving cannot use a website, and one who wants
+    // a paper trail wants email, so leading with one and holding two back turns a
+    // live buyer into a maybe.
+    expect(prompt).toMatch(/THE THREE ROUTES ARE EQUALS AND YOU NAME ALL THREE/);
+    expect(prompt).not.toMatch(/This is the one to lead with/i);
+    // Every worked example has to carry all three, or the examples teach the
+    // habit the rule just banned.
+    const examples = prompt.split('\n').filter((l) => /^(Right|"Definitely)/.test(l.trim()));
+    const routed = examples.filter((l) => /quote request|pricing comes back|a quote comes back/i.test(l));
+    expect(routed.length).toBeGreaterThanOrEqual(3);
+    for (const line of routed) {
+      expect(line).toMatch(new RegExp(BUSINESS.spoken.site.replace(/\s+/g, '\\s+'), 'i'));
+      expect(line).toMatch(/email/i);
+      expect(line).toMatch(/text/i);
+    }
   });
 
   it('sends quotes and orders to the three routes and nowhere else', () => {
@@ -524,8 +547,24 @@ describe('the opener', () => {
     expect(OPENER).not.toContain(BUSINESS.name);
   });
 
-  it('says what the company actually does, so a wrong number knows at once', () => {
-    expect(OPENER).toMatch(/packing/i);
+  it('answers the way an inbound line answers: company first, then who is talking', () => {
+    // REVERSED ON 2026-08-14, and the assertion it replaces was "says what the
+    // company actually does, so a wrong number knows at once". Karim, on a call
+    // he otherwise scored 9 out of 10: "the first introduction thing is just
+    // really, really, really off."
+    //
+    // "We supply packing materials" was being told to somebody who had just
+    // dialled us and therefore already knew. The wrong-number case it was
+    // written for is still covered, and better: "you've reached Acme U S A"
+    // tells a misdial they have the wrong place in the first three words,
+    // without explaining the business to everyone who has the right one.
+    //
+    // Order matters as much as content. "This is Robin from X" is an OUTBOUND
+    // introduction. Inbound, the caller's first question is whether they reached
+    // the right place, which is why the company comes first.
+    expect(OPENER).toMatch(/^Hi, you've reached/);
+    expect(OPENER.indexOf(BUSINESS.spoken.name)).toBeLessThan(OPENER.indexOf('Robin'));
+    expect(OPENER).not.toMatch(/we supply|we sell|we stock/i);
   });
 
   it('reads as one person saying one thing, across both beats', () => {

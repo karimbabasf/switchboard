@@ -145,6 +145,26 @@ const WRITTEN_NAME = /\bakme\b/i;
 /** Money in any form the agent might produce it. */
 const MONEY = /\$|\bdollars?\b|\bcents\b|\bper (case|roll|bundle|pallet) is\b|\bcosts? (about|around|roughly)? ?\d/i;
 
+/**
+ * Speaking about this company as though you work somewhere else.
+ *
+ * PROMOTED TO A GLOBAL CHECK on 2026-08-14. The prompt has banned "someone will
+ * get back to you" since 2026-08-03, and it was scored on exactly one scenario,
+ * so the agent said it on a different one and nothing noticed. Same shape as the
+ * three other holes found today: a rule in the prompt that nothing checks is a
+ * suggestion, and the scenario it was written for is the one place it will never
+ * break.
+ *
+ * "someone on our team" is the one sanctioned use and only when transferring, so
+ * it is carved out here rather than left to whichever scenario remembers.
+ */
+const THIRD_PARTY =
+  /\bthe team\b|\bthey(?:'| a| wi)?(?:re|ll)? (?:will )?(?:get|come|be) back\b|\bsomeone will (?:get|come|be) back\b|\bi'?ll pass (?:it|that) on\b/i;
+const saysWeNotThey = (): Check => (t) => {
+  const hit = t.said.find((s) => THIRD_PARTY.test(s.replace(/someone on our team/gi, '')));
+  return hit ? `talked about us as a third party: "${hit.trim().slice(0, 140)}"` : null;
+};
+
 /** Order-taker behaviour: the failure this whole pass exists to kill. */
 const ORDER_TAKING =
   /what else|anything else|how many (do you|would you|cases|rolls|bundles)|how much do you need|what quantit|add(ing)? that to|put(ting)? (that|you) down for/i;
@@ -297,6 +317,7 @@ const GLOBAL_CHECKS: Check[] = [
   // Written forms are TTS input here. Anything the agent says goes straight to a
   // voice, so a digit string or a URL is a stumble the caller hears.
   mustNotSay(WRITTEN_NAME, 'the written spelling of the name out loud'),
+  saysWeNotThey(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -522,7 +543,8 @@ const SCENARIOS: Scenario[] = [
     why: 'Karim: "we" everywhere. "The team will get back to you" is a bystander talking.',
     caller: ['I need a quote on four pallets of hand wrap.', 'How soon will I hear back?'],
     checks: [
-      mustNotSay(/\bthe team\b|\bthey(?:'| a| wi)?(?:re|ll)? (?:will )?(?:get|come|be) back\b/i, 'the team as a third party'),
+      // The negative half is a GLOBAL check now, so this scenario keeps the
+      // positive one: it is not enough to avoid "they", it has to say "we".
       mustSay(/\bwe(?:'ll| will| can| are)\b/i, 'we'),
     ],
   },
