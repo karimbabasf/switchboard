@@ -168,11 +168,16 @@ export interface AssistantConfig {
    * model directly. Omitted entirely unless configured, so an unset env var is
    * the old behaviour rather than a half-applied one.
    *
-   * `base_url` is ours and Telnyx appends `/chat/completions`. `llm_api_key_ref`
-   * is a Telnyx integration secret id holding the bearer token the gateway
-   * checks. `model` is what Telnyx puts in the request body, which the gateway
-   * overrides from its own env: the model lives in one place, and rolling it
-   * back is an env var rather than an assistant write.
+   * `base_url` is ours and Telnyx appends `/chat/completions`. `model` is what
+   * Telnyx puts in the request body, which the gateway overrides from its own
+   * env, so the model lives in one place and rolling it back is an env var
+   * rather than an assistant write.
+   *
+   * `llm_api_key_ref` IS THE INTEGRATION SECRET'S `identifier`, NOT ITS UUID,
+   * and the docs call it `integration_secret_id` which is what sends you the
+   * wrong way. Passing the UUID returns 400 "External LLM API key (integration
+   * secrets) <uuid> not found", which reads like the secret does not exist when
+   * it does. Learned the expensive way on 2026-08-15.
    */
   external_llm?: {
     base_url: string;
@@ -378,10 +383,17 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
     // everywhere latency is free (summaries, SMS drafting) and Task 11 measures
     // it here as a custom LLM before this default changes.
     //
-    // WHEN THE GATEWAY IS ON, THIS IS THE FALLBACK RATHER THAN THE MODEL: Telnyx
-    // calls `external_llm` and this value is what it falls back to. Leaving it
-    // at the model that has always answered this phone is deliberate.
-    model: optionalEnv('TELNYX_LLM_MODEL', 'anthropic/claude-haiku-4-5'),
+    // EMPTY STRING WHEN THE GATEWAY IS ON, AND THAT IS THE ONLY WAY TO SET ONE.
+    // Telnyx rejects an assistant carrying both: "Assistant can not have both
+    // model and external_llm set". `null` does NOT clear it (the stored value
+    // survives and the same 400 comes back) and neither does omitting the field,
+    // because this is a PATCH. `''` is what clears it, and clearing it alone is
+    // also refused, so the clear and the external_llm must land in one request.
+    //
+    // There is therefore NO Telnyx-level model fallback: it is one or the other.
+    // The only fallback is the one inside the gateway itself, which is why that
+    // route falls back to Haiku on its own rather than relying on this field.
+    model: gateway ? '' : optionalEnv('TELNYX_LLM_MODEL', 'anthropic/claude-haiku-4-5'),
     ...(gateway ? { external_llm: gateway } : {}),
     instructions: systemPrompt(),
     greeting: GREETING,

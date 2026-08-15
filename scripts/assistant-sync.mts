@@ -124,7 +124,28 @@ const checks: { name: string; sent: unknown; stored: unknown }[] = [
     stored: ((voiceSettings.background_audio ?? {}) as Record<string, unknown>).value,
   },
   { name: 'voice_speed', sent: config.voice_settings.voice_speed, stored: voiceSettings.voice_speed },
-  { name: 'model', sent: config.model, stored: got.model },
+  {
+    // `''` is how you CLEAR the model, and Telnyx stores the cleared value as
+    // null, so that one pair is a match rather than a dropped field. Narrow on
+    // purpose: every other sent/stored mismatch still fails the sync, including
+    // a model we meant to set and Telnyx quietly refused.
+    name: 'model',
+    sent: config.model,
+    stored: config.model === '' && got.model === null ? '' : got.model,
+  },
+  {
+    // The gateway, checked by the same read-back rule as everything else. Telnyx
+    // rejects an assistant with both this and `model`, so if this stored null
+    // while we meant to set it, the line is quietly on the wrong model.
+    name: 'external_llm.base_url',
+    sent: config.external_llm?.base_url ?? null,
+    stored: (got.external_llm as { base_url?: string } | null)?.base_url ?? null,
+  },
+  {
+    name: 'external_llm.model',
+    sent: config.external_llm?.model ?? null,
+    stored: (got.external_llm as { model?: string } | null)?.model ?? null,
+  },
   { name: 'transcription.model', sent: config.transcription.model, stored: transcription.model },
   ...(['eot_threshold', 'eot_timeout_ms', 'eager_eot_threshold'] as const).map((key) => ({
     // Flux's own turn-taking knobs. eager_eot_threshold is the one worth failing
