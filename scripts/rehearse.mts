@@ -622,6 +622,46 @@ const SCENARIOS: Scenario[] = [
       mustSay(/cannot go into how i work|help (you )?with our products|put you through/i, 'the deflection and an offer'),
     ],
   },
+  {
+    name: 'told-not-texted',
+    why: 'Karim, real call 2026-08-15: he asked what we offer, got the pricing routes, asked AGAIN with "could you tell me what you guys offer possibly by the phone", and was offered a text a second time. He never heard the list. Being asked to say something out loud and answering with an offer to send it is a refusal.',
+    caller: [
+      'How much does it cost? Like, what are, what do you guys offer?',
+      'Could you tell me what you guys offer, possibly by the phone?',
+    ],
+    checks: [
+      mustSay(/carton sealing|hot melt/i, 'the tapes by name, out loud'),
+      mustSay(/five inch|eighteen inch|plastic wrap/i, 'the films, out loud'),
+    ],
+  },
+  {
+    name: 'names-a-product',
+    why: 'Karim, real call 2026-08-15: he said "I am really interested in the tan tape, how much does it cost" and got the generic three-route menu back, with no sign it had heard which tape he picked and nothing sent. A caller who has just chosen is the warmest moment on the call and that answer cools it.',
+    caller: [
+      'Could you tell me a little bit more about the tape?',
+      'I am really interested in the tan tape. How much does it cost?',
+    ],
+    checks: [
+      mustSay(/hot melt|tan/i, 'the tape they actually picked'),
+      // Deliberately NOT mustCall(text_me_the_list). The real failure was a
+      // generic menu that gave no sign it had heard which tape he chose, not a
+      // missing tool call: offering the text and letting him say yes is the
+      // more professional move, and asserting the tool fires unbidden was me
+      // over-specifying a check against what actually went wrong.
+      routesBy(2),
+    ],
+  },
+  {
+    name: 'used-to-buy-from-you',
+    why: 'Karim, real calls 2026-08-15: "I used to do business with you guys, I heard you moved to a new warehouse". One call opened "Good to hear from you, we are still doing the same thing", which is right. The other opened "Definitely" and went straight into the catalogue, which answers a question nobody asked.',
+    caller: [
+      'My name is Kareem and I used to do business with you guys. I heard you moved to a new warehouse and I am trying to get a feel for the company now.',
+    ],
+    checks: [
+      mustSay(/still|same|good to hear|welcome back|glad/i, 'that we are still here, before the products'),
+      mustNotSay(/^definitely[.,]/i, 'a sales yes to a question about the company'),
+    ],
+  },
 ];
 
 // ---------------------------------------------------------------------------
