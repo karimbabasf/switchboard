@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BLOCKED_FIELDS, blockedPresent, forwardBody, minimalBody } from '../lib/agent/gateway.ts';
+import { BLOCKED_FIELDS, blockedPresent, forwardBody, minimalBody, withCacheControl } from '../lib/agent/gateway.ts';
 
 /**
  * The body below is what Telnyx's assistant actually sends, read off the
@@ -83,5 +83,43 @@ describe('minimalBody, the retry after an upstream 400', () => {
   it('omits absent fields rather than sending undefined', () => {
     const out = minimalBody({ messages: [] }, 'x');
     expect('tools' in out).toBe(false);
+  });
+});
+
+describe('withCacheControl', () => {
+  const sys = 'x'.repeat(200);
+  const body = { messages: [{ role: 'system', content: sys }, { role: 'user', content: 'hi' }] };
+
+  it('adds an Anthropic cache breakpoint on the system prompt', () => {
+    // Without this, Haiku re-buys the whole 8,400 token prompt every turn:
+    // measured 0 cached across three identical requests. With it, 8,059 of
+    // 8,419 come back cached at a tenth of the input rate.
+    const out = withCacheControl(body, 'anthropic/claude-haiku-4-5');
+    const first = (out.messages as Record<string, unknown>[])[0];
+    expect(first.content).toEqual([{ type: 'text', text: sys, cache_control: { type: 'ephemeral' } }]);
+  });
+
+  it('leaves the conversation after the system prompt untouched', () => {
+    const out = withCacheControl(body, 'anthropic/claude-haiku-4-5');
+    expect((out.messages as unknown[])[1]).toEqual({ role: 'user', content: 'hi' });
+  });
+
+  it('does nothing for a non-Anthropic model, which caches on its own', () => {
+    expect(withCacheControl(body, 'MiniMaxAI/MiniMax-M3-MXFP8')).toBe(body);
+  });
+
+  it('leaves a system message alone when someone already shaped it', () => {
+    const already = { messages: [{ role: 'system', content: [{ type: 'text', text: sys }] }] };
+    expect(withCacheControl(already, 'anthropic/claude-haiku-4-5')).toBe(already);
+  });
+
+  it('does nothing when the first message is not a system prompt', () => {
+    const noSys = { messages: [{ role: 'user', content: 'hi' }] };
+    expect(withCacheControl(noSys, 'anthropic/claude-haiku-4-5')).toBe(noSys);
+  });
+
+  it('survives an empty or missing messages array', () => {
+    expect(withCacheControl({}, 'anthropic/claude-haiku-4-5')).toEqual({});
+    expect(withCacheControl({ messages: [] }, 'anthropic/claude-haiku-4-5')).toEqual({ messages: [] });
   });
 });

@@ -1,4 +1,4 @@
-import { blockedPresent, forwardBody, minimalBody } from '@/lib/agent/gateway';
+import { blockedPresent, forwardBody, minimalBody, withCacheControl } from '@/lib/agent/gateway';
 import { Stripper, stripMarkup } from '@/lib/agent/strip';
 import { env, optionalEnv } from '@/lib/env';
 
@@ -48,12 +48,50 @@ import { env, optionalEnv } from '@/lib/env';
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
-const UPSTREAM = 'https://api.telnyx.com/v2/ai/chat/completions';
+/**
+ * Where the model actually runs.
+ *
+ * Telnyx hosts open-weight models and resells Anthropic; NEAR AI Cloud resells
+ * Anthropic too. Same sticker price on Haiku across all of them ($1/$5 per M),
+ * so the only thing that separates them is caching, and caching is worth more
+ * than any price difference here: the prompt is 8,400 tokens and it is resent
+ * every turn.
+ *
+ * Telnyx caches its OWN models automatically and never caches the Anthropic
+ * passthrough, ignoring `cache_control` with a 200. NEAR AI honours it, which
+ * makes Haiku there cost about what MiniMax costs on Telnyx (measured
+ * 2026-08-15: 8,059 of 8,419 tokens cached, 96 percent, $0.00147 a request
+ * against $0.00872 on Telnyx).
+ */
+const UPSTREAMS = {
+  telnyx: () => ({ url: 'https://api.telnyx.com/v2/ai/chat/completions', key: env('TELNYX_API_KEY') }),
+  near: () => ({
+    url: `${optionalEnv('NEAR_AI_BASE_URL', 'https://cloud-api.near.ai/v1').replace(/\/$/, '')}/chat/completions`,
+    key: env('NEAR_AI_API_KEY'),
+  }),
+} as const;
 
-/** The cheap model that caches. Overridable so a bad release is one env var away. */
+type UpstreamName = keyof typeof UPSTREAMS;
+
+const PRIMARY_UPSTREAM = (): UpstreamName =>
+  (optionalEnv('LLM_PROXY_UPSTREAM', 'telnyx') as UpstreamName) in UPSTREAMS
+    ? (optionalEnv('LLM_PROXY_UPSTREAM', 'telnyx') as UpstreamName)
+    : 'telnyx';
+
+/** The model the phone line runs on. Overridable so a bad release is one env var away. */
 const PRIMARY = () => optionalEnv('LLM_PROXY_MODEL', 'MiniMaxAI/MiniMax-M3-MXFP8');
 /** What has always answered this phone, kept as the fallback. */
 const FALLBACK = () => optionalEnv('LLM_PROXY_FALLBACK_MODEL', 'anthropic/claude-haiku-4-5');
+/**
+ * The fallback always goes through Telnyx, even when the primary does not.
+ *
+ * Today's lesson, twice over: a fallback is only worth having when it differs
+ * from the primary in the way the primary breaks. Sharing a body made it
+ * useless against a malformed request; sharing a provider would make it useless
+ * against that provider being down. Telnyx is also the shorter network path and
+ * the one already load-bearing for the rest of the call.
+ */
+const FALLBACK_UPSTREAM: UpstreamName = 'telnyx';
 /**
  * How long the cheap model gets before we stop waiting.
  *
@@ -88,10 +126,11 @@ interface ChatBody {
 /** Logged once per cold start so a change in what Telnyx sends is visible. */
 let loggedShape = false;
 
-function post(payload: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
-  return fetch(UPSTREAM, {
+function post(where: UpstreamName, payload: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
+  const { url, key } = UPSTREAMS[where]();
+  return fetch(url, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${env('TELNYX_API_KEY')}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
     signal,
   });
@@ -106,7 +145,12 @@ function post(payload: Record<string, unknown>, signal: AbortSignal): Promise<Re
  * already, so the retry strips back to the fields the API cannot refuse. That
  * turns a future dialect drift into a little latency rather than a dead line.
  */
-async function callUpstream(body: ChatBody, model: string, signal: AbortSignal): Promise<Response> {
+async function callUpstream(
+  body: ChatBody,
+  model: string,
+  where: UpstreamName,
+  signal: AbortSignal,
+): Promise<Response> {
   const raw = body as Record<string, unknown>;
 
   if (!loggedShape) {
@@ -118,12 +162,16 @@ async function callUpstream(body: ChatBody, model: string, signal: AbortSignal):
     );
   }
 
-  const full = await post(forwardBody(raw, model), signal);
+  // Cache breakpoint before anything else: it changes the body, and the retry
+  // below has to send the same shape or it writes a second cache entry.
+  const prepared = withCacheControl(forwardBody(raw, model), model);
+
+  const full = await post(where, prepared, signal);
   if (full.status !== 400) return full;
 
   const detail = (await full.text()).slice(0, 200).replace(/\s+/g, ' ');
-  console.error(`llm proxy: ${model} rejected the full body (400: ${detail}); retrying minimal`);
-  return post(minimalBody(raw, model), signal);
+  console.error(`llm proxy: ${model} on ${where} rejected the full body (400: ${detail}); retrying minimal`);
+  return post(where, withCacheControl(minimalBody(raw, model), model), signal);
 }
 
 /**
@@ -227,7 +275,7 @@ export async function POST(request: Request): Promise<Response> {
   // Attempt 1: the cheap model that caches, on a deadline the caller can bear.
   const timer = AbortSignal.timeout(DEADLINE_MS());
   try {
-    const res = await callUpstream(body, PRIMARY(), timer);
+    const res = await callUpstream(body, PRIMARY(), PRIMARY_UPSTREAM(), timer);
     if (res.ok) {
       if (wantsStream && res.body) {
         return new Response(stripStream(res.body), {
@@ -236,22 +284,22 @@ export async function POST(request: Request): Promise<Response> {
             'Content-Type': 'text/event-stream; charset=utf-8',
             'Cache-Control': 'no-cache, no-transform',
             Connection: 'keep-alive',
-            'X-Switchboard-Model': PRIMARY(),
+            'X-Switchboard-Model': `${PRIMARY_UPSTREAM()}:${PRIMARY()}`,
           },
         });
       }
       const json = (await res.json()) as Record<string, unknown>;
-      return Response.json(stripBody(json), { headers: { 'X-Switchboard-Model': PRIMARY() } });
+      return Response.json(stripBody(json), { headers: { 'X-Switchboard-Model': `${PRIMARY_UPSTREAM()}:${PRIMARY()}` } });
     }
-    console.error(`llm proxy: primary ${PRIMARY()} returned ${res.status}, falling back`);
+    console.error(`llm proxy: primary ${PRIMARY_UPSTREAM()}:${PRIMARY()} returned ${res.status}, falling back`);
   } catch (err) {
-    console.error(`llm proxy: primary ${PRIMARY()} failed (${err instanceof Error ? err.message : err}), falling back`);
+    console.error(`llm proxy: primary ${PRIMARY_UPSTREAM()}:${PRIMARY()} failed (${err instanceof Error ? err.message : err}), falling back`);
   }
 
   // Attempt 2: the model that has always answered this phone. No deadline of our
   // own here, because at this point falling back again means silence.
   try {
-    const res = await callUpstream(body, FALLBACK(), AbortSignal.timeout(20000));
+    const res = await callUpstream(body, FALLBACK(), FALLBACK_UPSTREAM, AbortSignal.timeout(20000));
     if (!res.ok) {
       const detail = (await res.text()).slice(0, 200);
       console.error(`llm proxy: fallback ${FALLBACK()} returned ${res.status}: ${detail}`);
@@ -266,12 +314,12 @@ export async function POST(request: Request): Promise<Response> {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache, no-transform',
           Connection: 'keep-alive',
-          'X-Switchboard-Model': FALLBACK(),
+          'X-Switchboard-Model': `${FALLBACK_UPSTREAM}:${FALLBACK()}`,
         },
       });
     }
     const json = (await res.json()) as Record<string, unknown>;
-    return Response.json(stripBody(json), { headers: { 'X-Switchboard-Model': FALLBACK() } });
+    return Response.json(stripBody(json), { headers: { 'X-Switchboard-Model': `${FALLBACK_UPSTREAM}:${FALLBACK()}` } });
   } catch (err) {
     console.error(`llm proxy: fallback failed: ${err instanceof Error ? err.message : err}`);
     return Response.json({ error: { message: 'upstream unavailable' } }, { status: 502 });
