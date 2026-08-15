@@ -1,3 +1,4 @@
+import { droppedFields, forwardBody } from '@/lib/agent/gateway';
 import { Stripper, stripMarkup } from '@/lib/agent/strip';
 import { env, optionalEnv } from '@/lib/env';
 
@@ -25,6 +26,13 @@ import { env, optionalEnv } from '@/lib/env';
  * that has always answered this phone. The caller gets a more expensive answer,
  * never silence. Telnyx never sees the failure, which matters because assistant
  * level LLM fallback is undocumented and therefore not something to rely on.
+ *
+ * WHAT THAT FALLBACK DOES NOT COVER, learned by taking the line down with it on
+ * 2026-08-15: a malformed REQUEST. Primary and fallback share one body, so both
+ * failed identically on a field Telnyx's assistant sends and Telnyx's inference
+ * rejects. Swapping the model cannot fix a request. That class is handled before
+ * either attempt, by the allowlist in lib/agent/gateway.ts, and the fallback is
+ * only ever a defence against the model itself.
  *
  * This does not add a new single point of failure. `/api/agent/context` and
  * `/api/agent/tools/*` are already on this call's critical path, so Vercel being
@@ -71,14 +79,20 @@ interface ChatBody {
   [k: string]: unknown;
 }
 
+/** Logged once per cold start so a new field Telnyx starts sending is visible. */
+let loggedShape = false;
+
 async function callUpstream(body: ChatBody, model: string, signal: AbortSignal): Promise<Response> {
-  // `extra_metadata` is Telnyx's own addition and means nothing upstream, so it
-  // is dropped rather than forwarded into a request that might reject it.
-  const { extra_metadata: _drop, ...rest } = body;
+  if (!loggedShape) {
+    loggedShape = true;
+    const dropped = droppedFields(body as Record<string, unknown>);
+    if (dropped.length > 0) console.log(`llm proxy: dropped non-forwarded fields: ${dropped.join(', ')}`);
+  }
+
   return fetch(UPSTREAM, {
     method: 'POST',
     headers: { Authorization: `Bearer ${env('TELNYX_API_KEY')}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...rest, model }),
+    body: JSON.stringify(forwardBody(body as Record<string, unknown>, model)),
     signal,
   });
 }
