@@ -15,10 +15,16 @@
  *
  * TEMPLATES ARE NOT RUN THROUGH THE MODEL-OUTPUT GUARDS in lib/agent/sms.ts,
  * and that is deliberate. Those guards (money, day-commitment) exist to catch a
- * model that drifted, and they are deliberately blunt: `QUOTE_SMS` says the word
- * "quote", which the money guard matches on. A human wrote and reviewed every
- * string in this file, so the guard has nothing to add and would only block the
- * correct answer. Anything generated still goes through them.
+ * model that drifted, and they are deliberately blunt: the quote reply says the
+ * word "quote", which the money guard matches on. A human wrote and reviewed
+ * every string in this file, so the guard has nothing to add and would only
+ * block the correct answer. Anything generated still goes through them.
+ *
+ * The quote reply is assembled from lib/agent/intake.ts rather than fixed, and
+ * that does not weaken the sentence above: the clauses it is built from are
+ * fixed and reviewed here, and the only thing the customer's own message
+ * decides is WHICH of them are left to ask. No text a customer wrote is ever
+ * echoed back out of one.
  *
  * GSM-7 ONLY. Every character here must be in the GSM 03.38 alphabet or the
  * whole message silently becomes UCS-2 and the segment size drops from 160
@@ -28,6 +34,7 @@
  */
 
 import { BUSINESS } from './brief';
+import { intakeAsk, type KnownCustomer } from './intake';
 
 /** Where a quote actually happens. The phone line never produces one. */
 export const QUOTE_CHANNELS = Object.freeze({
@@ -55,14 +62,24 @@ const CATALOGUE_SMS = [
 const HOURS_SMS = `We are open ${BUSINESS.hours}. ${BUSINESS.fulfilment}`;
 
 /**
- * The single most important template. Every pricing question, on any channel,
- * ends here: we do not quote in the channel, we take the request into the one
- * place a human prices it.
+ * The single most important template, and the only one that is not a fixed
+ * string. Every pricing question, on any channel, ends here: we do not quote in
+ * the channel, we take the request into the one place a human prices it.
+ *
+ * IT USED TO BE FIXED AND IT ASKED FOR ONE THING. It read "Reply here with the
+ * items and quantities you need", so a human then had to ask for the name, then
+ * the address, then the email, one text at a time, which is exactly what Karim
+ * said to stop doing on 2026-08-18. The items are one of four things a quote
+ * needs and there is no reason to learn them one per round trip.
+ *
+ * So it is assembled instead: see lib/agent/intake.ts for what the four are and
+ * where each one is read off Akme. A caller that knows nothing gets all four,
+ * a caller that knows three gets a one-clause question, and nobody is asked for
+ * something they have already given us.
  */
-const QUOTE_SMS = [
-  'Happy to get you a quote. Reply here with the items and quantities you need, or build it at',
-  `${QUOTE_CHANNELS.site} and we will send pricing over.`,
-].join(' ');
+function quoteSms(known: KnownCustomer): string {
+  return intakeAsk(known);
+}
 
 /**
  * "Where are you" is a will call question nine times out of ten, and this used to
@@ -111,17 +128,28 @@ const HELP_SMS = [
   `Reply STOP to opt out. Call ${BUSINESS.phone} or email ${BUSINESS.email}.`,
 ].join(' ');
 
-const TEMPLATES: Readonly<Record<TemplateKey, string>> = Object.freeze({
-  catalogue: CATALOGUE_SMS,
-  hours: HOURS_SMS,
-  quote: QUOTE_SMS,
-  contact: CONTACT_SMS,
-  fulfilment: FULFILMENT_SMS,
-  help: HELP_SMS,
+/**
+ * Every template as a function of what we already know. Five of the six ignore
+ * the argument, which is the honest shape: the hours are the hours whoever is
+ * asking, and only the quote reply depends on the person it is going to.
+ */
+const TEMPLATES: Readonly<Record<TemplateKey, (known: KnownCustomer) => string>> = Object.freeze({
+  catalogue: () => CATALOGUE_SMS,
+  hours: () => HOURS_SMS,
+  quote: quoteSms,
+  contact: () => CONTACT_SMS,
+  fulfilment: () => FULFILMENT_SMS,
+  help: () => HELP_SMS,
 });
 
-export function renderTemplate(key: TemplateKey): string {
-  return TEMPLATES[key];
+/**
+ * `known` is optional so every existing caller keeps working unchanged, and
+ * defaults to "we hold nothing", which asks for everything. That default is the
+ * safe direction: asking a known customer for their name is clumsy, quoting
+ * against an address nobody gave us is not.
+ */
+export function renderTemplate(key: TemplateKey, known: KnownCustomer = {}): string {
+  return TEMPLATES[key](known);
 }
 
 /**

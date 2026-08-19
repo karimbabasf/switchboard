@@ -132,10 +132,15 @@ export function formatPhoneForDisplay(phone: string): string {
 }
 
 // --- Standing topics -------------------------------------------------------
-// The group has exactly four, they are Akme's INDEX_TITLES, and both repos
-// claim the same rows. This repo's own "📋 Quote Requests" topic is retired:
-// a second queue meant a human had two places to look for work, and the
-// 2026-08-04 decision (one group, two bots, one queue) is that there is one.
+// They are Akme's INDEX_TITLES and both repos claim the same rows. This repo's
+// own "📋 Quote Requests" topic is retired: a second queue meant a human had
+// two places to look for work, and the 2026-08-04 decision (one group, two
+// bots, one queue) is that there is one.
+//
+// Four standing topics since 2026-08-18: the queue, human intervention, and the
+// two fulfilled-order boards. A confirmed order lands in the one that matches
+// how it leaves the building, which is Akme's `orders.fulfilment` column, so
+// the keys are that column's own values and nothing here translates them.
 
 /**
  * Kept as the name lib/quote-requests.ts imports, now pointing at the shared
@@ -146,10 +151,17 @@ export const QUOTE_REQUESTS_TOPIC = 'needs_you';
 
 const INDEX_KEYS: Record<string, IndexKey> = {
   needs_you: 'needs_you',
-  system: 'system',
-  // The pre-consolidation key, still accepted so an in-flight caller or an old
-  // outbox row does not throw on a name that used to be right.
+  human: 'human',
+  willcall: 'willcall',
+  delivery: 'delivery',
+  // The pre-consolidation keys, still accepted so an in-flight caller or an old
+  // outbox row does not throw on a name that used to be right. Both now point
+  // at where their traffic actually went: the one queue, and the one place an
+  // interruption arrives. `system` in particular must NOT resolve to a topic of
+  // its own, since Akme retired 🚨 System into 🧑 Human Intervention and a
+  // claim under the old key would mint a fifth topic nobody reads.
   quote_requests: 'needs_you',
+  system: 'human',
 };
 
 /** Resolves a standing topic by key, creating it on first use. */

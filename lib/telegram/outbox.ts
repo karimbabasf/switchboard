@@ -1,4 +1,5 @@
 import { db } from '../db';
+import { activeIndexThreadIds } from '../crm/surface.ts';
 import type { OutboxRow } from '../types';
 import type { AudioCardPayload, EditCardPayload, TextCardPayload } from './cards';
 import { telegram, TelegramError, type SentMessage } from './client';
@@ -100,12 +101,17 @@ export async function drainOutbox(limit: number): Promise<DrainResult> {
     .limit(limit);
   if (res.error) throw new Error(`drainOutbox: fetch pending: ${res.error.message}`);
   const rows = (res.data ?? []) as OutboxRow[];
+  if (rows.length === 0) return result;
+
+  // One read for the whole drain rather than one per row: there are four
+  // standing topics and a drain is up to 20 messages.
+  const indexThreads = await activeIndexThreadIds();
 
   for (const row of rows) {
     if (!bucket.canSend(Date.now())) break; // local budget exhausted; rest wait for the next drain
     result.processed++;
     try {
-      const sent = await dispatch(row);
+      const sent = await dispatch(row, indexThreads);
       bucket.record(Date.now());
       const { error } = await db()
         .from('outbox')
@@ -114,22 +120,42 @@ export async function drainOutbox(limit: number): Promise<DrainResult> {
       if (error) throw new Error(`persist sent outbox row ${row.id}: ${error.message}`);
       result.sent++;
     } catch (err) {
-      await handleSendFailure(row, err, result);
+      await handleSendFailure(row, err, result, indexThreads);
     }
   }
 
   return result;
 }
 
-function dispatch(row: OutboxRow): Promise<SentMessage> {
+/**
+ * Karim's mute policy, 2026-08-18: "the client topics we can just mute,
+ * intervention or pings topic stays unmuted, and so does like confirmation of
+ * orders".
+ *
+ * The Bot API (checked against 10.2 on 2026-08-18) has NO method that sets a
+ * person's notification settings for a chat or a topic. `disable_notification`
+ * on the send is the whole of what a bot can do: the message still arrives and
+ * still marks the topic unread, it just makes no sound. Muting a topic outright
+ * is a tap in Karim's own client, and docs/crm-surface.md in Akme carries the
+ * steps rather than this pretending to have done it.
+ *
+ * An edit is never silent, because Telegram does not notify on an edit anyway.
+ */
+function silently(threadId: number | null, indexThreads: Set<number>): Record<string, unknown> {
+  if (threadId === null || indexThreads.has(threadId)) return {};
+  return { disable_notification: true };
+}
+
+function dispatch(row: OutboxRow, indexThreads: Set<number>): Promise<SentMessage> {
+  const quiet = silently(row.thread_id, indexThreads);
   switch (row.kind) {
     case 'text': {
       const payload = row.payload as unknown as TextCardPayload;
-      return telegram.sendMessage(row.thread_id, payload.text, payload.reply_markup ? { reply_markup: payload.reply_markup } : {});
+      return telegram.sendMessage(row.thread_id, payload.text, { ...quiet, ...(payload.reply_markup ? { reply_markup: payload.reply_markup } : {}) });
     }
     case 'audio': {
       const payload = row.payload as unknown as AudioCardPayload;
-      return telegram.sendAudio(row.thread_id, payload.audio_url, payload.caption ? { caption: payload.caption } : {});
+      return telegram.sendAudio(row.thread_id, payload.audio_url, { ...quiet, ...(payload.caption ? { caption: payload.caption } : {}) });
     }
     case 'edit': {
       const payload = row.payload as unknown as EditCardPayload;
@@ -141,19 +167,34 @@ function dispatch(row: OutboxRow): Promise<SentMessage> {
   }
 }
 
-async function handleSendFailure(row: OutboxRow, err: unknown, result: DrainResult): Promise<void> {
+async function handleSendFailure(
+  row: OutboxRow,
+  err: unknown,
+  result: DrainResult,
+  indexThreads: Set<number>,
+): Promise<void> {
   if (err instanceof TelegramError && err.isTopicGone && row.thread_id !== null) {
-    await repairAndRetry(row, result);
+    await repairAndRetry(row, result, indexThreads);
     return;
   }
   await persistFailure(row, err, result);
 }
 
-async function repairAndRetry(row: OutboxRow, result: DrainResult): Promise<void> {
+async function repairAndRetry(
+  row: OutboxRow,
+  result: DrainResult,
+  indexThreads: Set<number>,
+): Promise<void> {
   try {
     const newThreadId = await repairTopic(row.thread_id as number);
+    // The repair minted a thread id that was not in the set read at the top of
+    // the drain, so a standing topic recreated here would look like a customer
+    // topic and go out silent. One extra read on a rare path is cheaper than
+    // the queue arriving without a sound.
     const repaired: OutboxRow = { ...row, thread_id: newThreadId };
-    const sent = await dispatch(repaired);
+    const sent = await dispatch(repaired, indexThreads.has(row.thread_id as number)
+      ? new Set([...indexThreads, newThreadId])
+      : indexThreads);
     bucket.record(Date.now());
     const { error } = await db()
       .from('outbox')

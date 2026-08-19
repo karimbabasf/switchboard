@@ -26,6 +26,7 @@
 
 import { env, optionalEnv } from '../env';
 import { BUSINESS } from './brief';
+import { knownFor, type KnownCustomer } from './intake';
 import { isOrderChangeRequest } from './order-change';
 import { matchTemplate, renderTemplate, nonGsm7 } from './templates';
 import type { TemplateKey } from './templates';
@@ -179,19 +180,76 @@ function numbersIn(text: string): number[] {
   return out;
 }
 
+/**
+ * A field whose numbers are money, whatever else it is called.
+ *
+ * The walk below is deliberately indiscriminate, so this is what keeps it from
+ * becoming a way to publish a price by accident. BUSINESS carries no price
+ * today and is not allowed to: it is the brief of standing facts, and pricing
+ * lives in Akme behind a human. Add `priceCents` to a product tomorrow and the
+ * walk would otherwise hand the guard the one class of number it exists to
+ * hold, silently, with every test still green.
+ */
+const MONEY_FIELD = /pric|cost|rate|fee|charg|cent|dollar|amount|total|discount|subtotal/i;
+
+/**
+ * Every string BUSINESS states, walked out of the object rather than listed.
+ *
+ * THE LIST WAS HAND-WRITTEN AND IT BROKE ON 2026-08-18, the day the products
+ * were renamed. It named `contents`, `spec` and `perPallet` and not `name`,
+ * which was harmless while every name was words. `18" Stretch Film` and
+ * `5" Hand Wrap Film` put a figure in the name itself, so the guard held the
+ * agent back from saying its own lead product out loud: "18" Stretch Film is
+ * eighteen inches by 80 gauge by 1500 feet" was refused over the 18.
+ *
+ * A list of fields is the wrong shape for this. It has to be re-derived by hand
+ * every time the brief grows a field, and nothing fails when somebody forgets,
+ * because forgetting reads as a stricter guard rather than a broken one. So the
+ * walk takes every string under BUSINESS, at any depth, and the only thing it
+ * skips is a money-shaped key. A seventh product, a new spec field and a new
+ * facts entry are all covered on the day they land.
+ *
+ * `facts` is in scope on purpose and it is the widest part of this. Those are
+ * the sentences the agent answers a real product question with ("250 feet on a
+ * roll", "about 33 pounds"), all of them read off the supplier sheet, and every
+ * one of them would otherwise be held for a human.
+ *
+ * WHAT THAT COSTS, counted rather than waved at: three figures, 14, 24 and 33.
+ * Everything else in `facts` is either written in words ("a hundred and forty
+ * five percent", "thirty six rolls") or already published by a spec. Those
+ * three are in the range a case price lives in, so "tape is 33 a case" now gets
+ * past this guard where it did not before. It was never THIS guard's catch:
+ * MONEY above holds every price form carrying a currency, a money word, a rate
+ * or a total, which was 18 of the 25 real forms measured on 2026-08-11. The
+ * exposure is a bare figure at exactly one of three values, against holding
+ * three true answers to questions buyers actually ask. If Karim would rather
+ * have the three answers held, drop `facts` from the walk and nothing else
+ * changes.
+ */
+function publishedStrings(value: unknown, key: string): string[] {
+  if (MONEY_FIELD.test(key)) return [];
+  if (typeof value === 'string') return [value];
+  if (typeof value === 'number') return [String(value)];
+  if (Array.isArray(value)) return value.flatMap((v) => publishedStrings(v, key));
+  if (value && typeof value === 'object') {
+    return Object.entries(value).flatMap(([k, v]) => publishedStrings(v, k));
+  }
+  // Booleans and nulls carry no figure. palletCountsConfirmed is the only one.
+  return [];
+}
+
 const PUBLISHED_NUMBERS: ReadonlySet<number> = new Set(
   [
-    BUSINESS.hours,
-    BUSINESS.fulfilment,
-    // The street number is a fact, not an invention. Without it every reply that
-    // gives out the collection address is held over the 1234.
-    BUSINESS.willCallAddress,
-    BUSINESS.phone,
+    // Everything above: hours, the fulfilment cadence, the will call street
+    // number (without it every reply giving out the address is held over the
+    // 1234), the phone, and all six products end to end.
+    ...publishedStrings(BUSINESS, ''),
     // "1 case holds 36 rolls" is how a pack size is said, and how the catalogue
     // template renders one, so the 1 is ours as much as the 36 is.
     '1',
+    // "We stock six things" is a fact about the catalogue rather than a string
+    // inside it, so it is the one figure the walk cannot reach.
     String(BUSINESS.products.length),
-    ...BUSINESS.products.flatMap((p) => [p.contents, p.spec, String(p.perPallet)]),
   ].flatMap(numbersIn),
 );
 
@@ -205,6 +263,121 @@ const PUBLISHED_NUMBERS: ReadonlySet<number> = new Set(
 export function unpublishedNumber(reply: string): number | null {
   const found = numbersIn(reply).find((n) => !PUBLISHED_NUMBERS.has(n));
   return found === undefined ? null : found;
+}
+
+/**
+ * The third half of the price defence: a figure written in a PRICE POSITION,
+ * whatever its value.
+ *
+ * Akme's scripts/parity-check.ts put 25 real price forms through both channels
+ * on 2026-08-18 and reported seven that "SEND" on SMS. Run end to end they do
+ * not: the check reads this file's MONEY regex out of the source as text and
+ * tests that one regex, and `unpublishedNumber` below stands behind it and
+ * holds all seven, because 46 is not a figure Akme publishes. Measured, all
+ * seven hold.
+ *
+ * THE LEAK IS REAL ANYWAY, and it is the same seven shapes at a value we DO
+ * publish. Rewrite them at 36, which is a pack size and a pallet count, and
+ * every one of them sends:
+ *
+ *   Hot melt tape is 36 a case, delivered.   SENDS
+ *   Hot melt tape is 36/ea.                  SENDS
+ *   Tape: 36                                 SENDS
+ *   I can do 36 flat.                        SENDS
+ *   Roughly 36 a case.                       SENDS
+ *   Our list is 36 per case.                 SENDS
+ *
+ * That is a price, at a plausible price, going to a customer unread, and it is
+ * the thing Karim's rule forbids outright. Neither existing guard can see it:
+ * MONEY reads WORDS and there is no money word in any of them, unpublishedNumber
+ * reads VALUES and 36 is a value we publish. So this one reads neither. It reads
+ * where the figure SITS, which is what actually makes a number a price, and it
+ * is deliberately not more money words: widening MONEY form by form cannot ever
+ * reach "Tape: 36", and the parity check says so in as many words.
+ *
+ * Being value-blind is the whole point and it is what makes this safe to add on
+ * top of an allowlist that grew: 14, 24 and 33 came into PUBLISHED_NUMBERS with
+ * the facts, and all three are case-price shaped. This holds them in a price
+ * position and lets them through in a sentence.
+ *
+ * WHAT MUST STILL SEND, and both are pinned by tests:
+ *  - the catalogue's own figures. "One case of 18" Stretch Film holds 4 rolls",
+ *    "48 millimeters by 110 yards", "roughly 36 cases to a pallet". None of them
+ *    puts a bare figure against a unit, because a real pack statement names what
+ *    is in the pack: "36 rolls per case" is a fact and "36 per case" is a price,
+ *    and the noun between them is the whole difference.
+ *  - a quantity the customer said back to us. "Got it, 2 cases of hot melt
+ *    tape" is a number in front of a plural unit, which no branch below matches.
+ */
+const UNIT = 'ea|each|case|bundle|roll|unit|pallet|box|sheet|piece|pc|lb|pound';
+const PRICE_POSITION = new RegExp(
+  [
+    // Two decimal places is money notation and nothing else here. Every spec we
+    // publish is words or a single decimal ("one point eight mil"), so no
+    // catalogue fact can reach this.
+    String.raw`\d[\d,]*\.\d{2}\b`,
+    // "46/ea", "46 / case". A slash between a figure and an ordering unit is a
+    // rate. `1/2 inch` cannot reach it: 2 is not a unit word.
+    String.raw`\d[\d,]*(?:\.\d+)?\s*/\s*(?:${UNIT})s?\b`,
+    // "46 a case", "46 per case". The figure sits directly against the article,
+    // with no noun of its own, which is what separates it from "36 rolls a case".
+    String.raw`\d[\d,]*(?:\.\d+)?\s+(?:a|an|per)\s+(?:${UNIT})s?\b`,
+    // "46 flat", "46 each", "46 all in". A figure a seller closes a sentence on.
+    String.raw`\d[\d,]*(?:\.\d+)?\s+(?:each|apiece|flat|even|firm|all[- ]in)\b`,
+    // "Tape: 46". A label, a colon, a bare figure, end of sentence: a price list
+    // line. "Phone: (555) 555-0158" cannot reach it, the colon is followed by a
+    // bracket, and "Will call: 1234 Example Way" cannot either, because the
+    // figure is not what ends the line.
+    String.raw`(?:^|[.!?]\s)[^:\n]{1,40}:\s*\d[\d,]*(?:\.\d+)?\s*(?=$|[.\n])`,
+  ].join('|'),
+  'i',
+);
+
+/** The figure written as a price, in the customer's own words, or null. */
+export function pricePosition(reply: string): string | null {
+  return PRICE_POSITION.exec(reply)?.[0].trim() ?? null;
+}
+
+/**
+ * A fact stated about a product it was never listed under.
+ *
+ * Karim's rule, 2026-08-18: A FACT BELONGS TO THE PRODUCT IT IS LISTED UNDER
+ * AND MUST NEVER BE GENERALISED TO ANOTHER. The supplier sheet says "made in
+ * the USA with US and globally sourced materials" for exactly three of the six,
+ * the 18 inch stretch film, the tan hot melt tape and the newsprint paper, and
+ * it is silent about the other three. `facts` in brief.ts mirrors that exactly.
+ *
+ * A model that has read the same sentence three times in one prompt rounds it
+ * up to all six, and "everything we sell is made in the USA" is a false
+ * country-of-origin claim, which is a claim with legal weight rather than a
+ * wording slip. The prompt is told not to; this is what catches it when it does.
+ *
+ * ORIGIN ONLY, and that is a limit worth being honest about. The general rule
+ * covers every fact and no regex can. Origin gets a guard because its
+ * vocabulary is small and fixed and because it is the one that carries legal
+ * weight. Silence about the other three is not evidence either way, so a draft
+ * SAYING they are not US made is caught here too: we do not claim it, and we
+ * never deny it either.
+ */
+const UNIVERSAL = /\b(?:all|every|everything|each of|any of|both|none|neither|whole (?:range|line|catalog(?:ue)?))\b/i;
+const ORIGIN =
+  /\b(?:made in (?:the )?(?:usa|us|america)|usa[- ]made|american[- ]made|us[- ]made|domestically (?:made|produced)|country of origin|imported|made (?:over)?seas|made abroad)\b/i;
+
+/**
+ * The denial, which is the same mistake pointing the other way and was missed
+ * on the first pass: "the cushion wrap is not made in the USA" carries no
+ * universal, so UNIVERSAL alone let it send. The sheet does not say the cushion
+ * wrap is foreign, it says nothing at all, and turning silence into a denial is
+ * as much an invention as turning it into a claim.
+ *
+ * Bounded at three words between the negation and the origin word, so a
+ * sentence that negates something else entirely ("made in the USA, but we do
+ * not have it in stock") is not swept up.
+ */
+const ORIGIN_DENIAL = /\b(?:not|isn'?t|aren'?t|never|nor|no)\b(?:\W+\w+){0,3}\W+(?:made|usa|american|imported|domestic)/i;
+
+export function overgeneralisedOrigin(reply: string): boolean {
+  return ORIGIN.test(reply) && (UNIVERSAL.test(reply) || ORIGIN_DENIAL.test(reply));
 }
 
 /**
@@ -350,13 +523,58 @@ const DRAFT_TOOL = {
   },
 };
 
-function systemPrompt(): string {
-  const catalogue = BUSINESS.products.map((p) => `${p.name} (by the ${p.unit}, ${p.contents})`).join('; ');
+/**
+ * The catalogue, with the checkable facts under each product.
+ *
+ * THE FACTS WERE NOT IN HERE UNTIL 2026-08-18 and the prompt carried the name,
+ * the unit and the pack size only. So the agent could answer "do you have
+ * bubble wrap" and had nothing whatsoever behind "how thick is it", "where is
+ * it made", "will it go on a machine". A model with no fact and a question in
+ * front of it produces a plausible sentence, which is how the eighteen inch
+ * film came to be described as machine-only in the spoken list: nobody checked
+ * it against the supplier sheet. Every line below is off that sheet.
+ *
+ * In rank order, because BUSINESS.products is, and the eighteen inch leads.
+ * The numbers in these facts are the reason lib/agent/intake.ts is not the only
+ * thing that had to change with the rename: PUBLISHED_NUMBERS above walks the
+ * same data, so an answer built out of a fact is not held as an invented figure.
+ */
+function catalogueBlock(): string {
+  return BUSINESS.products
+    .map((p) => {
+      const also = p.alsoCalled.length > 0 ? ` Customers also call it: ${p.alsoCalled.join(', ')}.` : '';
+      return [
+        `${p.name}, by the ${p.unit}, ${p.contents}. ${p.spec}.${also}`,
+        ...p.facts.map((f) => `  - ${f}`),
+      ].join('\n');
+    })
+    .join('\n');
+}
 
+function systemPrompt(): string {
   return `You write SMS replies for ${BUSINESS.name}, a moving and packing supply company in Springfield.
 
-WHAT WE SELL
-${catalogue}. We do not sell boxes, tape guns, dollies, or blankets.
+WHAT WE SELL, most important first, with the facts you are allowed to state
+${catalogueBlock()}
+We do not sell boxes, tape guns, dollies, or blankets.
+
+ANSWERING A QUESTION ABOUT A PRODUCT
+Answer it from the facts above and stop. Pick the one fact that answers what was
+asked. Never recite the list, never add a second product they did not ask about,
+and never sell: a buyer who asked how thick something is wants the thickness.
+If a question needs a fact that is not written above, say someone from the team
+will confirm it. Do not reason your way to an answer that sounds right.
+If the message is about more than one product, lead with the ${BUSINESS.products[0].name}.
+
+A FACT BELONGS TO THE PRODUCT IT IS LISTED UNDER AND TO NOTHING ELSE
+Never carry a fact from one product across to another, and never turn facts you
+have read more than once into a claim about everything we sell. Where a product
+is made is the one that matters most: it is listed under some products and not
+under others, and that is exactly what we know. A product with no such line is
+one we make no claim about. Do not say everything we sell is made anywhere, and
+do not say a product is NOT made somewhere either. Say what is listed under the
+product they asked about, and for anything else say someone from the team will
+confirm it.
 
 HOURS AND FULFILMENT
 ${BUSINESS.hours}. ${BUSINESS.fulfilment}
@@ -476,7 +694,20 @@ function sanitizeForGsm7(text: string): string {
   return bad.size === 0 ? replaced : [...replaced].filter((c) => !bad.has(c)).join('');
 }
 
-export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDeps): Promise<SmsDraft> {
+/**
+ * `onFile` is what the contact row already holds about this person, and it is
+ * optional for one reason: the only caller today (lib/telnyx/sms.ts) is not
+ * this module's to edit, so the default has to be correct on its own. It is:
+ * knowing nothing asks for everything, which is the pre-existing behaviour made
+ * explicit rather than a regression. Passing `{ name: contact.display_name }`
+ * at the call site is the one line that stops a repeat customer being asked
+ * their own name.
+ */
+export async function draftSmsReply(
+  inboundBody: string | null,
+  deps: SmsAgentDeps,
+  onFile: KnownCustomer = {},
+): Promise<SmsDraft> {
   const body = inboundBody?.trim() ?? '';
   if (!body) return draftFallback('empty message, nothing to reply to');
 
@@ -544,7 +775,9 @@ export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDe
   if (templateKey) {
     return {
       intent: TEMPLATE_INTENT[templateKey],
-      reply: renderTemplate(templateKey),
+      // The record plus whatever this message already answered. Only the quote
+      // template reads it; the other five are the same sentence for everyone.
+      reply: renderTemplate(templateKey, knownFor(body, onFile)),
       autoSend: true,
       reason: `template: ${templateKey}`,
     };
@@ -567,6 +800,28 @@ export async function draftSmsReply(inboundBody: string | null, deps: SmsAgentDe
   }
   if (MONEY.test(reply)) {
     return { intent: raw.intent, reply, autoSend: false, reason: 'the draft mentions money' };
+  }
+  // Straight after MONEY, because it is the other half of the same question and
+  // the two together are what make this channel as hard to get a price out of
+  // as the email desk. Ahead of unpublishedNumber deliberately: a figure in a
+  // price position is a price whether or not we publish that value, and
+  // "36 is a pallet count" is the wrong thing to tell a person reading the card.
+  const asAPrice = pricePosition(reply);
+  if (asAPrice !== null) {
+    return {
+      intent: raw.intent,
+      reply,
+      autoSend: false,
+      reason: `the draft writes "${asAPrice}", which reads as a price`,
+    };
+  }
+  if (overgeneralisedOrigin(reply)) {
+    return {
+      intent: raw.intent,
+      reply,
+      autoSend: false,
+      reason: 'the draft claims one product country of origin for all of them',
+    };
   }
   if (commitsToADay(reply)) {
     return { intent: raw.intent, reply, autoSend: false, reason: 'the draft commits to a day' };

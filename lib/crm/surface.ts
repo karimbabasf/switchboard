@@ -17,12 +17,28 @@ import { telegram } from '../telegram/client.ts';
  * the whole point: somebody who calls and also emails gets one thread.
  */
 
-export type IndexKey = 'needs_you' | 'system';
+/**
+ * The standing topics. Akme's lib/ops/surface/index.ts owns this set and this
+ * is a copy of it, because the two repos share a database and no package.
+ *
+ * It had DRIFTED and that is worth recording: this file still said
+ * `'needs_you' | 'system'` with a 🚨 System title on 2026-08-18, months after
+ * Akme retired that topic into 🧑 Human Intervention. Nothing called it, so
+ * nothing broke, but claiming `index_key = 'system'` would have minted a fifth
+ * topic in the shared group that only one of the two bots knew about.
+ *
+ * `willcall` and `delivery` are the fulfilled-order boards added 2026-08-18.
+ * The keys are Akme's FulfilmentMethod strings verbatim, so an order routes by
+ * its own column rather than through a translation table.
+ */
+export type IndexKey = 'needs_you' | 'human' | 'willcall' | 'delivery';
 
 /** Must stay identical to Akme's INDEX_TITLES: both repos claim the same rows. */
 export const INDEX_TITLES: Record<IndexKey, string> = {
   needs_you: '🔴 Needs You',
-  system: '🚨 System',
+  human: '🧑 Human Intervention',
+  willcall: '📦 Will Call',
+  delivery: '🚚 Delivery',
 };
 
 export interface Party {
@@ -197,6 +213,31 @@ export async function partyThread(party: Party): Promise<number> {
 
 export async function indexThread(key: IndexKey): Promise<number> {
   return resolveThread('index', null, key, INDEX_TITLES[key]);
+}
+
+/**
+ * The thread ids of the standing topics, live.
+ *
+ * Read rather than held in a constant because a topic id is minted by Telegram
+ * and can change (a human deletes a topic, the repair mints a fresh one), so a
+ * cached list is a list that is wrong exactly when it matters.
+ *
+ * Used by the outbox to decide which sends are silent: everything that is NOT
+ * one of these is a customer's own thread. Asking the question that way round
+ * is deliberate, because there are four standing topics and an unbounded number
+ * of customer ones, and a new customer must default to quiet rather than to
+ * buzzing Karim's phone until somebody adds them to a list.
+ */
+export async function activeIndexThreadIds(): Promise<Set<number>> {
+  const res = await db()
+    .from('crm_topics')
+    .select('thread_id')
+    .eq('chat_id', chatIdNum())
+    .eq('kind', 'index')
+    .eq('status', 'active');
+  if (res.error) throw new Error(`activeIndexThreadIds: ${res.error.message}`);
+  const rows = (res.data ?? []) as { thread_id: number | null }[];
+  return new Set(rows.map((r) => r.thread_id).filter((id): id is number => id !== null));
 }
 
 /** Telegram forgets a deleted topic entirely, so Postgres has to be told. */

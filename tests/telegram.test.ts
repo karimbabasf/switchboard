@@ -444,6 +444,38 @@ describe('resolveIndexTopic: the ONE queue, shared with Akme', () => {
     await expect(resolveIndexTopic('invoices')).rejects.toThrow(/unknown standing topic "invoices"/);
   });
 
+  // Added 2026-08-18 with the two fulfilled-order boards. Either bot has to be
+  // able to resolve them, and both have to compute the SAME title as Akme:
+  // whoever claims first mints the topic, so a disagreement here is a second
+  // set of topics in the one group.
+  it.each([
+    ['willcall', '📦 Will Call'],
+    ['delivery', '🚚 Delivery'],
+    ['human', '🧑 Human Intervention'],
+  ])('resolves the %s topic with Akme\'s own title', async (key, title) => {
+    mockSurfaceDb({
+      rpc: { crm_claim_topic: () => mustCreate(), crm_commit_topic: () => null },
+    });
+    vi.mocked(telegram.createForumTopic).mockResolvedValue({ message_thread_id: 901, name: title });
+
+    expect(await resolveIndexTopic(key)).toBe(901);
+    expect(telegram.createForumTopic).toHaveBeenCalledWith(title);
+  });
+
+  // 🚨 System was folded into 🧑 Human Intervention on Akme's side and this
+  // repo's copy never caught up. Claiming under the old key would have minted a
+  // fifth topic that only one of the two bots posts to.
+  it('sends the retired system key to human intervention rather than a topic of its own', async () => {
+    mockSurfaceDb({
+      rpc: { crm_claim_topic: () => mustCreate(), crm_commit_topic: () => null },
+    });
+    vi.mocked(telegram.createForumTopic).mockResolvedValue({ message_thread_id: 902, name: 'x' });
+
+    expect(await resolveIndexTopic('system')).toBe(902);
+    expect(telegram.createForumTopic).toHaveBeenCalledWith('🧑 Human Intervention');
+    expect(telegram.createForumTopic).not.toHaveBeenCalledWith('🚨 System');
+  });
+
   // Concurrency is now decided in Postgres by crm_claim_topic, so what is left
   // to prove on this side is that a caller told `must_create: false` with no
   // thread id yet WAITS for the winner rather than minting a second topic.

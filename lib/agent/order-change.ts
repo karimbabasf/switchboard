@@ -99,19 +99,67 @@ const QTY_PATTERNS: readonly RegExp[] = [
   new RegExp(`\\bi (?:need|want|meant) ${N}\\b`, 'i'),
 ];
 
-function parseQty(text: string): number | null {
+/**
+ * The quantity, and WHERE IN THE TEXT IT WAS WRITTEN.
+ *
+ * The span is not bookkeeping, it is the fix for a real mis-sizing bug found on
+ * 2026-08-18. The catalogue was renamed that day and the two films gained the
+ * aliases "eighteen inch" and "five inch", which put the words `eighteen` and
+ * `five` into the product vocabulary matchLine reads. From that moment "make it
+ * five" on a single-line order was refused: `five` was the quantity, and it was
+ * also, now, a word that names a product this customer had not ordered, so the
+ * "they named something that is not theirs" branch fired and a correct change
+ * request went to a human every time it was written in words instead of digits.
+ *
+ * Special-casing the string was the wrong fix and would have left the same trap
+ * for "eighteen" and for whatever a seventh product is called. A token already
+ * read as the QUANTITY cannot also be read as the PRODUCT, so the honest fix is
+ * to hand matchLine the message with that token taken out of it.
+ */
+interface ParsedQty {
+  qty: number;
+  /** Half-open range of the number token in the original text. */
+  start: number;
+  end: number;
+}
+
+function parseQty(text: string): ParsedQty | null {
   for (const pattern of QTY_PATTERNS) {
     const m = pattern.exec(text);
     if (!m) continue;
     const token = m[1].toLowerCase();
     const qty = /^\d+$/.test(token) ? Number(token) : WORD_NUMBERS[token];
-    if (Number.isInteger(qty) && qty >= 1 && qty <= MAX_QTY) return qty;
+    if (!Number.isInteger(qty) || qty < 1 || qty > MAX_QTY) continue;
+    // Group 1, not the whole match: "make the cushion 5" must keep "cushion",
+    // which is the only thing naming the line being changed.
+    const start = text.indexOf(m[1], m.index);
+    return { qty, start, end: start + m[1].length };
   }
   return null;
 }
 
-/** Words too generic to identify a line by, even though they appear in the names. */
-const STOPWORDS = new Set(['wrap', 'film', 'tape', 'sheets', 'bundle', 'case', 'roll', 'rolls', 'the', 'and']);
+/**
+ * Words too generic to identify a line by, even though they appear in the names.
+ *
+ * `inch` and `inches` joined the list on 2026-08-18 with the rename. Both films
+ * are now called after their width ("eighteen inch", "five inch"), so the word
+ * they share tells the two of them apart exactly as well as "wrap" does, which
+ * is not at all.
+ */
+const STOPWORDS = new Set([
+  'wrap',
+  'film',
+  'tape',
+  'sheets',
+  'bundle',
+  'case',
+  'roll',
+  'rolls',
+  'inch',
+  'inches',
+  'the',
+  'and',
+]);
 
 function tokens(name: string): string[] {
   return name
@@ -174,10 +222,16 @@ export function proposeChange(body: string | null | undefined, lines: AkmeOrderL
   const text = body?.trim();
   if (!text || lines.length === 0) return null;
 
-  const to = parseQty(text);
-  if (to === null) return null;
+  const parsed = parseQty(text);
+  if (parsed === null) return null;
+  const to = parsed.qty;
 
-  const line = matchLine(text, lines);
+  // Blanked, not deleted, so every other offset in the sentence stays where it
+  // was and a word is not accidentally joined to its neighbour: "make it five"
+  // must not collapse into a haystack reading "make itfive".
+  const withoutQty = `${text.slice(0, parsed.start)}${' '.repeat(parsed.end - parsed.start)}${text.slice(parsed.end)}`;
+
+  const line = matchLine(withoutQty, lines);
   if (!line) return null;
 
   // Same refusal Akme's requantify makes, made earlier so the button never
