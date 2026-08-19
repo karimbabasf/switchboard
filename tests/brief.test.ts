@@ -156,6 +156,83 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     expect(prompt).toMatch(/tell them what you CAN do right now/i);
   });
 
+  it('bans opening a turn on a reaction word, and says what to open on instead', () => {
+    // Karim, 2026-08-19: "it keeps saying yeah definitely in the wrong
+    // situations... let's not be expressive, meaning strictly professional."
+    // Measured on the rehearsal run that preceded it: 14 of 54 agent turns, 26
+    // percent, opened on one of these, while the harness scored 26 of 28 green.
+    expect(prompt).toMatch(/NEVER OPEN A TURN WITH A REACTION WORD/);
+    for (const word of ['"yeah"', '"definitely"', '"of course"', '"no problem"', '"perfect"']) {
+      expect(prompt).toContain(word);
+    }
+    // AND THE REPLACEMENT, WHICH IS THE HALF THAT MAKES THE BAN SAFE. On
+    // 2026-08-03 "absolutely" was banned with nothing put in its place and the
+    // agent started leading with what it could not do instead. The rule is not
+    // "stop being affirmative", it is "the affirmative is the fact".
+    expect(prompt).toMatch(/THE YES IS THE FACT, NOT A WORD IN FRONT OF IT/);
+    expect(prompt).toMatch(/THIS IS NOT PERMISSION TO LEAD WITH A NO/);
+    expect(prompt).toMatch(/never open with what you cannot do/i);
+  });
+
+  it('carries a variety constraint, so the sample phrases do not become a tic', () => {
+    // The failure OpenAI's realtime prompting guide names: a model follows the
+    // sample phrases in a prompt so closely that it recycles the same opener
+    // every turn and sounds like a recording. The fix it prescribes is two
+    // lines, a variety constraint and marking the examples as inspiration, and
+    // both are what stop a rewritten register drifting back inside a week.
+    expect(prompt).toMatch(/VARY YOUR WORDING/);
+    expect(prompt).toMatch(/not use the same opening, the same phrase or the same sentence twice in one call/i);
+    expect(prompt).toMatch(/THE EXAMPLES IN THIS DOCUMENT ARE SHAPES, NOT SCRIPTS/);
+    expect(prompt).toMatch(/Do not read one back word for word/i);
+  });
+
+  it('writes the product facts in spec register, because the agent reads them out', () => {
+    // Karim, 2026-08-19: "all we needed to change was the way the products are
+    // described and presented." A rehearsal transcript caught the agent saying
+    // "tan hot melt tape, which grabs cardboard, plastic and metal hard" back to
+    // a caller, word for word off this sheet. Whatever register the facts are
+    // written in is the register the caller hears, so sales copy in here is
+    // sales copy on the phone.
+    const copy = [
+      /grabs .* hard/i,
+      /absorbs a real knock/i,
+      /easy enough for a new operator/i,
+      /the one to use when/i,
+      /strapping a door shut/i,
+    ];
+    for (const product of BUSINESS.products) {
+      const facts = product.facts.join(' ');
+      for (const phrase of copy) {
+        expect(facts).not.toMatch(phrase);
+      }
+    }
+    // The substance is unchanged: these came off the supplier sheet and are the
+    // only product detail the agent has.
+    expect(BUSINESS.products[0].facts.join(' ')).toMatch(/hand-applied/);
+    expect(BUSINESS.products[2].facts.join(' ')).toMatch(/premium hot melt adhesive/);
+  });
+
+  it('has no casual opener left in its own worked examples', () => {
+    // The rules were never the cause. Three worked examples were: a rule listing
+    // "definitely" as a good opener, the stock answer written out as "Yeah,
+    // definitely. <list>", and the alias answer as "Yeah, we carry that". A
+    // model copies an example harder than it follows a rule, so a prompt that
+    // bans a register in prose and demonstrates it in quotes teaches the
+    // register. Every quoted example the agent could copy is checked here.
+    const spoken = prompt
+      .split('\n')
+      .filter((l) => /^(Right[,:]|")/.test(l.trim()))
+      .filter((l) => !/^"?(SHRINK WRAP|DO YOU CARRY X)/.test(l.trim()));
+    expect(spoken.length).toBeGreaterThan(5);
+    for (const line of spoken) {
+      for (const quoted of line.match(/"[^"]+"/g) ?? []) {
+        expect(quoted).not.toMatch(
+          /^"(yeah|yep|sure|of course|definitely|absolutely|no problem|happy to|great|perfect|awesome|got it)\b/i,
+        );
+      }
+    }
+  });
+
   it('bans filler, which is what made the agent sound full of "uhmms"', () => {
     expect(prompt).toMatch(/NO FILLER, EVER/);
     for (const filler of [/"um"/i, /"uh"/i, /"let me see"/i]) {
@@ -547,12 +624,26 @@ describe('brief.ts: the agent says "we", because it works here', () => {
     // Karim, 2026-08-03. "The team will get back to you" is a receptionist
     // talking about her own employer like a bystander.
     //
-    // The rule that bans the phrase has to be allowed to quote it, so the section
-    // stating it is cut before the sweep. Everything else in the prompt is fair
+    // The rule that bans the phrase has to be allowed to quote it, so the lines
+    // stating it are cut before the sweep. Everything else in the prompt is fair
     // game, which is the point: this catches the next line that drifts back.
-    const withoutTheRuleItself = prompt.replace(/SAY "WE", NOT "THE TEAM"\n[^\n]*\n[^\n]*/, '');
+    //
+    // THERE ARE TWO RULE SITES NOW, from 2026-08-19, and the second one is why.
+    // The ban lived in its own section and the model kept breaking it anyway, in
+    // three different rehearsal scenarios across two passes ("a message to the
+    // team", "in front of our team"). Enumerating one more banned phrase each
+    // time is whack-a-mole, so it was restated once more as a word-level check
+    // inside HOW TO TALK, where the turn-shape rules the model DOES keep live.
+    // Both statements quote the phrase, so both are cut, by their own headings
+    // rather than by a line count that the next edit would silently break.
+    const ruleSites = [
+      /SAY "WE", NOT "THE TEAM"\n[^\n]*\n[^\n]*/,
+      /THE WORD "TEAM" HAS EXACTLY ONE LEGAL USE[^\n]*/,
+    ];
+    const withoutTheRuleItself = ruleSites.reduce((acc, re) => acc.replace(re, ''), prompt);
     expect(withoutTheRuleItself).not.toMatch(/\bthe team\b/i);
-    // And the cut has to have actually cut something, or this passes forever.
+    // And each cut has to have actually cut something, or this passes forever.
+    for (const re of ruleSites) expect(prompt).toMatch(re);
     expect(withoutTheRuleItself.length).toBeLessThan(prompt.length);
   });
 
@@ -578,7 +669,17 @@ describe('brief.ts: the agent says "we", because it works here', () => {
     expect(prompt).not.toMatch(/This is the one to lead with/i);
     // Every worked example has to carry all three, or the examples teach the
     // habit the rule just banned.
-    const examples = prompt.split('\n').filter((l) => /^(Right|"Definitely)/.test(l.trim()));
+    //
+    // FOUND BY SHAPE, NOT BY THE WORD "DEFINITELY", from 2026-08-19. This used
+    // to collect `/^(Right|"Definitely)/` because the route example literally
+    // opened on "Definitely, you can put a quote request in at...". That word is
+    // now banned as a turn opener (see the register rules in brief.ts), the
+    // example was rewritten, and this filter quietly stopped finding it: the
+    // count fell from 3 to 2 while every real example was still correct. A
+    // filter keyed to a phrase the prompt is trying to eliminate is a filter
+    // that expires. A worked example is a line that starts with `Right` or with
+    // a quote mark; a ROUTING one is one that talks about routing.
+    const examples = prompt.split('\n').filter((l) => /^(Right|")/.test(l.trim()));
     const routed = examples.filter((l) => /quote request|pricing comes back|a quote comes back/i.test(l));
     expect(routed.length).toBeGreaterThanOrEqual(3);
     for (const line of routed) {

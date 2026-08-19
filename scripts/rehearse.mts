@@ -26,7 +26,7 @@
  *   pnpm rehearse order      only scenarios whose name contains "order"
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { BUSINESS, GREETING, systemPrompt } from '../lib/agent/brief.ts';
+import { BRIDGE, BUSINESS, GREETING, SPOKEN_LIST, systemPrompt } from '../lib/agent/brief.ts';
 import { assistantConfig } from '../lib/telnyx/assistant.ts';
 
 /**
@@ -358,7 +358,12 @@ const asksWhatTheyNeedAtMost = (n: number): Check => (t) => {
  * uhmms" on 2026-08-11. Bounded by word boundaries because "um" is inside
  * "number" and "uh" is inside "though".
  */
-const FILLER = /\b(um+|uh+|erm+|hmm+|ah+|er)\b|\blet me (see|think|check)\b|\byou know\b|\bi mean\b|\.\.\./i;
+const FILLER =
+  // "you know" is filler as a standalone discourse marker and ordinary English
+  // in front of a clause: "so you know what you're working with" failed this on
+  // 2026-08-19 and was a perfectly good sentence. The lookahead is the whole
+  // difference between scoring a tic and scoring the language.
+  /\b(um+|uh+|erm+|hmm+|ah+|er)\b|\blet me (see|think|check)\b|\byou know\b(?!\s+(what|how|where|when|why|who|that|if|the)\b)|\bi mean\b|\.\.\./i;
 
 /**
  * A turn that runs on. Karim, 2026-08-11: "it seems to be rushing through its
@@ -390,6 +395,66 @@ const sentencesIn = (s: string) => {
 const REINTRODUCES = /\b(hi|hello|hey|good (morning|afternoon))\b[^.?!]*\b(this is|it's|i'm) robin\b|thanks for calling/i;
 
 /**
+ * THE REACTION WORD, WHICH IS THE ONE THING THIS HARNESS COULD NOT HEAR.
+ *
+ * Karim, 2026-08-19: "it keeps saying yeah definitely in the wrong situations,
+ * and it just doesn't sound right." The run that immediately preceded him
+ * saying it scored 26 of 28 GREEN, and 14 of its 54 agent turns opened on one of
+ * these words. Nothing here was wrong; nothing here was looking. Every check in
+ * this file scored what the agent DID and none scored how it SOUNDED, so a
+ * green run and an unusable call sat side by side for days.
+ *
+ * ANCHORED TO THE START OF A TURN ON PURPOSE. "Of course" mid-sentence is
+ * ordinary English and banning it everywhere would be banning the language. The
+ * defect is specifically the turn that OPENS on a reaction before it opens on an
+ * answer, which is what costs a beat and what sounds like nobody was listening.
+ *
+ * Leading punctuation and a stray quote are stripped first because a model that
+ * has been told not to open on "yeah" will happily open on "Yeah -" instead.
+ */
+const REACTION_OPENER =
+  /^\W*(yeah|yep|yup|sure|of course|definitely|absolutely|for sure|no problem|happy to|i'?d be happy to|great|perfect|awesome|gotcha|got it|good question|excellent|wonderful|totally|certainly)\b/i;
+
+/**
+ * The same phrase twice in one call, which is the tic OpenAI's realtime
+ * prompting guide names: sample phrases in a prompt get copied until the agent
+ * sounds like a recording. The prompt now carries the variety constraint that
+ * guide prescribes, and this is what checks it landed.
+ *
+ * Compares the first six words of each turn, normalised, because the repeat that
+ * a caller notices is the OPENER, not an identical whole sentence, and the model
+ * varies its tail long before it varies its head.
+ *
+ * FIXED STRINGS ARE EXEMPT, AND THAT IS NOT THE CHECK BEING WEAKENED. The first
+ * run of this check failed two scenarios for repeating a line the prompt REQUIRES
+ * word for word: the privacy deflection ("I cannot go into how I work...") and
+ * the stock list. Both are supposed to be identical every time they are said, one
+ * because it is a compliance answer and one because it is the catalogue. Scoring
+ * an agent for obeying an instruction is a broken check, not a finding, and it is
+ * the same carve-out OpenAI's guide prescribes beside the variety constraint:
+ * whitelist the phrases that legal or brand require to stay fixed.
+ *
+ * Everything else still has to be said in different words the second time.
+ */
+const head = (x: string, n = 6) =>
+  x.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim().split(/\s+/).slice(0, n).join(' ');
+
+/** The lines the prompt hands the agent verbatim, so repeating one is compliance. */
+const FIXED = [SPOKEN_LIST, BRIDGE, 'I cannot go into how I work'].map((x) => head(x));
+
+const repeatedOpener = (): Check => (t) => {
+  const heads = t.said
+    .map((x) => head(x))
+    .filter((x) => x.split(' ').length >= 4 && !FIXED.includes(x));
+  const seen = new Set<string>();
+  for (const h of heads) {
+    if (seen.has(h)) return `opened two turns the same way: "${h}..."`;
+    seen.add(h);
+  }
+  return null;
+};
+
+/**
  * Applied to EVERY scenario, not just one.
  *
  * These are the complaints that were never about a single question: they are
@@ -410,6 +475,13 @@ const GLOBAL_CHECKS: Check[] = [
   // voice, so a digit string or a URL is a stumble the caller hears.
   mustNotSay(WRITTEN_NAME, 'the written spelling of the name out loud'),
   saysWeNotThey(),
+  // Register. See REACTION_OPENER: this is the check whose absence let a green
+  // run and "it just doesn't sound right" be true at the same time.
+  (t) => {
+    const hit = t.said.find((x) => REACTION_OPENER.test(x));
+    return hit ? `opened a turn on a reaction word: "${hit.trim().slice(0, 90)}"` : null;
+  },
+  repeatedOpener(),
 ];
 
 // ---------------------------------------------------------------------------

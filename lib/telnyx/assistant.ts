@@ -141,6 +141,29 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * unlike luna, so the preflight check that warns about an unlisted voice goes
  * quiet on either one.
  *
+ * AND BACK TO KATIE, LATER THE SAME DAY, WHICH IS THE PICK THAT STANDS. Karim,
+ * having now heard BOTH on real calls: set
+ * `Telnyx.Ultra.f786b574-daa5-4673-aa0c-cbe3e8534c02`. That is Katie, and it is
+ * the third time in six days that his ear has overruled a voice chosen by
+ * reasoning, including the reasoning three paragraphs above this one. The rule
+ * this file keeps re-learning: a voice is picked by listening, and a written
+ * argument for a different one is worth nothing against a call he has heard.
+ *
+ * WORTH NAMING, BECAUSE IT LOOKS LIKE A CONTRADICTION AND IS NOT. Telnyx labels
+ * Katie "enunciating young adult female for conversational support use cases"
+ * and Morgan "polished American female for highly professional interactions",
+ * and Karim asked for Katie in the same breath as "strictly professional".
+ * Register is not the voice's job. A voice sets timbre and clarity; what makes a
+ * call sound casual is the WORDS, and those come from the prompt, which is where
+ * "yeah, definitely" was actually coming from (see the register note in
+ * lib/agent/brief.ts). Fixing tone by swapping voices was always going to miss,
+ * because the script was the casual part. Katie is the clearer of the two on an
+ * 8kHz line, which is the thing a phone actually needs.
+ *
+ * Re-render the disclosure whenever this changes: `pnpm opener:render`. The file
+ * name is a hash of text, voice and speed, so a stale one silently stops being
+ * addressed and the line falls back to live `speak`. See opener.ts.
+ *
  * Speed stays at 1, per the rule the notes above earned twice: pick a voice whose
  * natural pace is right instead of fighting one with a multiplier. A number far
  * from 1 here means the wrong voice was picked, not that the pace needs work.
@@ -150,7 +173,7 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * time the complaint is tone rather than speed.
  */
 export function agentVoice(): string {
-  return optionalEnv('TELNYX_TTS', 'Telnyx.Ultra.0ee8beaa-db49-4024-940d-c7ea09b590b3');
+  return optionalEnv('TELNYX_TTS', 'Telnyx.Ultra.f786b574-daa5-4673-aa0c-cbe3e8534c02');
 }
 
 /**
