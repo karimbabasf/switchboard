@@ -11,6 +11,8 @@
 // will not guess one. Same rule as scripts/assistant-sync.mts.
 import { OPENER } from '../lib/agent/brief.ts';
 import { optionalEnv } from '../lib/env.ts';
+import { agentVoice } from '../lib/telnyx/assistant.ts';
+import { OPENER_BUILD, openerFingerprint, openerText } from '../lib/telnyx/opener.ts';
 
 type Result = { ok: boolean; detail: string };
 type Check = { group: string; name: string; run: () => Promise<Result> };
@@ -412,6 +414,66 @@ const checks: Check[] = [
         return fail(`does not say the caller is talking to a machine (${source}): "${d}"`);
       }
       return pass(`${source}: "${d}"`);
+    },
+  },
+
+  {
+    group: 'Telnyx',
+    name: 'the voice still renders, whatever the voices list says',
+    run: async () => {
+      // THE CHECK THAT WOULD HAVE SAVED A DAY. On 2026-08-18 a sync returned 400
+      // "Voice `Telnyx.NaturalHD.luna` not found" and the voices list did not
+      // carry NaturalHD, so the tier was written off as deleted and the voice
+      // Karim picked by ear was replaced with one he had never heard. He noticed
+      // on his first call.
+      //
+      // Both signals were wrong, and they were wrong in different directions:
+      // the 400 was transient, and the list disagrees with the renderer. The
+      // renderer is the one that decides what a caller hears, so it is the one
+      // asked here. Absence from the list is reported, never failed on.
+      const voice = agentVoice();
+      const res = await fetch('https://api.telnyx.com/v2/text-to-speech/speech', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${env('TELNYX_API_KEY')}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ voice, text: 'Test.', voice_settings: { voice_speed: 1 } }),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        return fail(`${voice} will not render: ${res.status} ${detail.slice(0, 120)}`);
+      }
+
+      const list = await fetch('https://api.telnyx.com/v2/text-to-speech/voices', {
+        headers: { authorization: `Bearer ${env('TELNYX_API_KEY')}` },
+      })
+        .then((r) => r.json())
+        .catch(() => null);
+      const voices: { id?: string }[] = list?.voices ?? list?.data ?? [];
+      const listed = voices.some((v) => v.id && voice.endsWith(v.id));
+      return pass(
+        listed
+          ? `${voice} renders and is published`
+          : `${voice} renders, but is NOT in the published voices list, so it may stop working without notice`,
+      );
+    },
+  },
+
+  {
+    group: 'Telnyx',
+    name: 'the pre-rendered opener matches the opener the code says',
+    run: async () => {
+      // The disclosure is a file now, and the risk of a file is that it keeps
+      // playing after the script changed. Same alarm as tests/opener.test.ts,
+      // repeated here because preflight is what runs before a deploy.
+      if (OPENER_BUILD.fingerprint !== openerFingerprint()) {
+        return fail(
+          `rendered for a different opener, voice or speed. Run pnpm opener:render, then commit the mp3 and opener-build.ts`,
+        );
+      }
+      if (OPENER_BUILD.voice !== agentVoice()) {
+        return fail(`rendered in ${OPENER_BUILD.voice} but the agent speaks with ${agentVoice()}`);
+      }
+      if (OPENER_BUILD.text !== openerText()) return fail('rendered from different words');
+      return pass(`${OPENER_BUILD.voice}, matching the agent, at public/opener/${OPENER_BUILD.fingerprint}.mp3`);
     },
   },
 

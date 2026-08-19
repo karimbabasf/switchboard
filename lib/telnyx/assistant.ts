@@ -92,37 +92,43 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * shade slower than target; try it before reopening the whole sheet.
  */
 /**
- * TELNYX DELETED THE WHOLE NaturalHD TIER, found 2026-08-18 when a sync failed
- * with 400 "Voice `Telnyx.NaturalHD.luna` not found".
+ * NaturalHD IS UNLISTED, NOT DELETED, and the difference cost a day.
  *
- * It is not a rename and not just luna: `GET /v2/text-to-speech/voices` returns
- * 3922 voices and NaturalHD is not among the models any more. astra, the
- * runner-up the note above calls "one env var away", is gone with it. The
- * models that exist now are Telnyx.Ultra (772), Minimax, Inworld, AWS.Polly,
- * Resemble, Telnyx.Bayan, KokoroTTS, Sukhan, FishAudio, LibriTTS and Azure.
+ * On 2026-08-18 a sync failed with 400 "Voice `Telnyx.NaturalHD.luna` not
+ * found", and `GET /v2/text-to-speech/voices` did not carry NaturalHD among its
+ * models. The conclusion drawn was that Telnyx had deleted the tier, so this
+ * default was changed to an Ultra voice picked by reasoning rather than by ear.
  *
- * WORSE, THE LIVE ASSISTANT WAS STILL STORING THE DEAD ID. Read back the same
- * day: `voice: "Telnyx.NaturalHD.luna"`, and that id no longer resolves, so the
- * line was running on whatever Telnyx falls back to rather than on anything
- * anybody chose. That is why this default changed rather than waiting for a
- * bake-off: a dead default is not a neutral place to leave a phone line.
+ * Every part of that was wrong except the 400:
  *
- * THIS PICK IS PROVISIONAL AND IS NOT KARIM'S EAR. Every previous voice on this
- * line was chosen by listening to the real opener band-limited to 8kHz, twice,
- * and both times the sheet overturned the reasonable-sounding guess. Ultra is
- * the quality tier that replaced NaturalHD in the same slot and carries 162
- * English-US female voices, so `pnpm voice:bakeoff` is the next step and this
- * value is a placeholder until it runs.
+ *  - luna and astra still RENDER through `POST /v2/text-to-speech/speech`.
+ *    Both were rendered on 2026-08-19 to check.
+ *  - The assistant accepted `Telnyx.NaturalHD.luna` again on 2026-08-19, read
+ *    back by `pnpm assistant:sync`. The rejection was transient.
+ *  - The line was never running on a fallback. The assistant's version history
+ *    stores luna on every version from 20260815T074209 to 20260815T183024, so
+ *    luna is what actually answered the phone through the 15th and 16th.
  *
- * Picked "Maeve - Steady Host" against the rule the note above ends on: choose a
- * voice whose NATURAL pace is right instead of fighting one with a multiplier.
- * Both prior failures were pace, a rush and then a drawl, so a host's steady
- * conversational delivery is the least likely to reproduce either. voiceSpeed
- * stays at 1 for the same reason, and a number far from 1 still means the wrong
- * voice was picked.
+ * So the voice Karim picked by ear on 2026-08-14 was replaced with one he never
+ * heard, on the strength of a transient error, and he noticed on the first call:
+ * "you broke something, the voice isnt the same". This is that, put back.
+ *
+ * THE LESSON, WHICH IS THE PART WORTH KEEPING: a 400 from this API is evidence
+ * about one request, not about the state of the world. Absence from the voices
+ * list is not deletion either, because the list and the renderer disagree. Check
+ * a voice by RENDERING it before concluding it is gone, and never replace a
+ * choice Karim made by ear on inference alone.
+ *
+ * It can still go away for real, so preflight now warns when the configured
+ * voice is missing from the published list. The disclosure is safe either way:
+ * it is a pre-rendered file now, and a file cannot stop existing because a voice
+ * was retired. See opener.ts.
+ *
+ * Runs the opener in 7.08s at 1.0 against a 7.40s target, which is why speed
+ * stays at 1. A number far from 1 means the wrong voice was picked.
  */
 export function agentVoice(): string {
-  return optionalEnv('TELNYX_TTS', 'Telnyx.Ultra.02a924f6-bb49-4177-8fbb-52238c5056d6');
+  return optionalEnv('TELNYX_TTS', 'Telnyx.NaturalHD.luna');
 }
 
 /**
