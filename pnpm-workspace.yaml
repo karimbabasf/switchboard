@@ -1,0 +1,21 @@
+# pnpm 11 refuses to run ANY script until it is told what to do about
+# dependencies that want a build step, and it fails the whole command rather
+# than just the build: `pnpm assistant:sync` aborted with
+# ERR_PNPM_IGNORED_BUILDS before the sync script was ever reached, which reads
+# as the sync being broken when nothing about it is.
+#
+# `allowBuilds` is the key this pnpm wants (11.22). Writing
+# `ignoredBuiltDependencies` here does nothing: pnpm leaves it in place, adds
+# its own `allowBuilds` block back on top with placeholder values, and fails
+# again the same way.
+#
+# Both are false, because neither runs in this app. `sharp` arrives under next
+# and is only used by the image optimizer, which nothing here calls: this
+# project is webhooks and API routes. `unrs-resolver` comes in under
+# eslint-config-next and is used by the linter, not at runtime. So neither
+# native compile buys anything, and skipping them costs nothing.
+#
+# Flip one to true if it ever does need its build step.
+allowBuilds:
+  sharp: false
+  unrs-resolver: false

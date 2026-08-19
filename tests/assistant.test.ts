@@ -214,8 +214,25 @@ describe('assistant.ts: the settings that make it feel real', () => {
     // speakers on the side, 16kHz native. It answered this phone from day one
     // because half the 2026-07-28 bake-off candidates were Bayan. Karim, off a
     // test call on 2026-08-14: "no understanding of commas or punctuation".
+    //
+    // THE EXACT ID IS NO LONGER PINNED, and the reason is the failure this test
+    // had on 2026-08-18: it asserted `Telnyx.NaturalHD.luna`, Telnyx deleted the
+    // entire NaturalHD tier, and the assertion still passed because the default
+    // it was checking was the dead string. A sync then failed with 400 "Voice
+    // not found", and the live assistant was found still storing that dead id.
+    // So the test was green about a voice nobody could hear.
+    //
+    // A unit test cannot tell whether an id resolves; only the API can, and
+    // `pnpm assistant:sync` reads the assistant back and fails when Telnyx drops
+    // a field, which is the check that actually catches this. What is worth
+    // pinning here is the PROPERTY the note above is about: English-first, and
+    // not the Arabic model.
     delete process.env.TELNYX_TTS;
-    expect(cfg().voice_settings.voice).toBe('Telnyx.NaturalHD.luna');
-    expect(cfg().voice_settings.voice).not.toMatch(/Bayan/);
+    const voice = cfg().voice_settings.voice;
+    expect(voice).not.toMatch(/Bayan/);
+    expect(voice).toMatch(/^Telnyx\./);
+    // Not a placeholder, not empty, and not a tier that has since been removed
+    // without anybody updating this file: a real three-part id.
+    expect(voice.split('.').length).toBeGreaterThanOrEqual(3);
   });
 });

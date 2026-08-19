@@ -91,8 +91,38 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * speaker. astra is the runner-up and is one env var away, 8.61s natural, a
  * shade slower than target; try it before reopening the whole sheet.
  */
+/**
+ * TELNYX DELETED THE WHOLE NaturalHD TIER, found 2026-08-18 when a sync failed
+ * with 400 "Voice `Telnyx.NaturalHD.luna` not found".
+ *
+ * It is not a rename and not just luna: `GET /v2/text-to-speech/voices` returns
+ * 3922 voices and NaturalHD is not among the models any more. astra, the
+ * runner-up the note above calls "one env var away", is gone with it. The
+ * models that exist now are Telnyx.Ultra (772), Minimax, Inworld, AWS.Polly,
+ * Resemble, Telnyx.Bayan, KokoroTTS, Sukhan, FishAudio, LibriTTS and Azure.
+ *
+ * WORSE, THE LIVE ASSISTANT WAS STILL STORING THE DEAD ID. Read back the same
+ * day: `voice: "Telnyx.NaturalHD.luna"`, and that id no longer resolves, so the
+ * line was running on whatever Telnyx falls back to rather than on anything
+ * anybody chose. That is why this default changed rather than waiting for a
+ * bake-off: a dead default is not a neutral place to leave a phone line.
+ *
+ * THIS PICK IS PROVISIONAL AND IS NOT KARIM'S EAR. Every previous voice on this
+ * line was chosen by listening to the real opener band-limited to 8kHz, twice,
+ * and both times the sheet overturned the reasonable-sounding guess. Ultra is
+ * the quality tier that replaced NaturalHD in the same slot and carries 162
+ * English-US female voices, so `pnpm voice:bakeoff` is the next step and this
+ * value is a placeholder until it runs.
+ *
+ * Picked "Maeve - Steady Host" against the rule the note above ends on: choose a
+ * voice whose NATURAL pace is right instead of fighting one with a multiplier.
+ * Both prior failures were pace, a rush and then a drawl, so a host's steady
+ * conversational delivery is the least likely to reproduce either. voiceSpeed
+ * stays at 1 for the same reason, and a number far from 1 still means the wrong
+ * voice was picked.
+ */
 export function agentVoice(): string {
-  return optionalEnv('TELNYX_TTS', 'Telnyx.NaturalHD.luna');
+  return optionalEnv('TELNYX_TTS', 'Telnyx.Ultra.02a924f6-bb49-4177-8fbb-52238c5056d6');
 }
 
 /**
