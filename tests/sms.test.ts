@@ -244,7 +244,7 @@ describe('handleTelnyxSmsEvent: inbound contact resolution', () => {
     expect(fromCalls()).toEqual(['telnyx_events', 'contacts', 'messages', 'outbox']);
     // The contact's known display name has to reach replyWithAgent, or a
     // repeat texter's quote request would file under their phone number alone.
-    expect(deps.reply).toHaveBeenCalledWith('+14155550111', 'hey', 42, false, 'Known Caller');
+    expect(deps.reply).toHaveBeenCalledWith('+14155550111', 'hey', 42, false, 'Known Caller', null);
   });
 });
 
@@ -452,7 +452,7 @@ describe('replyWithAgent (via smsEventDeps): a pricing text becomes a work item'
       async () => new Response(JSON.stringify({ data: { id: 'telnyx_a' } }), { status: 200 }),
     );
 
-    await smsEventDeps().reply(contact.phone, 'how much for a pallet of tape', 42, false, 'Jane Doe');
+    await smsEventDeps().reply(contact.phone, 'how much for a pallet of tape', 42, false, 'Jane Doe', null);
 
     expect(fromCalls()).toEqual(['contacts', 'messages', 'messages', 'outbox']); // the auto-send path ran for real
     expect(mockedRecordQuoteRequest).toHaveBeenCalledWith({
@@ -485,7 +485,7 @@ describe('replyWithAgent (via smsEventDeps): a pricing text becomes a work item'
     queueFrom([makeChain(ok(null))]); // outbox insert: smsDraftCard. autoSend is false, so nothing else runs.
 
     const inbound = 'I need forty cases of tape for a job next month, what would that run me';
-    await smsEventDeps().reply(contact.phone, inbound, 42, false, null);
+    await smsEventDeps().reply(contact.phone, inbound, 42, false, null, null);
 
     expect(fromCalls()).toEqual(['outbox']); // never reaches sendSms or Telnyx
     expect(mockedRecordQuoteRequest).toHaveBeenCalledWith({
@@ -502,7 +502,7 @@ describe('replyWithAgent (via smsEventDeps): a pricing text becomes a work item'
       async () => new Response(JSON.stringify({ data: { id: 'telnyx_b' } }), { status: 200 }),
     );
 
-    await smsEventDeps().reply(contact.phone, 'what are your hours', 42, false, null);
+    await smsEventDeps().reply(contact.phone, 'what are your hours', 42, false, null, null);
 
     expect(mockedRecordQuoteRequest).not.toHaveBeenCalled();
   });

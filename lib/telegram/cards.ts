@@ -176,6 +176,34 @@ export function smsAutoSentCard(input: SmsAutoSentCardInput): TextCardPayload {
   };
 }
 
+export interface DeskDownCardInput {
+  reason: string;
+  body: string;
+}
+
+/**
+ * Akme's door did not answer, so nobody answered.
+ *
+ * Deliberately carries NO draft and NO Send button. The point of this card is
+ * that the state is unknown: Akme claims a quote send before it returns the
+ * words, so it may have recorded a quote as sent that never left. Offering a
+ * one-tap reply here would invite somebody to send a second answer over the
+ * first without knowing there was one. Read the thread, then reply by hand.
+ */
+export function deskDownCard(input: DeskDownCardInput): TextCardPayload {
+  return {
+    text: [
+      '⚠️ <b>Akme did not answer, and neither did we</b>',
+      `<i>${escapeHtml(input.reason)}</i>`,
+      '',
+      'They wrote:',
+      escapeHtml(input.body),
+      '',
+      'Nothing was sent. Check the order in Akme before replying: a quote may already be recorded as sent.',
+    ].join('\n'),
+  };
+}
+
 export interface InboundSmsCardInput {
   body: string | null;
   media: MediaItem[];

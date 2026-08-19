@@ -1,7 +1,8 @@
 import { db } from '../db';
 import { env, assertE164, toE164 } from '../env';
+import { askAkmeDesk } from '../akme/desk';
 import { resolveTopic } from '../telegram/topics';
-import { inboundSmsCard, orderChangeCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
+import { deskDownCard, inboundSmsCard, orderChangeCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
 import type { TextCardPayload } from '../telegram/cards';
 import { draftFallback, draftSmsReply, isCarrierKeyword, smsAgentDeps } from '../agent/sms';
 import { proposeChange } from '../agent/order-change';
@@ -162,6 +163,16 @@ export type AgentReply = (
   threadId: number,
   hasMedia: boolean,
   displayName: string | null,
+  /**
+   * The `messages` row this text was filed as.
+   *
+   * Carried all the way to Akme, where it is the IDEMPOTENCY KEY: the order id
+   * is a hash of the party and this value, so a Telnyx webhook retry lands on the
+   * order it already opened instead of opening a second one for the same request.
+   * Null only when the insert did not come back with an id, which is the case
+   * where an order per attempt beats no order at all.
+   */
+  messageId: string | null,
 ) => Promise<void>;
 
 export interface SmsEventDeps {
@@ -254,7 +265,14 @@ async function handleMessageReceived(
     });
   if (outboxError) throw new Error(`handleMessageReceived outbox: ${outboxError.message}`);
 
-  await deps.reply(contact.phone, payload.text ?? null, threadId, media.length > 0, contact.display_name);
+  await deps.reply(
+    contact.phone,
+    payload.text ?? null,
+    threadId,
+    media.length > 0,
+    contact.display_name,
+    messageId ?? null,
+  );
 }
 
 /**
@@ -271,8 +289,60 @@ async function replyWithAgent(
   threadId: number,
   hasMedia: boolean,
   displayName: string | null,
+  messageId: string | null,
 ): Promise<void> {
   try {
+    // ---------------------------------------------------------------------
+    // Akme's deal engine gets first refusal on anything a customer said.
+    // ---------------------------------------------------------------------
+    //
+    // Two exclusions, and neither is a judgement about quality. A CARRIER
+    // KEYWORD is a command to the compliance machinery, not conversation: STOP
+    // belongs to the opt-out ledger below and must never become a deal event.
+    // An MMS is a photo of a damaged pallet or a purchase order, and the
+    // attachment IS the message, so no text-only reader should answer it.
+    const said = body?.trim() ?? '';
+    if (said && !hasMedia && !isCarrierKeyword(body)) {
+      const outcome = await askAkmeDesk({ phone, body: said, displayName, messageId });
+
+      if (outcome.kind === 'answer') {
+        await sendSms(phone, outcome.reply);
+        await db()
+          .from('outbox')
+          .insert({
+            thread_id: threadId,
+            kind: 'text',
+            payload: smsAutoSentCard({ intent: 'deal desk', reply: outcome.reply }),
+          });
+        return;
+      }
+
+      // The desk took it and chose to say nothing. It has already posted whatever
+      // card it wanted a person to see, on Akme's own topic. Drafting a second
+      // answer here would talk straight over that card, which is the exact
+      // failure two brains in two repos produced before the door existed.
+      if (outcome.kind === 'silent') return;
+
+      // Unknown, not "no". Akme claims a quote send BEFORE it returns the words,
+      // so a door that never answered may have recorded a quote as sent. Drafting
+      // a fallback on top of that is how one customer gets two prices, so this
+      // stops and asks for eyes instead.
+      if (outcome.kind === 'unreachable') {
+        console.error(`[desk] ${phone}: ${outcome.reason}`);
+        await db()
+          .from('outbox')
+          .insert({
+            thread_id: threadId,
+            kind: 'text',
+            payload: deskDownCard({ reason: outcome.reason, body: said }),
+          });
+        return;
+      }
+      // `declined` falls through: the desk is not armed for this channel, or it
+      // read the message and had nothing to add. The old path is still the whole
+      // system in that case.
+    }
+
     // An MMS is a picture of something, usually a damaged pallet or a purchase
     // order. Whatever the text says, the attachment is the message, and the
     // agent cannot see it.

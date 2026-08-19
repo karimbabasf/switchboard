@@ -453,7 +453,7 @@ describe('a carrier keyword text never reaches the timeline', () => {
     await handleTelnyxSmsEvent(inboundEvent({ text: 'STOP' }), deps);
 
     expect(deps.reply).toHaveBeenCalledTimes(1);
-    expect(deps.reply).toHaveBeenCalledWith('+14155550111', 'STOP', 42, false, 'Jane Doe');
+    expect(deps.reply).toHaveBeenCalledWith('+14155550111', 'STOP', 42, false, 'Jane Doe', 'msg-row-1');
   });
 
   // The keywords are whole-message words. A sentence containing one is speech.
