@@ -326,6 +326,19 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     expect(numbers.map((n) => n.toLowerCase()).sort()).toEqual(['eighteen', 'five']);
   });
 
+  it('does not volunteer how the film goes on, which nobody asked', () => {
+    // Karim, 2026-08-19, off a call: "it's good that it knows that, but I don't
+    // want it to say it unless the customer says or asks if they are machine or
+    // whatever." The list answer is the list and nothing else, same reason no
+    // gauge, length or roll count is allowed in it.
+    expect(SPOKEN_LIST).not.toMatch(/by hand|hand.applied|machine/i);
+    expect(prompt).toMatch(/DO NOT SAY HOW THE FILM GOES ON UNLESS THEY RAISE IT/);
+    // The fact itself is untouched and still reachable, in both places that
+    // stop the line ever calling the lead product machine wrap again.
+    expect(BUSINESS.products[0].facts.join(' ')).toMatch(/hand-applied/);
+    expect(prompt).toMatch(/THE EIGHTEEN INCH GOES ON BY HAND/);
+  });
+
   it('ends the stock answer with a question, because answering is not advancing', () => {
     // Karim, 2026-08-14, after a call where the answer was right and the call
     // still died: "there's no follow-up, no follow-back, I just feel like I want

@@ -331,9 +331,21 @@ export const BUSINESS: BusinessBrief = Object.freeze({
  *
  * It now also LEADS WITH THE EIGHTEEN INCH, which is Karim's order of
  * 2026-08-18 and a commercial decision, not a wording preference.
+ *
+ * AND IT NO LONGER SAYS "BOTH GO ON BY HAND", from 2026-08-19. Karim, off a
+ * call: "it's good that it knows that, but I don't want it to say it unless the
+ * customer says or asks if they are machine or whatever."
+ *
+ * The fact is still true and still in the prompt, twice: it is fact 3 on the
+ * eighteen inch, and it is the rule that stops the line ever calling that film
+ * machine wrap, which is what it wrongly did before 2026-08-18. Nothing about
+ * the agent's knowledge changed. What changed is that a caller who asked what we
+ * SELL was being handed an answer to a question about application method, which
+ * nobody had asked, in the one sentence that is supposed to be nothing but the
+ * list. Same reason no gauge, length or roll count is allowed in here.
  */
 export const SPOKEN_LIST =
-  'We stock two stretch films, eighteen inch and five inch, and both go on by hand. Then tan hot melt tape, clear carton sealing tape, paper, and cushion wrap.';
+  'We stock two stretch films, eighteen inch and five inch. Then tan hot melt tape, clear carton sealing tape, paper, and cushion wrap.';
 
 /**
  * The half of an answer that was missing from every call.
@@ -607,7 +619,8 @@ Never answer that question with just a name. A caller asking who this is has dec
 WHAT WE STOCK, WHEN SOMEONE ASKS WHAT WE STOCK
 Lead with a yes, say the list, then ask the bridge question. All three, in one turn:
 "${SPOKEN_LIST} ${BRIDGE}"
-The two widths, eighteen inch and five inch, are how the trade names those two films and they belong in the list. Eighteen first, the way the numbered list below has them. They are the ONLY measurements allowed here. No gauges, no roll counts, no lengths, no weights, no prices: that is the spec recital, it belongs to the next section, and it comes only when someone asks.
+The two widths, eighteen inch and five inch, are how the trade names those two films and they belong in the list. Eighteen first, the way the numbered list below has them. They are the ONLY measurements allowed here.
+DO NOT SAY HOW THE FILM GOES ON UNLESS THEY RAISE IT. Both films are hand-applied and you know that, but it is an ANSWER, not part of the list. It comes out only when the caller mentions a machine, asks whether they need one, asks how it is applied, or asks which film suits them. Volunteering it answers a question nobody asked. No gauges, no roll counts, no lengths, no weights, no prices: that is the spec recital, it belongs to the next section, and it comes only when someone asks.
 If they only care about one kind, name just that kind, two tapes or two films, and still ask the bridge question.
 Never say the list and stop. The list on its own gives a caller nothing to do next, and they will thank you and hang up.
 SAY THE LIST OUT LOUD. NEVER REPLACE IT WITH AN OFFER TO TEXT IT. Somebody who asks what we stock has asked to be TOLD, and "I can text you the list" instead of an answer is a refusal wearing a helpful face. Karim, off a real call: he asked what we offer, got the pricing routes, asked again with "could you tell me what you guys offer possibly by the phone", and was offered a text a second time. He never heard the list. A text is something you send AS WELL, after they have heard it, never instead of hearing it.
