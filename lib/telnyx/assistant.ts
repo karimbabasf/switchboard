@@ -124,11 +124,26 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * it is a pre-rendered file now, and a file cannot stop existing because a voice
  * was retired. See opener.ts.
  *
- * Runs the opener in 7.08s at 1.0 against a 7.40s target, which is why speed
- * stays at 1. A number far from 1 means the wrong voice was picked.
+ * KATIE, FROM 2026-08-19, AND THIS ONE IS KARIM'S EAR. He found her in Telnyx's
+ * TTS Playground, heard her on his own text, and said "I want this voice". That
+ * is the same way Amanda, abbie and luna were each chosen, and the only way that
+ * has ever held up: every voice picked here by reasoning has been overturned by
+ * him listening, most recently four days ago.
+ *
+ * `Telnyx.Ultra.f786b574-daa5-4673-aa0c-cbe3e8534c02`, "Katie - Friendly Fixer".
+ * Ultra is published in `GET /v2/text-to-speech/voices`, unlike luna, so the
+ * preflight check that warns about an unlisted voice goes quiet on this one.
+ *
+ * Speed stays at 1, per the rule the notes above earned twice: pick a voice whose
+ * natural pace is right instead of fighting one with a multiplier. A number far
+ * from 1 here means the wrong voice was picked, not that the pace needs work.
+ *
+ * Ultra also understands inline `<emotion value="..." />` markup and cues like
+ * [laughter], which luna did not. Unused so far, and worth remembering the next
+ * time the complaint is tone rather than speed.
  */
 export function agentVoice(): string {
-  return optionalEnv('TELNYX_TTS', 'Telnyx.NaturalHD.luna');
+  return optionalEnv('TELNYX_TTS', 'Telnyx.Ultra.f786b574-daa5-4673-aa0c-cbe3e8534c02');
 }
 
 /**
