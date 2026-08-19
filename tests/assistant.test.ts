@@ -172,8 +172,20 @@ describe('assistant.ts: the settings that make it feel real', () => {
     expect(cfg().telephony_settings.noise_suppression).toBe('krisp');
   });
 
-  it('carries the greeting and the prompt from the brief, not a second copy', () => {
-    expect(cfg().greeting).toBe(GREETING);
+  it('stores NO greeting, because the rendered opener already asks the question', () => {
+    // The regression this pins, off a real call on 2026-08-19 20:07: the agent
+    // is started with `greeting: ''` so it can boot behind the disclosure in
+    // silence, Telnyx read the empty string as an omitted field, fell back to
+    // the STORED greeting, and the assistant said "How can I help you today?"
+    // 1.6 seconds into a legal notice that ends with the same sentence. Two
+    // voices at once, then the question twice.
+    //
+    // An empty stored greeting is the only version of this that cannot break:
+    // there is nothing to fall back to. GREETING is still the tail of the
+    // rendered opener and is still quoted to the model, which the brief tests
+    // pin; it just is not a field on the assistant.
+    expect(cfg().greeting).toBe('');
+    expect(cfg().greeting).not.toContain(GREETING);
     expect(cfg().instructions).toBe(systemPrompt());
     expect(cfg().instructions).toContain('escalate_to_human');
   });

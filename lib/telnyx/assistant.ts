@@ -21,7 +21,7 @@
 // runs under node directly, whose ESM resolver will not guess an extension.
 // Both of these are leaf modules, so the convention stops here.
 import { optionalEnv } from '../env.ts';
-import { GREETING, keyterms, systemPrompt } from '../agent/brief.ts';
+import { keyterms, systemPrompt } from '../agent/brief.ts';
 
 /** The six tools, in the order the prompt introduces them. */
 export const TOOL_NAMES = [
@@ -130,9 +130,16 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * has ever held up: every voice picked here by reasoning has been overturned by
  * him listening, most recently four days ago.
  *
- * `Telnyx.Ultra.f786b574-daa5-4673-aa0c-cbe3e8534c02`, "Katie - Friendly Fixer".
- * Ultra is published in `GET /v2/text-to-speech/voices`, unlike luna, so the
- * preflight check that warns about an unlisted voice goes quiet on this one.
+ * MORGAN, FROM LATER THE SAME DAY, and the same ear picked her. Karim heard
+ * Katie on a real call and moved to `Telnyx.Ultra.0ee8beaa-db49-4024-940d-c7ea09b590b3`,
+ * "Morgan - Executive Expert", described by Telnyx as a polished American female
+ * for highly professional interactions. On an inbound BUSINESS support line that
+ * is the register the notes above kept reaching for and missing: Katie is a
+ * friendly fixer, Morgan answers a company's phone.
+ *
+ * Both are Ultra and both are published in `GET /v2/text-to-speech/voices`,
+ * unlike luna, so the preflight check that warns about an unlisted voice goes
+ * quiet on either one.
  *
  * Speed stays at 1, per the rule the notes above earned twice: pick a voice whose
  * natural pace is right instead of fighting one with a multiplier. A number far
@@ -143,7 +150,7 @@ export type ToolName = (typeof TOOL_NAMES)[number];
  * time the complaint is tone rather than speed.
  */
 export function agentVoice(): string {
-  return optionalEnv('TELNYX_TTS', 'Telnyx.Ultra.f786b574-daa5-4673-aa0c-cbe3e8534c02');
+  return optionalEnv('TELNYX_TTS', 'Telnyx.Ultra.0ee8beaa-db49-4024-940d-c7ea09b590b3');
 }
 
 /**
@@ -487,7 +494,41 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
     model: gateway ? '' : optionalEnv('TELNYX_LLM_MODEL', 'anthropic/claude-haiku-4-5'),
     ...(gateway ? { external_llm: gateway } : {}),
     instructions: systemPrompt(),
-    greeting: GREETING,
+
+    // EMPTY ON PURPOSE, AND THIS IS THE FIELD THAT BROKE THE LINE.
+    //
+    // The opener is one pre-rendered file that already ends by asking the
+    // question (see openerText in opener.ts), and the agent is started while
+    // that file is still playing so it boots behind the audio instead of after
+    // it. The start command therefore sends `greeting: ''`, documented as "if
+    // none then nothing will be played when the assistant starts".
+    //
+    // TELNYX DOES NOT HONOUR THAT. An empty string reads as absent, the stored
+    // greeting is used as the fallback for any omitted field, and the stored
+    // greeting was this one. Measured on Karim's call of 2026-08-19 20:07, from
+    // telnyx_events and GET /v2/ai/conversations/{id}/messages:
+    //
+    //   +2.18s  call.playback.started      the disclosure begins
+    //   +3.13s  call.conversation.created
+    //   +3.78s  assistant speaks "How can I help you today?"   <- over the notice
+    //   +9.92s  call.playback.ended        the file asks it a second time
+    //   +21.4s  hangup, after 11s of silence, nothing said by either side
+    //
+    // So the caller heard two voices at once a second and a half into a legal
+    // notice, then the same question twice. Karim: "the phone line is broken a
+    // little... maybe the disclaimer should be here with hi how can I help you
+    // today at the end so there is no mess."
+    //
+    // Clearing it here is what makes the per-call override real: with nothing
+    // stored there is nothing to fall back TO, on any path, including one that
+    // forgets to send the override. Same lesson as the model field above and as
+    // `take_message` and `escalate_to_human` before it: a request the API is
+    // free to ignore is not a guarantee, so the guarantee has to be stored.
+    //
+    // GREETING itself is NOT dead. It is the last sentence of the rendered
+    // opener and it is quoted to the model in the prompt, so the agent knows the
+    // question has already been asked. It just is not spoken by the assistant.
+    greeting: '',
     transcription: {
       model: optionalEnv('TELNYX_STT', 'deepgram/flux'),
       settings: {
