@@ -1,13 +1,14 @@
 import { db, unwrap } from '../db';
-import { prewarmCallerContext, warmCallerContextRoute } from '../agent/context';
-import { OPENER } from '../agent/brief';
+import { callerContext, contextDeps, prewarmCallerContext, warmCallerContextRoute } from '../agent/context';
 import { optionalEnv, toE164 } from '../env';
+import { openerAudioUrl, openerPlaybackEnabled, openerText } from './opener';
 import type { Responder } from '../types';
 import {
   decodeClientState,
   encodeClientState,
   telnyx,
   TelnyxError,
+  type StartAssistantResult,
   type TelnyxCommands,
 } from './client';
 import {
@@ -22,8 +23,10 @@ import {
  * Sequence, and why it is this sequence:
  *
  *   call.initiated   -> answer
- *   call.answered    -> speak the OPENER: who is calling, and the two notices
- *   call.speak.ended -> start a DUAL channel recording, then ring the responders
+ *   call.answered    -> play the OPENER: who is calling, and the two notices
+ *   call.playback.ended -> hand the caller to the agent, start a DUAL channel
+ *                          recording, or ring the responders if there is no agent
+ *   call.speak.ended -> the same thing, for the synthesized fallback opener
  *   call.answered    -> first responder leg to pick up is bridged, the rest are hung up
  *   (no answer)      -> next wave, then voicemail
  *   call.hangup      -> close out the calls row
@@ -39,6 +42,12 @@ import {
  * any non-2xx and documents no ordering guarantee, so every transition below is a
  * compare-and-set against stored state, and every event is claimed exactly once
  * in telnyx_events before any command is issued.
+ *
+ * ONE COMMAND BREAKS THAT LAST RULE ON PURPOSE: `ai_assistant_start`, which goes
+ * out before the claim, because the claim is a database round trip and the
+ * caller is listening to silence through it. It carries a `command_id` instead,
+ * which moves the same guarantee to Telnyx. See beginAgentHandoff for the
+ * measurements, and for why record_start was NOT given the same treatment.
  */
 
 // --- Webhook shapes ---------------------------------------------------------
@@ -544,6 +553,22 @@ export function voiceDeps(): VoiceDeps {
 export async function processTelnyxEvent(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> {
   const { id, event_type, occurred_at, payload } = event.data;
 
+  // THE HANDOFF IS ISSUED BEFORE THE EVENT IS EVEN CLAIMED, and this is the one
+  // place in the file where that ordering is worth the asymmetry.
+  //
+  // MEASURED, from telnyx_events on three real calls: `call.speak.ended` took
+  // 3.69s, 3.44s and 0.99s from occurred_at to processed_at, against 0.18-0.97s
+  // for every other event on the same calls. The caller's silence after the
+  // disclosure is not Telnyx being slow, it is this handler doing Supabase round
+  // trips (~0.3-0.5s each from the Vercel region) with the agent handoff queued
+  // behind them. claimEvent and the compare-and-set were both in front of it.
+  //
+  // Safe to hoist because `command_id` moved the idempotency to Telnyx, which
+  // ignores a repeat of the same command on the same call. That is what the
+  // claim was protecting here; the claim still guards everything below, and the
+  // compare-and-set still guards the dial path, which has no such dedupe.
+  const agent = beginAgentHandoff(event, deps);
+
   const mine = await deps.store.claimEvent({
     id,
     event_type,
@@ -553,21 +578,97 @@ export async function processTelnyxEvent(event: TelnyxWebhook, deps: VoiceDeps):
   if (!mine) return; // already handled, and handling it twice would double-dial
 
   try {
-    await dispatch(event, deps);
+    await dispatch(event, deps, agent);
     await deps.store.markEventDone(id);
   } catch (err) {
     await deps.store.releaseEvent(id, err instanceof Error ? err.message : String(err));
   }
 }
 
-async function dispatch(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> {
+/** Settled, never rejectable: inside `after`, a stray rejection kills the whole event. */
+type AgentHandoff = Promise<
+  { ok: true; data: StartAssistantResult } | { ok: false; error: unknown }
+>;
+
+/**
+ * Issues `ai_assistant_start` the moment the disclosure ends, or returns null
+ * when this event is not the end of the disclosure.
+ *
+ * ONLY THE AGENT START IS HOISTED, and `record_start` deliberately is not, even
+ * though it sits one round trip further back and the same `command_id` trick
+ * would work on it. Being above the claim means a redelivered webhook issues the
+ * command a second time, and the only thing standing between that and two
+ * parallel recordings of one call is Telnyx honouring `command_id`. This API has
+ * already been caught storing fields it ignores and returning 200 for them (see
+ * AGENTS.md), and two recordings is the exact bug that the assistant's own
+ * recording_settings produced before. So the recording keeps the guard that has
+ * been proven on real calls, and pays half a second for it, off the critical
+ * path: the agent does not speak until Telnyx has stood up a conversation, which
+ * measured at about 1.9s, so the tape still starts first by a wide margin.
+ *
+ * THE CALLER CONTEXT GOES OUT WITH THE COMMAND rather than being fetched back
+ * out of us afterwards. It is normally free by now: `call.answered` prewarmed it
+ * while the disclosure was playing, so this is an already-resolved promise. The
+ * race covers the case where it is not, e.g. a different Vercel instance picking
+ * up this event, where blocking on a cold lookup would put back the silence this
+ * is removing. Losing the race yields the same stranger variables the webhook
+ * answers with on its own failure path, so it costs one line of recognition.
+ */
+export const CONTEXT_BUDGET_MS = 400;
+
+function beginAgentHandoff(event: TelnyxWebhook, deps: VoiceDeps): AgentHandoff | null {
+  const { event_type, payload: p } = event.data;
+  if (event_type !== 'call.speak.ended' && event_type !== 'call.playback.ended') return null;
+  if (decodeClientState<SpeakState>(p.client_state)?.speak !== 'disclosure') return null;
+
+  // Unsetting TELNYX_ASSISTANT_ID is the rollback: with no assistant to start,
+  // the call reverts to dialing humans by the path it always took.
+  const assistantId = process.env.TELNYX_ASSISTANT_ID?.trim();
+  if (!assistantId) return null;
+
+  const caller = toE164(p.from ?? '');
+  const variables = caller
+    ? Promise.race([
+        callerContext(caller, contextDeps()).catch(() => null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), CONTEXT_BUDGET_MS)),
+      ])
+    : Promise.resolve(null);
+
+  return variables.then((vars) =>
+    deps.commands
+      .startAssistant(p.call_control_id, {
+        assistant: {
+          id: assistantId,
+          ...(vars ? { dynamic_variables: vars as unknown as Record<string, string> } : {}),
+        },
+        // Same id for every delivery of this call's handoff, so a Telnyx retry of
+        // the disclosure webhook cannot start a second conversation.
+        command_id: `agent-${p.call_control_id}`,
+      })
+      .then(
+        (data) => ({ ok: true, data }) as const,
+        (error: unknown) => ({ ok: false, error }) as const,
+      ),
+  );
+}
+
+async function dispatch(
+  event: TelnyxWebhook,
+  deps: VoiceDeps,
+  agent: AgentHandoff | null = null,
+): Promise<void> {
   switch (event.data.event_type) {
     case 'call.initiated':
       return onInitiated(event, deps);
     case 'call.answered':
       return onAnswered(event, deps);
+    // One handler, because the disclosure now arrives by either route: a
+    // rendered file ends with call.playback.ended, the synthesized fallback with
+    // call.speak.ended. Both carry the same client_state, and what happens next
+    // does not depend on which one played.
     case 'call.speak.ended':
-      return onSpeakEnded(event, deps);
+    case 'call.playback.ended':
+      return onDisclosureEnded(event, deps, agent);
     case 'call.hangup':
       return onHangup(event, deps);
     case 'call.recording.saved':
@@ -658,13 +759,42 @@ async function onAnswered(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> 
   // disclosure is about to play and nobody is using that time.
   (deps.warmContextRoute ?? warmCallerContextRoute)();
 
-  // Beat 1 of the opener: the introduction AND the two notices, in one speak.
-  // The default is OPENER, from the brief, because everything a caller hears is
-  // reviewed content and belongs in the file the tests read. The env var stays
-  // as an override for a line that needs different wording without a deploy.
+  // Beat 1 of the opener: the introduction AND the two notices, in one breath.
+  //
+  // PLAYED FROM A FILE, NOT SYNTHESIZED, whenever one has been rendered. The
+  // text is identical on every call, and making Telnyx render it fresh each time
+  // cost 1.7s and 2.0s of dead air between `call.answered` and
+  // `call.speak.started` on the two calls measured on 2026-08-19. See opener.ts
+  // for the numbers and for why the file is named after a hash of its own text.
+  //
+  // The fallback is `speak` with the same words, so a line whose opener has been
+  // edited but not re-rendered still says the right thing, just more slowly. It
+  // is a real path, not defensive padding: the disclosure is what triggers
+  // `record_start` and the agent handoff, so a disclosure that never plays is a
+  // call that sits in silence until the caller gives up.
+  const clientState = encodeClientState({ speak: 'disclosure' } satisfies SpeakState);
+  const audioUrl = openerPlaybackEnabled() ? openerAudioUrl() : null;
+
+  if (audioUrl) {
+    try {
+      await deps.commands.playbackStart(p.call_control_id, {
+        audio_url: audioUrl,
+        cache_audio: true,
+        client_state: clientState,
+      });
+      return;
+    } catch (err) {
+      if (err instanceof TelnyxError && err.isCallGone) throw err;
+      console.error(`[voice] opener playback failed, falling back to speak: ${describe(err)}`);
+    }
+  }
+
+  // The env var stays as an override for a line that needs different wording
+  // without a deploy. Changing it changes the fingerprint, so the rendered file
+  // stops being addressed and this path takes over on its own.
   await deps.commands.speak(p.call_control_id, {
-    payload: optionalEnv('RECORDING_DISCLOSURE', OPENER),
-    client_state: encodeClientState({ speak: 'disclosure' } satisfies SpeakState),
+    payload: openerText(),
+    client_state: clientState,
   });
 }
 
@@ -710,7 +840,11 @@ async function onResponderAnswered(
   }
 }
 
-async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> {
+async function onDisclosureEnded(
+  event: TelnyxWebhook,
+  deps: VoiceDeps,
+  agent: AgentHandoff | null,
+): Promise<void> {
   const p = event.data.payload;
   const state = decodeClientState<SpeakState>(p.client_state);
   // The voicemail prompt also ends here. Nothing follows it: the dual channel
@@ -737,8 +871,10 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
   let responderRead: Promise<Responder[]> | null = null;
   const activeResponders = () => (responderRead ??= deps.store.activeResponders());
 
-  // The compare-and-set comes before any command: a redelivered speak.ended must
-  // not start a second recording, a second agent, or dial everybody twice.
+  // The compare-and-set no longer guards the two Telnyx commands, which now
+  // carry their own `command_id` and went out before this function was reached.
+  // What it still guards is the DIAL path, which has no such dedupe, and the
+  // bookkeeping below: a redelivered disclosure must not ring everybody twice.
   let flow: CallFlow | null;
   if (assistantId) {
     flow = await deps.store.advanceStage(p.call_control_id, ['answered'], 'assistant');
@@ -750,21 +886,19 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
   }
   if (!flow) return;
 
-  // BOTH COMMANDS ARE ISSUED BEFORE EITHER IS AWAITED. They used to run back to
-  // back, which put a whole Telnyx round trip of silence between the disclosure
-  // ending and the agent existing, for no reason: neither command needs the
-  // other's result. record_start still goes out FIRST, so the agent's opening
-  // line is on tape and the transcript the Telegram card is built from does not
-  // start halfway through the conversation.
+  // The agent handoff already went out, before this event was even claimed. See
+  // beginAgentHandoff for the measurements that moved it. record_start stays
+  // here, behind the compare-and-set, because a duplicate recording is a worse
+  // failure than half a second: the note over there explains the split.
   //
   // Disclosure is done, so consent is on the recording from its first frame.
   // Dual channel puts each party on its own track, which is what lets the
   // transcript be attributed without diarization.
   //
-  // Both are settled into a result rather than left as rejectable promises. A
-  // rejection with no handler attached yet, during the await below, is an
-  // unhandled rejection, and this runs inside `after` where that kills the
-  // whole event rather than the one command.
+  // Settled into a result rather than left rejectable: a rejection with no
+  // handler attached during the await below is an unhandled rejection, and this
+  // runs inside `after`, where that kills the whole event rather than the one
+  // command.
   const recording = deps.commands
     .recordStart(p.call_control_id, {
       channels: 'dual',
@@ -776,13 +910,6 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
       (error: unknown) => ({ ok: false, error }) as const,
     );
 
-  const assistantStart = assistantId
-    ? deps.commands.startAssistant(p.call_control_id, { assistant: { id: assistantId } }).then(
-        (data) => ({ ok: true, data }) as const,
-        (error: unknown) => ({ ok: false, error }) as const,
-      )
-    : null;
-
   const recorded = await recording;
   if (recorded.ok) {
     await deps.store.markRecordingStarted(p.call_control_id);
@@ -792,8 +919,8 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
     console.error(`[voice] record_start failed for ${p.call_control_id}: ${describe(recorded.error)}`);
   }
 
-  if (assistantStart) {
-    const started = await assistantStart;
+  if (agent) {
+    const started = await agent;
     if (started.ok) {
       if (started.data?.conversation_id) {
         await deps.store.markConversationStarted(p.call_control_id, started.data.conversation_id);

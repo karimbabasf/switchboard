@@ -18,9 +18,20 @@ read the docs, not that the SDK is behind.
 
 The AI Assistants API postdates your training data. Before writing or changing
 anything under `lib/telnyx/assistant.ts`, read
-https://developers.telnyx.com/development/llms/ai-assistants-llms-full-txt.md
+https://developers.telnyx.com/docs/development/llms/ai-assistants-llms-full-txt
 and, for call commands,
-https://developers.telnyx.com/development/llms/calling-llms-full-txt.md
+https://developers.telnyx.com/docs/development/llms/calling-voice-api-llms-full-txt
+
+Those two URLs moved on or before 2026-08-19; the old ones (under
+`/development/llms/`, with a `.md` suffix) now 404. The current index of every
+section file is https://developers.telnyx.com/llms.txt, so start there if these
+404 too rather than assuming the docs are gone.
+
+**For request and response SHAPES, prefer the OpenAPI spec over the guides.**
+https://raw.githubusercontent.com/team-telnyx/openapi/master/openapi/spec3.json
+is complete where the guides are selective, and the guides were wrong by
+omission about the two fields that mattered most here. Read it in a sandbox and
+print the one path you need; it is 901 paths and does not belong in context.
 
 **The docs are not the whole API here.** Several real fields are undocumented,
 and Telnyx will accept a request containing a field it does not recognise,
@@ -58,9 +69,33 @@ Verified by pushing a real assistant and reading it back on 2026-07-28:
 - Caller context is `dynamic_variables_webhook_url`, with
   `dynamic_variables_webhook_timeout_ms` (default 1500, raise it for cold starts).
 - Starting the agent on a live leg is
-  `POST /v2/calls/{call_control_id}/actions/ai_assistant_start` with body
-  `{ "assistant": { "id": "assistant-..." } }`. It returns a `conversation_id`,
-  and afterwards the call emits `call.conversation.ended` and
-  `call.conversation_insights.generated`.
+  `POST /v2/calls/{call_control_id}/actions/ai_assistant_start`. It returns a
+  `conversation_id`, and afterwards the call emits `call.conversation.created`,
+  `call.conversation.ended` and `call.conversation_insights.generated`.
+
+  **The body is NOT just `{assistant: {id}}`**, which is what a comment in
+  client.ts asserted until 2026-08-19 and what kept two useful fields unused.
+  Off the OpenAPI spec: `assistant` takes `id` plus a per-call override of any
+  stored field (`greeting`, `instructions`, `voice_settings`, `tools`,
+  `external_llm`, **`dynamic_variables`**), and the body also takes
+  `greeting`, `interruption_settings`, `transcription`, `message_history`,
+  `participants`, `client_state` and **`command_id`**.
+
+  - `assistant.dynamic_variables` supplies the caller context WITH the start,
+    instead of Telnyx calling `dynamic_variables_webhook_url` back and holding
+    the caller silent until it answers. Note it cannot switch the webhook off:
+    there is no `dynamic_variables_webhook_url` in the per-call override list,
+    so removing that round trip entirely means clearing it on the stored
+    assistant.
+  - `command_id` is on `ai_assistant_start`, `record_start`, `playback_start`
+    and `speak`. Telnyx ignores a repeat of the same id on the same call, which
+    is what lets a command be issued before our own exactly-once claim.
+
+- Latency on this line is measured from `telnyx_events`, which stores both
+  Telnyx's `occurred_at` and our `processed_at`. That is how the 2026-08-19 pass
+  found that `call.speak.ended` cost 3.4-3.7s of OUR handling against 0.2-1.0s
+  for every other event: the silence after the disclosure was Supabase round
+  trips, not Telnyx. Measure there before tuning anything about the opening of a
+  call.
 - Voice is a single string, `<Provider>.<Model>.<VoiceId>`, with any third-party
   key supplied as `voice_settings.api_key_ref`, never inline.

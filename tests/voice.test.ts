@@ -6,6 +6,7 @@ import { agentVoice, assistantConfig, voiceSpeed } from '../lib/telnyx/assistant
 import type {
   DialParams,
   RecordStartParams,
+  PlaybackStartParams,
   SpeakParams,
   StartAssistantParams,
   TelnyxCommands,
@@ -21,6 +22,7 @@ import {
   type TelnyxWebhook,
   type VoiceStore,
 } from '../lib/telnyx/voice';
+import { OPENER_BUILD } from '../lib/telnyx/opener';
 import type { Responder } from '../lib/types';
 
 /**
@@ -93,6 +95,11 @@ function fakeCommands(failing: Partial<Record<string, boolean>> = {}) {
     },
     speak: async (id: string, params: SpeakParams) => {
       issued.push({ cmd: 'speak', id, params });
+      return { result: 'ok' };
+    },
+    playbackStart: async (id: string, params: PlaybackStartParams) => {
+      issued.push({ cmd: 'playbackStart', id, params });
+      if (failing.playbackStart) throw new Error('playback_start refused');
       return { result: 'ok' };
     },
     recordStart: async (id: string, params: RecordStartParams) => {
@@ -761,7 +768,12 @@ describe('handing the caller to the AI agent', () => {
     await ringResponders(store, fake);
 
     expect(fake.of('startAssistant')).toHaveLength(1);
-    expect(fake.of('startAssistant')[0].params).toEqual({ assistant: { id: ASSISTANT_ID } });
+    expect(fake.of('startAssistant')[0].params).toMatchObject({
+      assistant: { id: ASSISTANT_ID },
+      // Stable per call, which is what lets the command be issued before the
+      // event is claimed: a Telnyx retry is deduped at their end, not ours.
+      command_id: 'agent-leg-a',
+    });
     expect(fake.of('dial')).toHaveLength(0);
     expect(store.flows.get('leg-a')).toMatchObject({ stage: 'assistant' });
   });
@@ -773,10 +785,23 @@ describe('handing the caller to the AI agent', () => {
     await ringResponders(store, fake);
 
     expect(fake.of('recordStart')[0].params).toMatchObject({ channels: 'dual', format: 'mp3' });
-    // The agent's first sentence has to be on tape, or the transcript the
-    // Telegram card is built from starts halfway through the conversation.
+
+    // THE ORDER FLIPPED ON PURPOSE on 2026-08-19, and this is the one place that
+    // says so. ai_assistant_start is now issued before the event is claimed,
+    // because the caller's silence after the disclosure measured 2.7s and almost
+    // all of it was this handler's own Supabase round trips. record_start stayed
+    // behind the compare-and-set, because a duplicate recording is worse than
+    // half a second and the guard against it is proven, not documented.
+    //
+    // So the tape no longer starts first by construction. It starts first by
+    // margin: Telnyx took about 1.9s to stand up a conversation on both measured
+    // calls, against roughly 0.5s for the round trips in front of record_start.
+    // That margin is measured, not promised, so it is checked on real calls
+    // rather than trusted: if a greeting ever goes missing from a transcript,
+    // hoist record_start too and give it the same command_id.
     const order = fake.issued.map((i) => i.cmd);
-    expect(order.indexOf('recordStart')).toBeLessThan(order.indexOf('startAssistant'));
+    expect(order.indexOf('startAssistant')).toBeLessThan(order.indexOf('recordStart'));
+    expect(fake.of('recordStart')).toHaveLength(1);
   });
 
   it('remembers the conversation id, so a call row leads back to Mission Control', async () => {
@@ -808,7 +833,7 @@ describe('handing the caller to the AI agent', () => {
     expect(store.flows.get('leg-a')).toMatchObject({ stage: 'voicemail' });
   });
 
-  it('does not start two agents when speak.ended is redelivered', async () => {
+  it('deduplicates a redelivered disclosure at Telnyx, by command_id', async () => {
     const store = new FakeStore();
     const fake = fakeCommands();
     const deps = await ringResponders(store, fake);
@@ -819,7 +844,22 @@ describe('handing the caller to the AI agent', () => {
       deps,
     );
 
-    expect(fake.of('startAssistant')).toHaveLength(1);
+    // The command IS issued twice now, and that is the deliberate trade. It goes
+    // out before the event is claimed, because the claim is a Supabase round trip
+    // and the caller is listening to silence through it. What makes the second
+    // one harmless is command_id: Telnyx ignores a repeat of the same id on the
+    // same call, so the second issue cannot become a second conversation.
+    const starts = fake.of('startAssistant');
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map((s) => (s.params as StartAssistantParams).command_id))).toEqual(
+      new Set(['agent-leg-a']),
+    );
+
+    // Everything still guarded by the database stayed guarded. These are the two
+    // that would actually hurt: a second recording of the same call, and a ring
+    // group dialled twice.
+    expect(fake.of('recordStart')).toHaveLength(1);
+    expect(fake.of('dial')).toHaveLength(0);
   });
 
   it('reverts to the ring group when the assistant id is unset, which is the rollback', async () => {
@@ -952,28 +992,43 @@ describe('the silence between the disclosure and the agent', () => {
   });
 
   it(
-    'issues record_start and ai_assistant_start together instead of one after the other',
+    'issues ai_assistant_start without waiting on a single database round trip',
     { timeout: 3000 },
     async () => {
+      // THE INVARIANT THIS REPLACED was that record_start and ai_assistant_start
+      // went out concurrently, which stopped one Telnyx round trip landing
+      // between them. Measuring real calls on 2026-08-19 showed that was the
+      // small half: call.speak.ended took 3.69s and 3.44s of our own handling
+      // time, against 0.18-0.97s for every other event on the same calls, and
+      // what filled it was Supabase, not Telnyx. The agent handoff now goes out
+      // in front of all of it, so the property worth pinning is stronger and
+      // simpler: no store call may sit in front of the agent start.
+      //
+      // Enforced rather than asserted. Every store method blocks until the
+      // assistant has been issued, so any ordering that puts a database call
+      // first cannot finish this test at all: it hangs and the timeout fails it.
       const store = new FakeStore();
       const fake = fakeCommands();
 
-      // record_start does not resolve until ai_assistant_start has been ISSUED.
-      // Serial code cannot get past this: it is still awaiting the recording when
-      // the thing it is waiting on is the command it has not sent yet. Concurrent
-      // code sends both, then collects both.
       let assistantIssued!: () => void;
       const assistantWasIssued = new Promise<void>((resolve) => {
         assistantIssued = resolve;
       });
+      let armed = false;
+
+      const gated = new Proxy(store, {
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (typeof value !== 'function') return value;
+          return async (...args: unknown[]) => {
+            if (armed) await assistantWasIssued;
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        },
+      }) as VoiceStore;
 
       const commands: TelnyxCommands = {
         ...fake.commands,
-        recordStart: async (id, params) => {
-          const out = fake.commands.recordStart(id, params);
-          await assistantWasIssued;
-          return out;
-        },
         startAssistant: async (id, params) => {
           const out = fake.commands.startAssistant(id, params);
           assistantIssued();
@@ -981,18 +1036,22 @@ describe('the silence between the disclosure and the agent', () => {
         },
       };
 
-      const deps = { store, commands, prewarm: () => {} };
+      const deps = { store: gated, commands, prewarm: () => {} };
       await processTelnyxEvent(webhook('call.initiated', { from: '+14155550123' }), deps);
       await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), deps);
       const disclosure = fake.of('speak').at(-1)!.params as SpeakParams;
-      await processTelnyxEvent(webhook('call.speak.ended', { client_state: disclosure.client_state }), deps);
 
-      expect(fake.of('recordStart')).toHaveLength(1);
+      // Only the disclosure event is gated. The two above have to be allowed to
+      // set the call up, or this would be testing the wrong thing.
+      armed = true;
+      await processTelnyxEvent(
+        webhook('call.speak.ended', { client_state: disclosure.client_state }),
+        deps,
+      );
+
       expect(fake.of('startAssistant')).toHaveLength(1);
+      expect(fake.of('recordStart')).toHaveLength(1);
       expect(store.flows.get('leg-a')).toMatchObject({ stage: 'assistant', recording_started: true });
-      // Still issued in this order, so the agent's first sentence is on tape.
-      const order = fake.issued.map((i) => i.cmd);
-      expect(order.indexOf('recordStart')).toBeLessThan(order.indexOf('startAssistant'));
     },
   );
 
@@ -1018,6 +1077,100 @@ describe('the silence between the disclosure and the agent', () => {
     expect(fake.of('dial')).toHaveLength(1);
     expect(store.flows.get('leg-a')).toMatchObject({ stage: 'ringing', wave: 0 });
     expect([...store.calls.values()][0].was_answered).toBe(false);
+  });
+});
+
+describe('the pre-rendered disclosure', () => {
+  const savedBase = process.env.PUBLIC_BASE_URL;
+  const savedAssistant = process.env.TELNYX_ASSISTANT_ID;
+
+  beforeEach(() => {
+    // An earlier describe deletes this to exercise the rollback path, and env is
+    // shared across a file. Set explicitly so these do not depend on test order.
+    process.env.TELNYX_ASSISTANT_ID = 'assistant-0000-1111-2222-333344445555';
+  });
+
+  afterEach(() => {
+    if (savedAssistant === undefined) delete process.env.TELNYX_ASSISTANT_ID;
+    else process.env.TELNYX_ASSISTANT_ID = savedAssistant;
+    if (savedBase === undefined) delete process.env.PUBLIC_BASE_URL;
+    else process.env.PUBLIC_BASE_URL = savedBase;
+    delete process.env.OPENER_PLAYBACK;
+  });
+
+  it('plays the rendered file instead of synthesizing the words again', async () => {
+    // The measured cost of synthesizing it: 1.72s and 2.04s between
+    // call.answered and call.speak.started, on two real calls, for audio that is
+    // byte-identical every time. The caller hears that as dead air on pickup.
+    process.env.PUBLIC_BASE_URL = 'https://switchboard.example';
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    const deps = { store, commands: fake.commands, prewarm: () => {} };
+
+    await processTelnyxEvent(webhook('call.initiated', { from: '+14155550123' }), deps);
+    await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), deps);
+
+    expect(fake.of('speak')).toHaveLength(0);
+    expect(fake.of('playbackStart')).toHaveLength(1);
+    const params = fake.of('playbackStart')[0].params as PlaybackStartParams;
+    expect(params.audio_url).toBe(
+      `https://switchboard.example/opener/${OPENER_BUILD.fingerprint}.mp3`,
+    );
+    // Or Telnyx re-fetches the same file on every single call.
+    expect(params.cache_audio).toBe(true);
+  });
+
+  it('hands call.playback.ended to the same place call.speak.ended goes', async () => {
+    // Whichever way the disclosure played, what follows it is identical: the
+    // recording starts and the agent takes the call. A caller must not be able to
+    // tell which path ran.
+    process.env.PUBLIC_BASE_URL = 'https://switchboard.example';
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    const deps = { store, commands: fake.commands, prewarm: () => {} };
+
+    await processTelnyxEvent(webhook('call.initiated', { from: '+14155550123' }), deps);
+    await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), deps);
+    const played = fake.of('playbackStart')[0].params as PlaybackStartParams;
+    await processTelnyxEvent(
+      webhook('call.playback.ended', { client_state: played.client_state }),
+      deps,
+    );
+
+    expect(fake.of('startAssistant')).toHaveLength(1);
+    expect(fake.of('recordStart')).toHaveLength(1);
+    expect(store.flows.get('leg-a')).toMatchObject({ stage: 'assistant', recording_started: true });
+  });
+
+  it('falls back to speaking the words when the playback is refused', async () => {
+    // The disclosure is what triggers record_start and the agent handoff, so a
+    // disclosure that never plays is a caller sitting in silence until they give
+    // up. Saying it slowly beats not saying it.
+    process.env.PUBLIC_BASE_URL = 'https://switchboard.example';
+    const store = new FakeStore();
+    const fake = fakeCommands({ playbackStart: true });
+    const deps = { store, commands: fake.commands, prewarm: () => {} };
+
+    await processTelnyxEvent(webhook('call.initiated', { from: '+14155550123' }), deps);
+    await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), deps);
+
+    expect(fake.of('playbackStart')).toHaveLength(1);
+    expect(fake.of('speak')).toHaveLength(1);
+    expect((fake.of('speak')[0].params as SpeakParams).payload).toContain('recorded');
+  });
+
+  it('speaks the words when OPENER_PLAYBACK is off, which is the rollback', async () => {
+    process.env.PUBLIC_BASE_URL = 'https://switchboard.example';
+    process.env.OPENER_PLAYBACK = '0';
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    const deps = { store, commands: fake.commands, prewarm: () => {} };
+
+    await processTelnyxEvent(webhook('call.initiated', { from: '+14155550123' }), deps);
+    await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), deps);
+
+    expect(fake.of('playbackStart')).toHaveLength(0);
+    expect(fake.of('speak')).toHaveLength(1);
   });
 });
 

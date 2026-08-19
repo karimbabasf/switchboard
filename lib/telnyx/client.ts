@@ -117,6 +117,8 @@ export interface RecordStartParams {
   format: 'mp3' | 'wav';
   max_length?: number;
   client_state?: string;
+  /** Same dedupe as the assistant start, for the same reason: see voice.ts. */
+  command_id?: string;
 }
 
 export interface DialParams {
@@ -126,12 +128,42 @@ export interface DialParams {
 }
 
 /**
- * The documented body is exactly this and nothing else. It deliberately carries
- * no client_state: ai_assistant_start is not documented to accept one, and an
- * undocumented field here would fail as a 422 on a live call.
+ * `assistant` carries `id` plus per-call overrides of anything on the stored
+ * assistant. Read off the OpenAPI spec on 2026-08-19, which describes it as
+ * "All fields except `id` are optional - the assistant's stored configuration
+ * will be used as fallback for any omitted fields."
+ *
+ * A previous version of this comment said the body was "exactly this and nothing
+ * else" and that client_state was not accepted. Both are wrong: the spec lists
+ * `client_state` and `command_id` alongside `greeting`, `instructions`,
+ * `voice_settings` and `dynamic_variables`. Written down because that mistaken
+ * comment is what kept `command_id` off this command, and `command_id` is what
+ * lets the start be issued before the database claim rather than after it.
+ *
+ * `dynamic_variables` IS THE POINT OF THIS TYPE. Supplying the caller's context
+ * here is what takes the dynamic-variables webhook off the critical path: see
+ * the note above `startAssistant` below.
  */
 export interface StartAssistantParams {
-  assistant: { id: string };
+  assistant: {
+    id: string;
+    dynamic_variables?: Record<string, string>;
+  };
+  /**
+   * Telnyx ignores a repeat of the same command_id on the same call, which is
+   * the idempotency that used to come from the compare-and-set in the database.
+   * Having it here is what allows this command to go out FIRST.
+   */
+  command_id?: string;
+}
+
+export interface PlaybackStartParams {
+  /** A file already uploaded to /v2/media. Mutually exclusive with audio_url. */
+  media_name?: string;
+  audio_url?: string;
+  /** Telnyx keeps the decoded audio warm, so a repeat play skips the fetch. */
+  cache_audio?: boolean;
+  client_state?: string;
 }
 
 export interface StartAssistantResult {
@@ -210,6 +242,31 @@ export const telnyx = {
     }
   },
 
+  /**
+   * The same disclosure, pre-rendered, played from a file instead of synthesized
+   * on the call.
+   *
+   * WHY THIS EXISTS AT ALL. `speak` has to render 5.7 seconds of premium TTS
+   * before the first sample reaches the caller, and it renders the identical
+   * bytes on every single call. Measured across two real calls: 1.72s and 2.04s
+   * between `call.answered` and `call.speak.started`, which the caller hears as
+   * dead air on pickup. A file that Telnyx already holds starts playing without
+   * that step.
+   *
+   * The second reason is durability. `speak` takes a voice id, and Telnyx
+   * deleted the whole NaturalHD tier under this line on 2026-08-18 without
+   * notice; the disclosure then fell back to the basic robot voice mid-incident.
+   * A rendered file cannot stop existing because a voice was retired.
+   *
+   * The file is named for the hash of the text and voice that produced it, so a
+   * changed opener cannot keep playing the old recording: `openerMediaName()`
+   * recomputes the name and a mismatch means nothing is configured, which falls
+   * back to `speak`. A stale legal notice is the one failure worth being loud
+   * about, so preflight checks the same hash.
+   */
+  playbackStart: (callControlId: string, params: PlaybackStartParams) =>
+    post<{ result: string }>(`/calls/${callControlId}/actions/playback_start`, params),
+
   recordStart: (callControlId: string, params: RecordStartParams) =>
     post<{ result: string }>(`/calls/${callControlId}/actions/record_start`, params),
 
@@ -224,6 +281,15 @@ export const telnyx = {
    * Hands the live leg to the AI agent. The caller stays on the same call, so
    * the dual-channel recording started at the disclosure keeps running across
    * the whole conversation and the post-call pipeline is untouched.
+   *
+   * PASS `dynamic_variables` HERE RATHER THAN LETTING TELNYX FETCH THEM. With
+   * `dynamic_variables_webhook_url` set, Telnyx calls us back at conversation
+   * start and holds the caller in silence until we answer or the timeout
+   * expires. That callback lands on /api/agent/context, a different Vercel
+   * function with its own cold start, so it was a cold start sitting between the
+   * disclosure and the first word. Sending the variables with the start command
+   * means the lookup happens on our side, during the disclosure, out of the
+   * caller's hearing.
    */
   startAssistant: (callControlId: string, params: StartAssistantParams) =>
     post<StartAssistantResult>(`/calls/${callControlId}/actions/ai_assistant_start`, params),
