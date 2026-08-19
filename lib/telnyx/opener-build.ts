@@ -4,8 +4,8 @@
 // file this names. Editing OPENER, TELNYX_TTS or TELNYX_VOICE_SPEED without
 // re-running the script fails tests/opener.test.ts rather than going quiet.
 export const OPENER_BUILD = {
-  fingerprint: "537706b3fd6f7f06",
+  fingerprint: "9572cd900e9ad5ca",
   voice: "Telnyx.NaturalHD.luna",
   speed: 1,
-  text: "Hi, you've reached Acme U S A. This is Robin, I'm an automated assistant, and this call is recorded.",
+  text: "Hi, you've reached Acme U S A. This is Robin, I'm an automated assistant, and this call is recorded. How can I help you today?",
 } as const;

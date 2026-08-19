@@ -204,6 +204,7 @@ class FakeStore implements VoiceStore {
       stage: 'initiated',
       wave: null,
       recording_started: false,
+      telnyx_conversation_id: null,
       escalation_offered_at: null,
     });
   }
@@ -246,6 +247,11 @@ class FakeStore implements VoiceStore {
 
   async markConversationStarted(callControlId: string, conversationId: string) {
     this.conversations.set(callControlId, conversationId);
+    // The real store writes this onto the call_flow row, and call.playback.ended
+    // reads it back to decide whether the agent took the call. Keeping it only in
+    // the side map made the fake disagree with production.
+    const f = this.flows.get(callControlId);
+    if (f) f.telnyx_conversation_id = conversationId;
   }
 
   async recordEscalationOffer(callControlId: string) {
@@ -494,7 +500,9 @@ describe('inbound flow ordering', () => {
     await ringResponders(store, fake);
 
     expect(fake.issued.map((i) => i.cmd)).toEqual(['answer', 'speak', 'recordStart', 'dial']);
-    expect((fake.of('speak')[0].params as SpeakParams).payload).toBe('This call is being recorded.');
+    expect((fake.of('speak')[0].params as SpeakParams).payload).toBe(
+      'This call is being recorded. How can I help you today?',
+    );
     expect(fake.of('recordStart')[0].params).toMatchObject({ channels: 'dual', format: 'mp3' });
   });
 
@@ -833,27 +841,27 @@ describe('handing the caller to the AI agent', () => {
     expect(store.flows.get('leg-a')).toMatchObject({ stage: 'voicemail' });
   });
 
-  it('deduplicates a redelivered disclosure at Telnyx, by command_id', async () => {
+  it('does not start a second agent when call.answered is redelivered', async () => {
     const store = new FakeStore();
     const fake = fakeCommands();
     const deps = await ringResponders(store, fake);
 
-    const disclosure = fake.of('speak')[0].params as SpeakParams;
+    // Replays call.answered, which is where the handoff is issued now: the agent
+    // boots behind the disclosure rather than after it.
     await processTelnyxEvent(
-      webhook('call.speak.ended', { client_state: disclosure.client_state }, { id: 'evt-replay' }),
+      webhook('call.answered', { from: '+14155550123' }, { id: 'evt-replay' }),
       deps,
     );
 
-    // The command IS issued twice now, and that is the deliberate trade. It goes
-    // out before the event is claimed, because the claim is a Supabase round trip
-    // and the caller is listening to silence through it. What makes the second
-    // one harmless is command_id: Telnyx ignores a repeat of the same id on the
-    // same call, so the second issue cannot become a second conversation.
+    // Guarded twice over, and the belt is the compare-and-set: a replayed
+    // call.answered cannot move the flow out of 'initiated' a second time, so it
+    // never reaches the handoff. command_id is the braces, for the case where two
+    // deliveries race and both pass the CAS.
     const starts = fake.of('startAssistant');
-    expect(starts).toHaveLength(2);
-    expect(new Set(starts.map((s) => (s.params as StartAssistantParams).command_id))).toEqual(
-      new Set(['agent-leg-a']),
-    );
+    expect(starts).toHaveLength(1);
+    expect((starts[0].params as StartAssistantParams).command_id).toBe('agent-leg-a');
+    // Silent, so it cannot talk over the disclosure it is booting behind.
+    expect((starts[0].params as StartAssistantParams).greeting).toBe('');
 
     // Everything still guarded by the database stayed guarded. These are the two
     // that would actually hurt: a second recording of the same call, and a ring

@@ -148,7 +148,24 @@ export interface StartAssistantParams {
   assistant: {
     id: string;
     dynamic_variables?: Record<string, string>;
+    /**
+     * Per-call override of the stored greeting. An empty string is how the agent
+     * is started SILENTLY, which is what lets it boot behind the disclosure
+     * without talking over it: "if none then nothing will be played when the
+     * assistant starts."
+     */
+    greeting?: string;
   };
+  /**
+   * TOP LEVEL, and distinct from `assistant.greeting`. The spec carries both; this
+   * is the one that decides what is spoken when the assistant starts on THIS call:
+   * "Text that will be played when the assistant starts, if none then nothing will
+   * be played when the assistant starts."
+   *
+   * An empty string is therefore how the agent is started SILENTLY, which is what
+   * lets it boot behind the disclosure without talking over a legal notice.
+   */
+  greeting?: string;
   /**
    * Telnyx ignores a repeat of the same command_id on the same call, which is
    * the idempotency that used to come from the compare-and-set in the database.

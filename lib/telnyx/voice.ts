@@ -158,6 +158,8 @@ export interface CallFlow {
   stage: 'initiated' | 'answered' | 'assistant' | 'ringing' | 'bridged' | 'voicemail' | 'ended';
   wave: number | null;
   recording_started: boolean;
+  /** Set once ai_assistant_start comes back. Null means the agent never took the call. */
+  telnyx_conversation_id: string | null;
   /**
    * When the agent last offered this caller a person. Null means it never did,
    * which is the only reading that is safe to act on: `escalate_to_human` will
@@ -567,8 +569,6 @@ export async function processTelnyxEvent(event: TelnyxWebhook, deps: VoiceDeps):
   // ignores a repeat of the same command on the same call. That is what the
   // claim was protecting here; the claim still guards everything below, and the
   // compare-and-set still guards the dial path, which has no such dedupe.
-  const agent = beginAgentHandoff(event, deps);
-
   const mine = await deps.store.claimEvent({
     id,
     event_type,
@@ -578,7 +578,7 @@ export async function processTelnyxEvent(event: TelnyxWebhook, deps: VoiceDeps):
   if (!mine) return; // already handled, and handling it twice would double-dial
 
   try {
-    await dispatch(event, deps, agent);
+    await dispatch(event, deps);
     await deps.store.markEventDone(id);
   } catch (err) {
     await deps.store.releaseEvent(id, err instanceof Error ? err.message : String(err));
@@ -591,8 +591,26 @@ type AgentHandoff = Promise<
 >;
 
 /**
- * Issues `ai_assistant_start` the moment the disclosure ends, or returns null
- * when this event is not the end of the disclosure.
+ * Issues `ai_assistant_start` the moment the call is answered, so the agent boots
+ * WHILE the disclosure plays rather than after it.
+ *
+ * THE MEASUREMENT THAT FORCED THIS. Karim's call of 2026-08-19 18:40: disclosure
+ * ended 18:40:24, the agent's first words were logged 18:40:32, and he hung up at
+ * 18:40:31. Eight and a half seconds of silence, and he never heard it speak.
+ *
+ * Almost all of that is Telnyx standing up a conversation, which is not ours to
+ * shorten. The pass before this one moved `ai_assistant_start` ahead of two
+ * Supabase round trips and took 0.7s off an 8.7s hole, which is the shape of
+ * optimising the part you own instead of the part that is slow. The disclosure is
+ * seven seconds during which nothing else happens, so the boot goes there.
+ *
+ * ORDERING AGAINST CONSENT IS PRESERVED, AND IT IS WHY THE BOOT IS SLOW ENOUGH
+ * TO BE SAFE. California is all-party consent, so nothing may process the
+ * caller's audio before the notice is delivered. The notice is in the first
+ * seconds of the recording, and the agent is not listening until Telnyx finishes
+ * standing it up, which measured at ~8.5s. The recording is what the caller hears
+ * throughout. `record_start` still waits for the audio to finish, exactly as it
+ * did before.
  *
  * ONLY THE AGENT START IS HOISTED, and `record_start` deliberately is not, even
  * though it sits one round trip further back and the same `command_id` trick
@@ -618,8 +636,8 @@ export const CONTEXT_BUDGET_MS = 400;
 
 function beginAgentHandoff(event: TelnyxWebhook, deps: VoiceDeps): AgentHandoff | null {
   const { event_type, payload: p } = event.data;
-  if (event_type !== 'call.speak.ended' && event_type !== 'call.playback.ended') return null;
-  if (decodeClientState<SpeakState>(p.client_state)?.speak !== 'disclosure') return null;
+  if (event_type !== 'call.answered') return null;
+  if (responderState(p)) return null; // a responder leg, not the caller
 
   // Unsetting TELNYX_ASSISTANT_ID is the rollback: with no assistant to start,
   // the call reverts to dialing humans by the path it always took.
@@ -641,6 +659,13 @@ function beginAgentHandoff(event: TelnyxWebhook, deps: VoiceDeps): AgentHandoff 
           id: assistantId,
           ...(vars ? { dynamic_variables: vars as unknown as Record<string, string> } : {}),
         },
+        // SILENT ON PURPOSE. The agent is being started while the disclosure is
+        // still playing, so anything it says here talks over a legal notice. The
+        // recorded opener ends by asking what the caller needs, so the question
+        // still gets asked, in the same voice, without a handoff in the middle.
+        // Documented behaviour: "if none then nothing will be played when the
+        // assistant starts."
+        greeting: '',
         // Same id for every delivery of this call's handoff, so a Telnyx retry of
         // the disclosure webhook cannot start a second conversation.
         command_id: `agent-${p.call_control_id}`,
@@ -652,11 +677,7 @@ function beginAgentHandoff(event: TelnyxWebhook, deps: VoiceDeps): AgentHandoff 
   );
 }
 
-async function dispatch(
-  event: TelnyxWebhook,
-  deps: VoiceDeps,
-  agent: AgentHandoff | null = null,
-): Promise<void> {
+async function dispatch(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> {
   switch (event.data.event_type) {
     case 'call.initiated':
       return onInitiated(event, deps);
@@ -668,7 +689,7 @@ async function dispatch(
     // does not depend on which one played.
     case 'call.speak.ended':
     case 'call.playback.ended':
-      return onDisclosureEnded(event, deps, agent);
+      return onDisclosureEnded(event, deps);
     case 'call.hangup':
       return onHangup(event, deps);
     case 'call.recording.saved':
@@ -775,6 +796,13 @@ async function onAnswered(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> 
   const clientState = encodeClientState({ speak: 'disclosure' } satisfies SpeakState);
   const audioUrl = openerPlaybackEnabled() ? openerAudioUrl() : null;
 
+  // THE AGENT STARTS BOOTING NOW, behind the audio, silent. Issued before the
+  // disclosure command rather than after it, because it is the slow one: Telnyx
+  // took 8.5s to produce the agent's first words on 2026-08-19, and the whole
+  // point is to spend that while the caller is listening to something.
+  const agent = beginAgentHandoff(event, deps);
+
+  let played = false;
   if (audioUrl) {
     try {
       await deps.commands.playbackStart(p.call_control_id, {
@@ -782,20 +810,37 @@ async function onAnswered(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> 
         cache_audio: true,
         client_state: clientState,
       });
-      return;
+      played = true;
     } catch (err) {
       if (err instanceof TelnyxError && err.isCallGone) throw err;
       console.error(`[voice] opener playback failed, falling back to speak: ${describe(err)}`);
     }
   }
 
-  // The env var stays as an override for a line that needs different wording
-  // without a deploy. Changing it changes the fingerprint, so the rendered file
-  // stops being addressed and this path takes over on its own.
-  await deps.commands.speak(p.call_control_id, {
-    payload: openerText(),
-    client_state: clientState,
-  });
+  if (!played) {
+    // The env var stays as an override for a line that needs different wording
+    // without a deploy. Changing it changes the fingerprint, so the rendered file
+    // stops being addressed and this path takes over on its own.
+    await deps.commands.speak(p.call_control_id, {
+      payload: openerText(),
+      client_state: clientState,
+    });
+  }
+
+  // Collected AFTER the disclosure is playing, so nothing above waited on it.
+  // The conversation id is what call.playback.ended reads to decide whether the
+  // agent has the caller or whether it has to ring people instead: the promise
+  // cannot cross webhook invocations, so the answer goes in the database.
+  if (agent) {
+    const started = await agent;
+    if (started.ok) {
+      if (started.data?.conversation_id) {
+        await deps.store.markConversationStarted(p.call_control_id, started.data.conversation_id);
+      }
+    } else {
+      console.error(`[voice] ai_assistant_start failed for ${p.call_control_id}: ${describe(started.error)}`);
+    }
+  }
 }
 
 async function onResponderAnswered(
@@ -840,11 +885,7 @@ async function onResponderAnswered(
   }
 }
 
-async function onDisclosureEnded(
-  event: TelnyxWebhook,
-  deps: VoiceDeps,
-  agent: AgentHandoff | null,
-): Promise<void> {
+async function onDisclosureEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> {
   const p = event.data.payload;
   const state = decodeClientState<SpeakState>(p.client_state);
   // The voicemail prompt also ends here. Nothing follows it: the dual channel
@@ -886,10 +927,9 @@ async function onDisclosureEnded(
   }
   if (!flow) return;
 
-  // The agent handoff already went out, before this event was even claimed. See
-  // beginAgentHandoff for the measurements that moved it. record_start stays
-  // here, behind the compare-and-set, because a duplicate recording is a worse
-  // failure than half a second: the note over there explains the split.
+  // The agent handoff went out back at call.answered and has been booting behind
+  // the disclosure ever since. What is left here is the recording, which must NOT
+  // start before the notice has finished playing.
   //
   // Disclosure is done, so consent is on the recording from its first frame.
   // Dual channel puts each party on its own track, which is what lets the
@@ -919,12 +959,11 @@ async function onDisclosureEnded(
     console.error(`[voice] record_start failed for ${p.call_control_id}: ${describe(recorded.error)}`);
   }
 
-  if (agent) {
-    const started = await agent;
-    if (started.ok) {
-      if (started.data?.conversation_id) {
-        await deps.store.markConversationStarted(p.call_control_id, started.data.conversation_id);
-      }
+  if (assistantId) {
+    // Did the agent actually start? onAnswered wrote the conversation id if it
+    // did, so this is the same question the awaited promise used to answer, asked
+    // of the database because a promise cannot cross a webhook invocation.
+    if (flow.telnyx_conversation_id) {
       // The agent has the caller. That is a call somebody answered, and without
       // this every agent-handled call closed out reading as unanswered, because
       // was_answered was only ever set by a responder bridging.
@@ -935,7 +974,7 @@ async function onDisclosureEnded(
     // A caller who reaches a dead agent must reach a human. Falling through to
     // the ring group is strictly better than a silent open line, and this is
     // the only path by which the old behaviour still runs on a normal call.
-    console.error(`[voice] ai_assistant_start failed for ${p.call_control_id}: ${describe(started.error)}`);
+    console.error(`[voice] no conversation for ${p.call_control_id}, ringing people instead`);
     const fellBack = await deps.store.advanceStage(p.call_control_id, ['assistant'], 'ringing', {
       wave: (await activeResponders())[0]?.ring_order ?? null,
     });

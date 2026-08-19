@@ -33,6 +33,7 @@ function testDeps(opts: Options = {}) {
     stage: opts.stage ?? 'assistant',
     wave: null,
     recording_started: true,
+    telnyx_conversation_id: 'conv-1',
     escalation_offered_at: opts.offeredAt ?? null,
   };
   const responders = opts.responders ?? [responder('r1')];

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import { OPENER } from '../lib/agent/brief';
+import { GREETING, OPENER } from '../lib/agent/brief';
 import { agentVoice, voiceSpeed } from '../lib/telnyx/assistant';
 import {
   OPENER_BUILD,
@@ -48,7 +48,12 @@ describe('pre-rendered opener', () => {
     expect(OPENER_BUILD.text.toLowerCase()).toContain('recorded');
   });
 
-  it('falls back to the brief when no override is configured', () => {
-    expect(openerText()).toBe(process.env.RECORDING_DISCLOSURE?.trim() || OPENER);
+  it('is the disclosure plus the greeting, which is what closes the silence', () => {
+    // The recording ends by asking what the caller needs, so the agent can boot
+    // silently behind it and be listening by the time they answer. See
+    // openerText() for the 8.5s measurement that put the greeting in here.
+    const disclosure = process.env.RECORDING_DISCLOSURE?.trim() || OPENER;
+    expect(openerText()).toBe(`${disclosure} ${GREETING}`);
+    expect(openerText().endsWith(GREETING)).toBe(true);
   });
 });
