@@ -1,5 +1,5 @@
 import { db, unwrap } from '../db';
-import { prewarmCallerContext } from '../agent/context';
+import { prewarmCallerContext, warmCallerContextRoute } from '../agent/context';
 import { OPENER } from '../agent/brief';
 import { optionalEnv, toE164 } from '../env';
 import type { Responder } from '../types';
@@ -520,10 +520,21 @@ export interface VoiceDeps {
   commands: TelnyxCommands;
   /** Warms the caller lookup the assistant is about to block on. Injectable for tests. */
   prewarm?: (phone: string) => void;
+  /**
+   * Boots the context route itself, which is a different Vercel function from
+   * this one and therefore never sees the prewarm above. Injectable for tests,
+   * which must not make a real request to PUBLIC_BASE_URL.
+   */
+  warmContextRoute?: () => void;
 }
 
 export function voiceDeps(): VoiceDeps {
-  return { store: supabaseStore(), commands: telnyx, prewarm: prewarmCallerContext };
+  return {
+    store: supabaseStore(),
+    commands: telnyx,
+    prewarm: prewarmCallerContext,
+    warmContextRoute: warmCallerContextRoute,
+  };
 }
 
 /**
@@ -641,6 +652,12 @@ async function onAnswered(event: TelnyxWebhook, deps: VoiceDeps): Promise<void> 
   const caller = toE164(p.from ?? '');
   if (caller) (deps.prewarm ?? prewarmCallerContext)(caller);
 
+  // And warm the route that lookup is answered from, which is a separate Vercel
+  // function and so has its own cold start sitting in front of the greeting. Same
+  // trade as the line above and the same free seconds to spend it in: the
+  // disclosure is about to play and nobody is using that time.
+  (deps.warmContextRoute ?? warmCallerContextRoute)();
+
   // Beat 1 of the opener: the introduction AND the two notices, in one speak.
   // The default is OPENER, from the brief, because everything a caller hears is
   // reviewed content and belongs in the file the tests read. The env var stays
@@ -700,21 +717,37 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
   // recording started back at the disclosure is already capturing the message.
   if (state?.speak !== 'disclosure') return;
 
-  // Ordered by ring_order, so the first row is the first wave.
-  const responders = await deps.store.activeResponders();
-  const first = responders[0];
-
   // Unsetting TELNYX_ASSISTANT_ID is the rollback: with no assistant to start,
   // this reverts to dialing humans by the path it always took.
   const assistantId = process.env.TELNYX_ASSISTANT_ID?.trim();
 
+  // LAZY, AND ON THE ASSISTANT PATH IT NEVER RUNS AT ALL. This was an awaited
+  // read at the top of the function, so a whole Supabase round trip sat between
+  // the disclosure ending and ai_assistant_start being sent, on every call, for
+  // a list only the human-dialing path reads. Karim, 2026-08-18: "after the
+  // disclaimer I want the agent to immediately say how can I help you, and not
+  // wait like 7 seconds." This is the one round trip of that which was ours.
+  //
+  // Memoized rather than re-queried, because the fallback path below reads it
+  // twice. Every caller awaits it in the same expression that creates it, so
+  // there is no window in which a rejection has no handler attached, which
+  // inside `after` would kill the whole event rather than this one read.
+  //
+  // Ordered by ring_order, so the first row is the first wave.
+  let responderRead: Promise<Responder[]> | null = null;
+  const activeResponders = () => (responderRead ??= deps.store.activeResponders());
+
   // The compare-and-set comes before any command: a redelivered speak.ended must
   // not start a second recording, a second agent, or dial everybody twice.
-  let flow = assistantId
-    ? await deps.store.advanceStage(p.call_control_id, ['answered'], 'assistant')
-    : await deps.store.advanceStage(p.call_control_id, ['answered'], 'ringing', {
-        wave: first?.ring_order ?? null,
-      });
+  let flow: CallFlow | null;
+  if (assistantId) {
+    flow = await deps.store.advanceStage(p.call_control_id, ['answered'], 'assistant');
+  } else {
+    const first = (await activeResponders())[0];
+    flow = await deps.store.advanceStage(p.call_control_id, ['answered'], 'ringing', {
+      wave: first?.ring_order ?? null,
+    });
+  }
   if (!flow) return;
 
   // BOTH COMMANDS ARE ISSUED BEFORE EITHER IS AWAITED. They used to run back to
@@ -777,12 +810,14 @@ async function onSpeakEnded(event: TelnyxWebhook, deps: VoiceDeps): Promise<void
     // the only path by which the old behaviour still runs on a normal call.
     console.error(`[voice] ai_assistant_start failed for ${p.call_control_id}: ${describe(started.error)}`);
     const fellBack = await deps.store.advanceStage(p.call_control_id, ['assistant'], 'ringing', {
-      wave: first?.ring_order ?? null,
+      wave: (await activeResponders())[0]?.ring_order ?? null,
     });
     if (!fellBack) return;
     flow = fellBack;
   }
 
+  const responders = await activeResponders();
+  const first = responders[0];
   if (!first) {
     await toVoicemail(flow, deps);
     return;

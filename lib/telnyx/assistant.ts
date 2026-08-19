@@ -522,11 +522,23 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
     tools,
     dynamic_variables_webhook_url: `${deps.publicBaseUrl}/api/agent/context`,
     // The assistant will not say a word until this webhook answers or this
-    // timeout expires, so it is a floor on how long the caller sits in silence
-    // after the disclosure. It was 8000, which is what ~10 seconds of dead air
-    // was mostly made of. The lookup itself is ~200ms and is now prewarmed at
-    // call.answered (see prewarmCallerContext), so this should never be reached;
-    // if it is, being greeted as a stranger after 2.5s beats waiting out 8.
-    dynamic_variables_webhook_timeout_ms: 2500,
+    // timeout expires, so it is a ceiling on how long the caller sits in silence
+    // after the disclosure. It was 8000, then 2500 on the reasoning that the
+    // lookup is ~200ms and is prewarmed at call.answered, so the ceiling would
+    // never be reached.
+    //
+    // DOWN TO 1200 ON 2026-08-18, because that reasoning had a hole in it. The
+    // prewarm caches in the process that handles /api/voice, and Telnyx posts
+    // this webhook to /api/agent/context, which on Vercel is a different
+    // function with its own cold start. So the prewarm hits in `next dev` and
+    // misses in production, and the ceiling was being reached by exactly the
+    // calls Karim heard as dead air: "not wait like 7 seconds", 2026-08-18.
+    // warmCallerContextRoute now boots that function during the disclosure, and
+    // this caps what a boot that still runs long can cost the caller.
+    //
+    // The trade is that a lookup slower than 1.2s greets a regular customer as a
+    // stranger. That costs one line of recognition. Waiting costs the opening of
+    // the call, which is the thing being complained about, so the cap wins.
+    dynamic_variables_webhook_timeout_ms: 1200,
   };
 }

@@ -6,18 +6,28 @@ import { callerContext } from '../lib/agent/context';
 describe('brief.ts: the business facts are one source', () => {
   it('names the six real SKUs and nothing Akme does not sell', () => {
     const names = BUSINESS.products.map((p) => p.name);
-    // Read off lib/catalog.ts in the Akme repo, not from memory. The plan's
-    // draft called the last two "Clear Tape" and "Tan Tape"; the catalogue calls
-    // them Carton Sealing Tape and Hot Melt Tape, which is what a caller hears.
+    // Read off lib/catalog.ts in the Akme repo, not from memory, and RENAMED
+    // THERE ON 2026-08-18 when Karim set the lead order. "Machine Wrap Film" is
+    // the one that mattered: the product is hand-applied and the old name said
+    // otherwise on every call. The array order IS the rank order, asserted below.
     expect(names).toEqual([
-      'Cushion Wrap',
-      'Newsprint Sheets',
-      'Hand Wrap Film',
-      'Machine Wrap Film',
-      'Carton Sealing Tape',
-      'Hot Melt Tape',
+      '18" Stretch Film',
+      '5" Hand Wrap Film',
+      'Tan Hot Melt Tape',
+      'Clear Carton Sealing Tape',
+      'Newsprint Packing Paper',
+      'Bubble Cushion Wrap',
     ]);
     expect(names.join(' ').toLowerCase()).not.toContain('box');
+  });
+
+  it('stores the products in rank order, because everything downstream inherits it', () => {
+    // Karim set rank 1..6 on 2026-08-18 and it is a commercial decision about
+    // what gets said first, not a sort key. SPOKEN_LIST, the keyterm boost and
+    // the numbered catalogue in the prompt all map this array, so the array being
+    // in rank order is the single place the order can be right or wrong.
+    expect(BUSINESS.products.map((p) => p.rank)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(BUSINESS.products[0].name).toBe('18" Stretch Film');
   });
 
   it('derives STT keyterms from the products rather than a second list', () => {
@@ -38,15 +48,17 @@ describe('brief.ts: the business facts are one source', () => {
 
   it('carries pallet counts that match the catalogue', () => {
     // The two tape rows were the ones reconstructed during planning, so they are
-    // the two worth pinning: 40 and 48, not the 42 and 42 the draft guessed.
+    // the two worth pinning: 40 and 48, not the 42 and 42 the draft guessed. The
+    // 2026-08-18 rename moved these onto new keys and changed none of the counts,
+    // which is the thing this assertion is here to prove.
     const perPallet = Object.fromEntries(BUSINESS.products.map((p) => [p.name, p.perPallet]));
     expect(perPallet).toEqual({
-      'Cushion Wrap': 8,
-      'Newsprint Sheets': 40,
-      'Hand Wrap Film': 48,
-      'Machine Wrap Film': 36,
-      'Carton Sealing Tape': 40,
-      'Hot Melt Tape': 48,
+      '18" Stretch Film': 36,
+      '5" Hand Wrap Film': 48,
+      'Tan Hot Melt Tape': 48,
+      'Clear Carton Sealing Tape': 40,
+      'Newsprint Packing Paper': 40,
+      'Bubble Cushion Wrap': 8,
     });
   });
 
@@ -322,19 +334,124 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
 
   it('knows the words callers actually use, so it cannot deny stocking bubble wrap', () => {
     // Verified against `qbName` in Akme's lib/catalog.ts, not from memory:
-    // Cushion Wrap is literally 'BUBBLE - 48" x 1/2" x 250\' PERFORATED 12"'.
+    // Bubble Cushion Wrap is literally 'BUBBLE - 48" x 1/2" x 250\' PERFORATED 12"'.
     for (const product of BUSINESS.products) {
       expect(product.alsoCalled.length).toBeGreaterThan(0);
       for (const alias of product.alsoCalled) {
         expect(prompt).toContain(alias);
       }
     }
-    expect(prompt).toMatch(/bubble wrap is asking for Cushion Wrap/i);
+    expect(prompt).toMatch(/bubble wrap is asking for Bubble Cushion Wrap/i);
     expect(prompt).toMatch(/Never tell someone we do not carry something because they used their word/i);
-    // Stretch film is not shrink film. Claiming they are the same is exactly the
-    // invented answer the alias list is supposed to prevent.
-    const aliases = BUSINESS.products.flatMap((p) => p.alsoCalled);
-    expect(aliases).not.toContain('shrink wrap');
+  });
+
+  it('hears "shrink wrap" as our stretch film and says "stretch film" back', () => {
+    // THIS ASSERTION USED TO BE THE OPPOSITE, and the reversal is Karim's call on
+    // 2026-08-18, not a loosening. The old rule kept "shrink wrap" out of the
+    // alias list because shrink film is genuinely a different product, and the
+    // result on a real line was that the single commonest word a caller uses for
+    // stretch film reached the agent unmatched. What survives of the old rule is
+    // the half that was actually protecting the customer: we never SAY "shrink
+    // wrap" back, so nobody is sold a heat-shrunk product they did not ask for.
+    const films = BUSINESS.products.filter((p) => p.name.includes('Stretch') || p.name.includes('Hand Wrap'));
+    expect(films).toHaveLength(2);
+    for (const film of films) {
+      expect(film.alsoCalled).toContain('shrink wrap');
+    }
+    expect(prompt).toMatch(/"SHRINK WRAP" MEANS OUR STRETCH FILM/);
+    expect(prompt).toMatch(/say "stretch film" back to them/i);
+    expect(prompt).toMatch(/Never repeat the words "shrink wrap" yourself/i);
+  });
+
+  it('leads with the eighteen inch whenever more than one product is in play', () => {
+    // Rank 1 is a decision about what this company sells first, so it has to
+    // reach the model as an instruction and not only as an array order a
+    // numbered list happens to preserve.
+    expect(prompt).toMatch(/LEAD WITH THE EIGHTEEN INCH/);
+    expect(prompt).toContain(`the ${BUSINESS.products[0].spokenName} goes first`);
+    // First in the sentence the agent says out loud, too, not just in the detail.
+    expect(SPOKEN_LIST.toLowerCase().indexOf('eighteen')).toBeLessThan(
+      SPOKEN_LIST.toLowerCase().indexOf('five'),
+    );
+    // And first in the numbered catalogue block, which is the ordering
+    // instruction the model actually reads.
+    for (const later of BUSINESS.products.slice(1)) {
+      expect(prompt.indexOf(`1. ${BUSINESS.products[0].name}`)).toBeLessThan(
+        prompt.indexOf(`${later.rank}. ${later.name}`),
+      );
+    }
+  });
+
+  it('never tells a caller the eighteen inch needs a machine, because it does not', () => {
+    // The supplier sheet calls it "a general-purpose hand-applied stretch film
+    // ... well-suited for both experienced operators and new users". The prompt
+    // and the spoken list both said "for machines" until 2026-08-18, so every
+    // caller without a wrapping machine was told our lead product was not for
+    // them. This is a factual error with a lost order attached, not a wording
+    // preference, so it gets an assertion in three places.
+    const lead = BUSINESS.products[0];
+    expect(lead.facts.join(' ')).toMatch(/hand-applied/);
+    expect(lead.facts.join(' ')).not.toMatch(/\bfor machines\b|machine.only|requires a machine/i);
+    expect(prompt).toMatch(/THE EIGHTEEN INCH GOES ON BY HAND/);
+    expect(prompt).toMatch(/Never say it needs a machine/i);
+    expect(SPOKEN_LIST).not.toMatch(/for machines|on a machine/i);
+    // "machine wrap" survives as an ALIAS, because callers say it and the agent
+    // has to recognise the word. Recognising it is not the same as repeating it.
+    expect(lead.alsoCalled).toContain('machine wrap');
+    // And the splitting question is the width now. Asking about a machine would
+    // reintroduce the same false premise by the back door.
+    expect(prompt).toMatch(/the question that splits them is the width and never the method/i);
+  });
+
+  it('gives every product a spoken name a TTS can read, with no digits or quote marks', () => {
+    // `18" Stretch Film` handed to a voice is a numeral, a double quote and two
+    // words, and the quote comes out as a stumble or as the word "inch" at
+    // random. Same class of bug as 1234 being read "one thousand two hundred
+    // thirty four". Every name that starts with a numeral needs a spoken form,
+    // and a spoken form that still carries a digit has not fixed anything.
+    //
+    // The smart quotes are built from their code points (U+2018, U+2019, U+201C,
+    // U+201D) rather than typed, so this file never has to contain one in order
+    // to test for one.
+    const smart = [0x2018, 0x2019, 0x201c, 0x201d].map((code) => String.fromCharCode(code));
+    for (const product of BUSINESS.products) {
+      expect(product.spokenName).not.toMatch(/\d/);
+      for (const mark of ['"', "'", '/', ...smart]) {
+        expect(product.spokenName).not.toContain(mark);
+      }
+      expect(product.spokenName.trim()).toBe(product.spokenName);
+      expect(product.spokenName.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('tells the agent to say the spoken name and to read numbers exactly as written', () => {
+    // The data carrying a spoken form buys nothing unless the prompt says to use
+    // it, and the prompt is the only thing standing between a written name and
+    // the TTS: the model's words go straight to the voice with nothing between.
+    expect(prompt).toMatch(/SAY THE SPOKEN NAME/);
+    expect(prompt).toMatch(/Never read an inch mark, a quote mark or a slash aloud/i);
+    expect(prompt).toMatch(/EVERY MEASUREMENT ABOVE IS ALREADY WRITTEN THE WAY IT IS SAID/);
+    expect(prompt).toMatch(/do not tidy a number into digits/i);
+    for (const product of BUSINESS.products) {
+      expect(prompt).toContain(`You SAY this "${product.spokenName}"`);
+    }
+  });
+
+  it('carries the checked facts, so a real buyer question is answered from the sheet', () => {
+    // The prompt could answer "how big is it" and nothing else, so "how thick",
+    // "made where" and "will it go on by hand" were answered by the model making
+    // something up that sounded right. The facts came off the supplier sheet on
+    // 2026-08-18 to stop that, and they are only worth carrying if they arrive.
+    for (const product of BUSINESS.products) {
+      expect(product.facts.length).toBeGreaterThan(0);
+      for (const fact of product.facts) {
+        expect(prompt).toContain(fact);
+      }
+    }
+    // And they are a shelf, not a script. Reciting six facts blows the three
+    // sentence cap on the first product question of every call.
+    expect(prompt).toMatch(/THE "TRUE OF IT" LINE IS A SHELF, NOT A SCRIPT/);
+    expect(prompt).toMatch(/Answer about the ONE product they asked about, then stop/i);
   });
 
   it('offers a person instead of waiting to be asked for one', () => {

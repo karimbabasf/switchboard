@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { TOOL_NAMES, assistantConfig } from '../lib/telnyx/assistant';
-import { GREETING, systemPrompt } from '../lib/agent/brief';
+import { BUSINESS, GREETING, keyterms, systemPrompt } from '../lib/agent/brief';
 
 const BASE = 'https://switchboard.example.com';
 
@@ -81,8 +81,30 @@ describe('assistant.ts: the settings that make it feel real', () => {
   it('boosts keyterms as a comma-separated string, not an array', () => {
     const { keyterm } = cfg().transcription.settings;
     expect(typeof keyterm).toBe('string');
-    expect(keyterm).toContain('Cushion Wrap');
     expect(keyterm).toContain('Akme');
+    // READ OFF THE DATA, NOT TYPED. This asserted the literal 'Cushion Wrap' and
+    // survived the 2026-08-18 rename to 'Bubble Cushion Wrap' by accident, on a
+    // substring match, which is a test that stops testing without failing. Every
+    // form of every product now has to be in the boost, in the same order.
+    expect(keyterm.split(',')).toEqual(keyterms());
+    for (const product of BUSINESS.products) {
+      expect(keyterm).toContain(product.name);
+      expect(keyterm).toContain(product.spokenName);
+    }
+  });
+
+  it('caps how long the caller waits on the caller-context webhook', () => {
+    // This is the floor on silence between the disclosure ending and the agent
+    // speaking, because the assistant says nothing until the webhook answers or
+    // this expires. 8000, then 2500, now 1200: the prewarm that justified 2500
+    // caches in the /api/voice process and the webhook lands on /api/agent/context,
+    // which is a different Vercel function, so in production the prewarm misses
+    // and the ceiling is what the caller actually hears. Karim, 2026-08-18: "not
+    // wait like 7 seconds."
+    expect(cfg().dynamic_variables_webhook_timeout_ms).toBeLessThanOrEqual(1200);
+    // And not so low that a warm lookup cannot finish, which would greet every
+    // regular customer as a stranger to save nothing.
+    expect(cfg().dynamic_variables_webhook_timeout_ms).toBeGreaterThanOrEqual(500);
   });
 
   it('turns noise suppression on, because STT accuracy is downstream of it', () => {

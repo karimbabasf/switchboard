@@ -895,6 +895,62 @@ describe('the silence between the disclosure and the agent', () => {
     expect(warmed).toEqual([{ phone: '+14155550123', speaksSoFar: 0 }]);
   });
 
+  it('boots the context route too, since the prewarm never reaches that function', async () => {
+    const store = new FakeStore();
+    const fake = fakeCommands();
+    const booted: number[] = [];
+
+    const deps = {
+      store,
+      commands: fake.commands,
+      prewarm: () => {},
+      warmContextRoute: () => booted.push(fake.of('speak').length),
+    };
+    await processTelnyxEvent(webhook('call.initiated', { from: '+14155550123' }), deps);
+    await processTelnyxEvent(webhook('call.answered', { from: '+14155550123' }), deps);
+
+    // The prewarm above caches in THIS process, and Telnyx posts the
+    // dynamic-variables webhook to /api/agent/context, which on Vercel is a
+    // different function with its own cold start. So the prewarm alone leaves a
+    // Next boot sitting between the disclosure ending and the caller hearing
+    // anything. Same free seconds, and it has to be spent before the speak.
+    expect(booted).toEqual([0]);
+  });
+
+  it('does not read the responder list on the path where nobody gets dialed', async () => {
+    const store = new FakeStore();
+    store.responders = [responder('r1', '+14155550001', 0)];
+    const fake = fakeCommands();
+    let reads = 0;
+    const rows = store.responders;
+    store.activeResponders = async () => {
+      reads += 1;
+      return rows;
+    };
+
+    await ringResponders(store, fake);
+
+    // It was read at the top of onSpeakEnded on every call, so a Supabase round
+    // trip sat between the disclosure ending and ai_assistant_start going out,
+    // for a list only the human-dialing path reads. Karim, 2026-08-18: "not wait
+    // like 7 seconds." The assistant started, so this must never have run.
+    expect(fake.of('startAssistant')).toHaveLength(1);
+    expect(reads).toBe(0);
+
+    // And the counter is wired, which a zero on its own does not prove: with no
+    // assistant to start, the ring group path still needs the list and reads it.
+    delete process.env.TELNYX_ASSISTANT_ID;
+    const ringing = new FakeStore();
+    ringing.responders = [responder('r1', '+14155550001', 0)];
+    let ringReads = 0;
+    ringing.activeResponders = async () => {
+      ringReads += 1;
+      return ringing.responders;
+    };
+    await ringResponders(ringing, fakeCommands());
+    expect(ringReads).toBeGreaterThan(0);
+  });
+
   it(
     'issues record_start and ai_assistant_start together instead of one after the other',
     { timeout: 3000 },

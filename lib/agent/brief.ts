@@ -17,6 +17,23 @@
 
 export interface BriefProduct {
   name: string;
+  /**
+   * Where this sits when we lead. 1 is said first, 6 last. Mirrors `rank` in
+   * Akme's lib/catalog.ts, which is where Karim set the order on 2026-08-18.
+   * Anything that says more than one product says them in this order.
+   */
+  rank: number;
+  /**
+   * The name as a VOICE says it, which is not the name as a page prints it.
+   *
+   * `18" Stretch Film` handed to TTS is a number, a double-quote and two words,
+   * and the quote comes out as a stumble or as the word "inch" at random. Every
+   * name that starts with a numeral needs one of these. Same rule as
+   * SpokenForms below: a written form handed to a voice with no spoken form
+   * beside it is the bug that made 1234 come out "one thousand two hundred
+   * thirty four".
+   */
+  spokenName: string;
   /** What one ordering unit is called, e.g. "bundle". */
   unit: string;
   /** What is inside one of those units, in words a caller would use. */
@@ -24,6 +41,18 @@ export interface BriefProduct {
   /** Size and grade, written to be spoken aloud. */
   spec: string;
   perPallet: number;
+  /**
+   * The checkable facts, spoken. Mirrors `facts` in Akme's lib/catalog.ts and
+   * comes from the same supplier sheet, rewritten so a voice reads them
+   * cleanly: "one point eight mil", not "1.8 mil".
+   *
+   * These are here so the agent can answer a real buyer question ("how thick",
+   * "made where", "will it go on a machine") out of something true. They are
+   * NOT a script. The prompt caps a turn at three sentences, so the job is to
+   * pick the one or two facts that answer what was asked, never to recite the
+   * list. Reciting it is the blabbing this exists to replace.
+   */
+  facts: string[];
   /**
    * What callers actually say when they mean this product.
    *
@@ -34,9 +63,15 @@ export interface BriefProduct {
    * agent hears a word that is not in its list and says we do not carry it, which
    * is both wrong and a lost order.
    *
-   * "shrink wrap" is deliberately absent. Shrink film is heat-shrunk and is a
-   * different product from stretch film, so treating them as the same word would
-   * be the invented answer this list exists to prevent.
+   * "shrink wrap" USED TO BE deliberately absent, and it is now on both films.
+   * The old reasoning was right about the product and wrong about the customer.
+   * Shrink film really is heat-shrunk and really is a different thing, so we
+   * never call our stretch film shrink wrap ourselves. But half the moving
+   * trade says "shrink wrap" when it means stretch film, Karim included, and
+   * refusing to recognise the word did not teach anybody the difference: it
+   * answered "we do not carry that" to somebody holding a purchase order, which
+   * is the exact lost order this list exists to prevent. So it is matched here
+   * and answered with the correct word, which is what does the teaching.
    */
   alsoCalled: string[];
 }
@@ -137,54 +172,120 @@ export const BUSINESS: BusinessBrief = Object.freeze({
   // below is inferred from a standard pallet build and has not been checked
   // against the warehouse, so the agent hedges all six.
   palletCountsConfirmed: false,
+  // IN RANK ORDER, 18 inch film first and cushion wrap last. Karim set that on
+  // 2026-08-18 and it mirrors `rank` in Akme's lib/catalog.ts. Everything that
+  // maps this array inherits the order, which is the point: there is no second
+  // place to get it wrong.
   products: [
     {
-      name: 'Cushion Wrap',
-      unit: 'bundle',
-      contents: '2 rolls',
-      spec: '48 inches by half an inch by 250 feet, perforated every 12 inches',
-      perPallet: 8,
-      alsoCalled: ['bubble wrap', 'bubble'],
+      name: '18" Stretch Film',
+      rank: 1,
+      spokenName: 'eighteen inch stretch film',
+      unit: 'case',
+      contents: '4 rolls',
+      spec: 'eighteen inches by 80 gauge by 1500 feet',
+      perPallet: 36,
+      // "for machines" WAS IN THE SPOKEN LIST AND IT WAS WRONG. The supplier
+      // sheet calls this "a general-purpose hand-applied stretch film ...
+      // well-suited for both experienced operators and new users". A caller
+      // without a wrapping machine was being told, out loud, that our lead
+      // product was not for them.
+      facts: [
+        'made in the USA with US and globally sourced materials',
+        'four rolls to the case, about 33 pounds',
+        'hand-applied, so no machine is needed',
+        'high stretch, strong cling, good puncture resistance',
+        'holds an irregular load shape as well as a square one',
+        'easy enough for a new operator',
+      ],
+      alsoCalled: ['shrink wrap', 'stretch wrap', 'pallet wrap', 'eighteen inch', 'big roll', 'machine wrap'],
     },
     {
-      name: 'Newsprint Sheets',
+      name: '5" Hand Wrap Film',
+      rank: 2,
+      spokenName: 'five inch hand wrap film',
+      unit: 'case',
+      contents: '12 rolls',
+      spec: 'five inches by 80 gauge by 1000 feet, clear',
+      perPallet: 48,
+      facts: [
+        'twelve rolls to the case, about 14 pounds',
+        'a reusable plastic handle comes in the case',
+        'clear, so labels and barcodes stay readable through it',
+        'clings to itself, so it holds without tape',
+        'good for banding furniture, bundling, and strapping a door shut',
+        'keeps dust, dirt and moisture off',
+      ],
+      alsoCalled: ['hand wrap', 'shrink wrap', 'stretch wrap', 'five inch', 'small roll', 'banding film'],
+    },
+    {
+      name: 'Tan Hot Melt Tape',
+      rank: 3,
+      spokenName: 'tan hot melt tape',
+      unit: 'case',
+      contents: '36 rolls',
+      spec: 'two inches by 55 yards, tan hot melt',
+      perPallet: 48,
+      facts: [
+        'made in the USA with US and globally sourced materials',
+        'thirty six rolls to the case',
+        'premium hot melt adhesive, it grabs cardboard, plastic and metal hard',
+        'the one to use when a box sits in storage a long time',
+        'standard three inch core, it fits most two inch hand dispensers',
+      ],
+      alsoCalled: ['tan tape', 'hot melt', 'brown tape', 'packing tape'],
+    },
+    {
+      name: 'Clear Carton Sealing Tape',
+      rank: 4,
+      spokenName: 'clear carton sealing tape',
+      unit: 'case',
+      contents: '36 rolls',
+      spec: '48 millimeters by 110 yards, one point eight mil, clear acrylic',
+      perPallet: 40,
+      facts: [
+        'thirty six rolls to the case',
+        'one point eight mil thick, which balances flex against durability',
+        'a hundred and forty five percent elongation, so it takes a range of carton sizes',
+        'packed in flat bundles of six rolls',
+        'runs on hand dispensers and on automated taping machines',
+        'clear, so a label or a logo stays visible through the seal',
+      ],
+      alsoCalled: ['clear tape', 'box tape', 'packing tape', 'cardboard tape'],
+    },
+    {
+      name: 'Newsprint Packing Paper',
+      rank: 5,
+      spokenName: 'newsprint packing paper',
       unit: 'bundle',
       contents: '30 pounds of sheets',
       spec: '27 by 30 inches, 30 pound, clean unprinted',
       perPallet: 40,
-      alsoCalled: ['packing paper', 'newsprint', 'paper'],
+      facts: [
+        'about five hundred and thirty four sheets in a bundle',
+        'a hundred percent recycled newsprint, clean and unprinted, so it leaves no ink',
+        'heavy thirty pound paper, which is what makes it good void fill',
+        'good for dishes, glass and stemware',
+        'made in the USA',
+      ],
+      alsoCalled: ['packing paper', 'newsprint', 'paper', 'wrapping paper', 'void fill'],
     },
     {
-      name: 'Hand Wrap Film',
-      unit: 'case',
-      contents: '12 rolls',
-      spec: '5 inches by 80 gauge by 1000 feet, clear',
-      perPallet: 48,
-      alsoCalled: ['stretch film', 'stretch wrap', 'hand wrap'],
-    },
-    {
-      name: 'Machine Wrap Film',
-      unit: 'case',
-      contents: '4 rolls',
-      spec: '18 inches by 80 gauge by 1500 feet',
-      perPallet: 36,
-      alsoCalled: ['stretch film', 'machine wrap', 'pallet wrap'],
-    },
-    {
-      name: 'Carton Sealing Tape',
-      unit: 'case',
-      contents: '36 rolls',
-      spec: '48 millimeters by 110 yards, 1.8 mil, clear acrylic',
-      perPallet: 40,
-      alsoCalled: ['packing tape', 'box tape', 'cardboard tape', 'clear tape'],
-    },
-    {
-      name: 'Hot Melt Tape',
-      unit: 'case',
-      contents: '36 rolls',
-      spec: '2 inches by 55 yards, tan hot melt',
-      perPallet: 48,
-      alsoCalled: ['hot melt', 'tan tape'],
+      name: 'Bubble Cushion Wrap',
+      rank: 6,
+      spokenName: 'bubble cushion wrap',
+      unit: 'bundle',
+      contents: '2 rolls',
+      spec: '48 inches by half an inch by 250 feet, perforated every 12 inches',
+      perPallet: 8,
+      facts: [
+        'two rolls to the bundle, each one 24 inches wide',
+        '250 feet on a roll, on a three inch core',
+        'half inch bubble, which is the size that absorbs a real knock',
+        'perforated every twelve inches, so it tears to length without a blade',
+        'it only comes in full bundles',
+      ],
+      alsoCalled: ['bubble wrap', 'bubble', 'cushion wrap', 'bubbles'],
     },
   ],
 });
@@ -219,8 +320,20 @@ export const BUSINESS: BusinessBrief = Object.freeze({
  * three sentences END TO END including both, so this is his shape, not a
  * compromise on it.
  */
+/**
+ * REWRITTEN 2026-08-18, and one clause of it was a factual error rather than a
+ * style problem. It said "eighteen inch for machines". The supplier sheet calls
+ * the eighteen inch "a general-purpose HAND-APPLIED stretch film ...
+ * well-suited for both experienced operators and new users", so every caller
+ * without a wrapping machine was told out loud that our lead product was not
+ * for them. That is the exact failure the facts arrays above now exist to stop:
+ * a plausible sentence nobody checked against the sheet.
+ *
+ * It now also LEADS WITH THE EIGHTEEN INCH, which is Karim's order of
+ * 2026-08-18 and a commercial decision, not a wording preference.
+ */
 export const SPOKEN_LIST =
-  'We stock two plastic wraps, five inch for hand wrapping and eighteen inch for machines. Then carton sealing and hot melt tape, plus cushion wrap and paper.';
+  'We stock two stretch films, eighteen inch and five inch, and both go on by hand. Then tan hot melt tape, clear carton sealing tape, paper, and cushion wrap.';
 
 /**
  * The half of an answer that was missing from every call.
@@ -246,7 +359,20 @@ export const BRIDGE = 'Do any of those sound like what you need?';
  * transcript feeds the summary, so the error surfaces in every card a human reads.
  */
 export function keyterms(): string[] {
-  return ['Akme', 'Akme USA', 'will call', ...BUSINESS.products.map((p) => p.name)];
+  // Boost what a caller SAYS, not only what the catalogue prints. `18" Stretch
+  // Film` is not a thing anybody utters, so boosting it alone spent the list on
+  // a string the STT can never match, while "shrink wrap" and "hot melt", which
+  // callers say constantly and which the models do get wrong, went unboosted.
+  //
+  // The catalogue name still goes in, and that is not redundancy. Akme's
+  // scripts/parity-check.ts asserts this list names every product, which is the
+  // guard that stops a seventh SKU being added to the catalogue and silently
+  // never boosted. Dropping the names to make room for the spoken forms would
+  // have traded a real guarantee for space this list does not lack. So: all
+  // three forms, deduped, because several products share "packing tape" and
+  // "stretch wrap".
+  const forms = BUSINESS.products.flatMap((p) => [p.name, p.spokenName, ...p.alsoCalled]);
+  return [...new Set(['Akme', 'Akme USA', 'will call', ...forms])];
 }
 
 /**
@@ -322,16 +448,39 @@ export const OPENER = `Hi, you've reached ${BUSINESS.spoken.name}. This is Robin
 export const GREETING = 'How can I help you today?';
 
 export function systemPrompt(): string {
-  const specs = BUSINESS.products
-    .map(
-      (p) =>
-        `- ${p.name}: ordered by the ${p.unit}, one ${p.unit} holds ${p.contents}. ${p.spec}. Roughly ${p.perPallet} ${p.unit}s per pallet.`,
-    )
-    .join('\n');
+  // The array is already in rank order, so first and last ARE ranks 1 and 6. Both
+  // are named in prose further down (lead with the eighteen inch, bubble wrap
+  // means the cushion wrap) and writing either name out by hand is how the prompt
+  // drifts from the data the day a product is renamed. A test pins the ordering.
+  const lead = BUSINESS.products[0];
+  const cushion = BUSINESS.products[BUSINESS.products.length - 1];
 
-  const aliases = BUSINESS.products
-    .map((p) => `- "${p.alsoCalled.join('", "')}" all mean ${p.name}.`)
-    .join('\n');
+  // ONE BLOCK PER PRODUCT, NUMBERED, REPLACING THE OLD TWO-LIST SHAPE.
+  //
+  // It used to be a spec line per product in one section and an alias line per
+  // product in another, and the facts did not exist at all. That shape could
+  // answer "how big is it" and nothing else, so every real buyer question ("how
+  // thick", "made where", "will it go on by hand") was answered by the model
+  // making something up that sounded right. The facts arrays came off the
+  // supplier sheet on 2026-08-18 to stop exactly that.
+  //
+  // The number in front is the rank, and it is here because a numbered list is
+  // the only ordering instruction a model reliably keeps. Everything that says
+  // more than one product says them in this order.
+  //
+  // Spoken name FIRST on every block. The written name carries an inch mark and
+  // starts with a numeral, which is the pronunciation bug in its purest form, so
+  // the said form has to sit where the model cannot miss it.
+  const catalogue = BUSINESS.products
+    .map((p) =>
+      [
+        `${p.rank}. ${p.name}. You SAY this "${p.spokenName}".`,
+        `   Ordered by the ${p.unit}. One ${p.unit} holds ${p.contents}. ${p.spec}. Roughly ${p.perPallet} ${p.unit}s per pallet.`,
+        `   True of it: ${p.facts.join('; ')}.`,
+        `   Callers call it: "${p.alsoCalled.join('", "')}".`,
+      ].join('\n'),
+    )
+    .join('\n\n');
 
   return `WHO YOU ARE
 You are Robin. You answer the phone for ${BUSINESS.name}, a packing and moving supply company in Springfield. We sell packing materials to movers, warehouses and businesses: wrap, film and tape, by the case, the bundle and the pallet. You are an automated assistant, you work here, and you are good at this.
@@ -353,7 +502,7 @@ The one exception is the caller who asks who you are, which is covered below. Be
 NEVER END A TURN FLAT
 Answer, then move the call one step. A turn that answers the question and stops is how this line loses people who were ready to buy.
 So end your turn with EITHER a short question that moves them toward a quote, or an offer to do something for them right now. One or the other, every turn, until they are routed.
-Right: "${BRIDGE}" / "Want me to text you the list?" / "Are you wrapping by hand or on a machine?" / "Shall I put you through to someone on our team?"
+Right: "${BRIDGE}" / "Want me to text you the list?" / "Eighteen inch or five inch?" / "Shall I put you through to someone on our team?"
 THIS IS NOT THE SAME AS TAKING AN ORDER, and the difference is the whole reason the bans further down exist. An advancing question asks what they need or offers them a route. An order-taking question asks what else to add, how many, or what size, as though you were writing it down. Never "what else can I get you", never "anything else", never "how many cases".
 Once they ARE routed, the text has gone out or they have taken the website, you are done advancing. Stop asking. Confirm it is on the way and let them go.
 Two exceptions, and only two: a caller who has just been handed to a person needs nothing more from you, and a caller who says they are done is done.
@@ -404,7 +553,7 @@ Never answer that question with just a name. A caller asking who this is has dec
 WHAT WE STOCK, WHEN SOMEONE ASKS WHAT WE STOCK
 Lead with a yes, say the list, then ask the bridge question. All three, in one turn:
 "Yeah, definitely. ${SPOKEN_LIST} ${BRIDGE}"
-The two widths, five inch and eighteen inch, are how the trade names those two films and they belong in the list. They are the ONLY measurements allowed here. No gauges, no roll counts, no lengths, no weights, no prices: that is the spec recital, it belongs to the next section, and it comes only when someone asks.
+The two widths, eighteen inch and five inch, are how the trade names those two films and they belong in the list. Eighteen first, the way the numbered list below has them. They are the ONLY measurements allowed here. No gauges, no roll counts, no lengths, no weights, no prices: that is the spec recital, it belongs to the next section, and it comes only when someone asks.
 If they only care about one kind, name just that kind, two tapes or two films, and still ask the bridge question.
 Never say the list and stop. The list on its own gives a caller nothing to do next, and they will thank you and hang up.
 SAY THE LIST OUT LOUD. NEVER REPLACE IT WITH AN OFFER TO TEXT IT. Somebody who asks what we stock has asked to be TOLD, and "I can text you the list" instead of an answer is a refusal wearing a helpful face. Karim, off a real call: he asked what we offer, got the pricing routes, asked again with "could you tell me what you guys offer possibly by the phone", and was offered a text a second time. He never heard the list. A text is something you send AS WELL, after they have heard it, never instead of hearing it.
@@ -412,18 +561,30 @@ IF THEY ASK WHAT WE STOCK AND WHAT IT COSTS IN ONE BREATH, THE LIST COMES FIRST.
 We do not sell boxes, tape guns, dollies, or blankets. If a caller asks for one, say we do not carry it, name the closest thing we do stock, and offer to put them through to someone who can talk about the rest.
 
 THE DETAIL, ONLY WHEN THEY ASK FOR IT
-${specs}
+Six products. The number in front of each is the order you say them in. Everything under a product is checked and true, and it is the only product detail you have.
+${catalogue}
 Answer about the ONE product they asked about, then stop. Never recite this list, never volunteer a measurement nobody asked for, and never read specs while listing what we stock.
+THE "TRUE OF IT" LINE IS A SHELF, NOT A SCRIPT. Take the one or two things off it that answer what was actually asked, and leave the rest. "How thick is that tape" is answered by "one point eight mil" and nothing else. A caller who hears five facts asked for one and got a brochure, and the three sentence cap is gone before you have asked them anything.
 If they ask what we stock and a specific detail in one breath, give the list first, then that one detail.
 If the detail they want is not written above, you do not have it. Say what you do have and offer to have someone confirm the rest.
 
+SAY THE SPOKEN NAME, AND READ EVERY NUMBER EXACTLY AS IT IS WRITTEN ABOVE
+Each product has a written name and a said name, and you only ever say the said one. ${lead.name} is how it is written down. "${lead.spokenName}" is how it comes out of your mouth. Never read an inch mark, a quote mark or a slash aloud.
+EVERY MEASUREMENT ABOVE IS ALREADY WRITTEN THE WAY IT IS SAID, so read it exactly as it stands and change nothing. "one point eight mil" stays "one point eight mil" and never becomes "1.8". "eighteen inches by 80 gauge by 1500 feet" is said straight through in those words. Do not convert, do not round, do not tidy a number into digits and do not work out a second number from it.
+THE NUMBER IN FRONT OF A PRODUCT IS NOT PART OF ITS NAME. It tells you what order to say things in and the caller never hears it. Never say "number one" or "our first product".
+Say a time in words: "eight to four", never "08:00" and never "0800 hours". Our hours are written ${BUSINESS.hours} and said "Monday to Friday, eight to four".
+
+LEAD WITH THE EIGHTEEN INCH
+Whenever more than one product is in play, the ${lead.spokenName} goes first. It is number 1 above, the numbering is a decision this company has made about what to sell first, and it holds every time you name more than one thing.
+THE EIGHTEEN INCH GOES ON BY HAND, AND SO DOES THE FIVE INCH. Neither film needs a wrapping machine. This line used to say the eighteen inch was for machines, which told every caller without one that our lead product was not for them, and it was simply not true of the product. Never say it needs a machine, never call it machine wrap, and never ask a caller whether they have a machine in order to decide which film to offer. If they ask outright whether it will run on a machine, say it is hand-applied and offer to have someone confirm the rest.
+
 WHAT CALLERS CALL THESE THINGS
-${aliases}
-Treat those words as the product. A caller asking for bubble wrap is asking for Cushion Wrap: say we have it, call it by our name once, and answer their question. Never tell someone we do not carry something because they used their word for it instead of ours.
+The "callers call it" line under each product is what people actually say. Treat those words as the product. A caller asking for bubble wrap is asking for ${cushion.name}: say we have it, call it "${cushion.spokenName}" once, and answer their question. Never tell someone we do not carry something because they used their word for it instead of ours.
+"SHRINK WRAP" MEANS OUR STRETCH FILM. Callers say it constantly, and on this line it is the film we sell, not a different product. Take it as stretch film, answer it, and say "stretch film" back to them. Never repeat the words "shrink wrap" yourself, and never tell a caller we do not carry it.
 "DO YOU CARRY X" IS A YES OR NO QUESTION AND THE ANSWER IS ONE SENTENCE. Say yes, name it our way, and ask what moves them on. Do NOT follow it with the size, the roll count, the length or what is in a bundle: nobody asked, it doubles the length of your turn, and it buries the question you want them to answer. The specs are for the caller who asks for them, and they always ask.
-Right: "Yeah, we carry that, we call it cushion wrap. Want me to text you the list and how to get pricing?"
-Wrong: "Yes, we stock Cushion Wrap. It comes in bundles of two rolls, forty-eight inches by half an inch by two hundred fifty feet, perforated every twelve inches."
-"Stretch film" fits both films, so ask the one question that splits them: by hand, or on a machine.
+Right: "Yeah, we carry that, we call it ${cushion.spokenName}. Want me to text you the list and how to get pricing?"
+Wrong: "Yes, we stock ${cushion.name}. It comes in bundles of two rolls, forty-eight inches by half an inch by two hundred fifty feet, perforated every twelve inches."
+"Stretch film" fits both films and both go on by hand, so the question that splits them is the width and never the method: "eighteen inch or five inch?" If they have no preference, they get the eighteen inch.
 
 HOURS, DELIVERY AND WILL CALL
 ${BUSINESS.hours}. ${BUSINESS.fulfilment}

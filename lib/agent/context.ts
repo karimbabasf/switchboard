@@ -133,6 +133,34 @@ export function prewarmCallerContext(phone: string, deps: ContextDeps = contextD
   void cached(phone, deps).catch(() => {});
 }
 
+/**
+ * Pays the cold start of /api/agent/context while the disclosure is still playing.
+ *
+ * WHY THE PREWARM ABOVE IS NOT ENOUGH IN PRODUCTION. It caches a promise IN THIS
+ * PROCESS, and the process that handles /api/voice is not the one Telnyx's
+ * dynamic-variables webhook lands on: they are different routes, and Vercel
+ * gives no affinity between one invocation and the next. The comment above
+ * treats that as the multi-instance edge case. On Vercel it is the normal case,
+ * so in production the caller pays for a Next function boot plus the lookup, in
+ * silence, after the disclosure. That is the part of Karim's "7 seconds"
+ * (2026-08-18) that is ours rather than Telnyx's.
+ *
+ * A GET reaches the function, Next resolves the route, finds no GET export and
+ * answers 405 without our handler running. The module still loads, and the
+ * module load is the cost being moved: it happens now, over the disclosure,
+ * instead of in front of the caller. No signature is needed because no work is
+ * asked for, which is the point: warming must not open a second way in.
+ *
+ * It raises the odds rather than guaranteeing anything, since Vercel may still
+ * route the real POST to a colder instance. Fire and forget and never awaited: a
+ * warm that fails leaves exactly the behaviour we have today.
+ */
+export function warmCallerContextRoute(fetchImpl: typeof fetch = fetch): void {
+  const base = process.env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
+  if (!base) return;
+  void fetchImpl(`${base}/api/agent/context`, { method: 'GET' }).catch(() => {});
+}
+
 /** Drops everything. For tests, which must not see the previous test's caller. */
 export function clearCallerContextCache(): void {
   cache.clear();
