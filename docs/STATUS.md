@@ -81,8 +81,15 @@ Resolution order for an inbound text:
 
 Four questions now cost nothing to answer: what we stock, our hours, how to get
 a quote, and our contact details. Templates deliberately skip the guards that
-run over model output, because a human wrote and reviewed them and the money
-guard would otherwise block the word "quote" in the quote template itself.
+run over model output, because a human wrote and reviewed them and a guard
+written for a model has nothing to check in a string a person already read.
+(That last clause used to say the money guard would otherwise block the word
+"quote" in the quote template. The quote template no longer contains that word,
+rewritten 2026-08-19, so the example was wrong even though the reason holds.)
+
+Prices by text are Akme's, not this repo's. Karim reversed the no-prices rule on
+2026-08-14; see docs/BEHAVIOR.md. The `MONEY` guard here is unchanged and correct,
+because nothing in this repo can read a real figure.
 Everything is GSM-7 clean, so a text stays 160 characters per segment instead of
 silently dropping to 70.
 

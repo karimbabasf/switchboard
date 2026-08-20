@@ -38,7 +38,18 @@ four". They live together in `BUSINESS.spoken` so a new one cannot be forgotten.
 
 ### Never says, on either channel
 
-- **A price.** Not a range, not "around", not "cheaper than", not per unit. Ever.
+- **A price, when this repo is the one writing.** Not a range, not "around", not
+  "cheaper than", not per unit. The guard is `MONEY` in `lib/agent/sms.ts` and it
+  stays, because nothing in this repo can read a real number.
+
+  SUPERSEDED FOR THE DEAL ENGINE, Karim 2026-08-14. He named "no auto-quote from
+  a text" as defect #1. Akme's deal engine now states real prices by text off
+  QuickBooks, unattended, under a live ceiling (`crm_settings.quote_ceiling_cents`,
+  a configured amount). Akme decides, this repo transports. On 2026-08-19 he
+  extended it: a price question with no quantity gets the unit price and then one
+  question, which reverses his own 2026-08-11 rule that it must ask for the
+  quantity and never a number. So the line above is a rule about SWITCHBOARD, not
+  about the business.
 - **A discount**, or that one might exist.
 - **A delivery date or a time window.** We do not have that data and a date is a promise.
 - **Stock levels, lead times, minimums, returns, or payment terms.** Not in the facts, so not in the mouth.
@@ -114,6 +125,12 @@ finished. It is the channel a customer can be left alone with.
 1. **A quote request lands in the group, gets sent, and the thread stays open.**
    The customer asks, we card it, a human sends the quote, and the agent keeps
    answering questions about that quote afterwards.
+
+   SUPERSEDED, Karim 2026-08-14. A text naming products and quantities now gets a
+   real quote sent with no human tap, from Akme's deal engine, under the ceiling.
+   The human tap moved to the invoice: `askToInvoice` posts one card showing the
+   whole order and nothing bills until somebody taps it. This paragraph describes
+   what happens only when the desk declines and the older drafter answers.
 2. **A change to an order is proposed, never applied by the agent.** The customer
    says what they want changed, the agent reads it back to confirm it understood,
    cards the change to the group, and a human taps to apply it. Then the agent
