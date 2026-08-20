@@ -446,18 +446,18 @@ describe('draftSmsReply: the template layer runs before the model', () => {
     expect(d.reply).toBe('Someone will follow up shortly.');
   });
 
-  it('auto-sends the quote template although its own text says the word "quote"', async () => {
+  it('auto-sends the quote template although its own text says a word MONEY matches', async () => {
     // The deliberate bypass documented in lib/agent/templates.ts's header:
-    // MONEY (in lib/agent/sms.ts) matches "quote", and QUOTE_SMS says it on
-    // purpose. A human wrote and reviewed this string, so the guard has
-    // nothing to add here and would only block the correct answer. If a
-    // future edit routes template replies through the money/day guards "for
-    // safety", this test fails the moment QUOTE_SMS is drafted, instead of
-    // the regression shipping silently six months from now.
+    // MONEY (in lib/agent/sms.ts) matches "price", and the quote reply says
+    // "the team will price it" on purpose. A human wrote and reviewed this
+    // string, so the guard has nothing to add here and would only block the
+    // correct answer. If a future edit routes template replies through the
+    // money/day guards "for safety", this test fails the moment that reply is
+    // drafted, instead of the regression shipping silently six months from now.
     const complete = vi.fn(async () => ({ intent: 'other', reply: 'unused' }));
     const d = await draftSmsReply('how much for a pallet', { complete });
 
-    expect(d.reply.toLowerCase()).toContain('quote');
+    expect(d.reply.toLowerCase()).toContain('price');
     expect(d.intent).toBe('pricing'); // what lib/telnyx/sms.ts checks to log a quote request
     expect(d.autoSend).toBe(true);
     expect(complete).not.toHaveBeenCalled();

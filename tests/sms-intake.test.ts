@@ -42,18 +42,17 @@ describe('intake: one ask, not four', () => {
     // answer to "what is missing"; the ask takes the first of them and stops.
     expect(missingFields({})).toEqual(['items', 'name', 'email', 'fulfilment']);
     expect(ask).toBe(
-      `Happy to get that quote over. Let me know what you need and how many. Or build it at ${BUSINESS.site}.`,
+      `Send what you need and how many, and the team will price it. Or build it at ${BUSINESS.site}.`,
     );
-    expect(ask).not.toContain('the name it goes under');
-    expect(ask).not.toContain('the best email for the quote');
-    expect(ask).not.toMatch(/will call .* or delivery/i);
-    expect(ask.match(/\?/g) ?? []).toHaveLength(0);
+    expect(ask).not.toMatch(/what name does it go under/i);
+    expect(ask).not.toMatch(/best email/i);
+    expect(ask).not.toMatch(/will call/i);
   });
 
   it('asks for one thing when one thing is missing, and names nothing else', () => {
     const ask = intakeAsk({ ...COMPLETE, name: null });
     expect(missingFields({ ...COMPLETE, name: null })).toEqual(['name']);
-    expect(ask).toContain('the name it goes under');
+    expect(ask).toBe('We have the items. What name does it go under?');
     // The failure in the other direction, and it is the same failure: a
     // template that always asks for four things asks a customer who gave us
     // three of them for all three again.
@@ -64,9 +63,7 @@ describe('intake: one ask, not four', () => {
 
   it('asks for nothing at all when the record and the message cover it', () => {
     expect(missingFields(COMPLETE)).toEqual([]);
-    expect(intakeAsk(COMPLETE)).toBe(
-      'Happy to get that quote over. Someone from the team will send pricing shortly.',
-    );
+    expect(intakeAsk(COMPLETE)).toBe('The team has it and will send pricing.');
   });
 
   it('never asks for a phone number, because they texted us', () => {
@@ -74,42 +71,53 @@ describe('intake: one ask, not four', () => {
   });
 
   it('carries the will call address only when the choice is the thing left', () => {
-    // The clause still saves a round trip for whoever gets it: somebody picking
-    // will call does not then have to ask where we are. What changed is who
-    // gets it. A first contact who asked a price is told nothing about our
-    // address, which is failure 3 of the 2026-08-19 transcript.
+    // It still saves a round trip for whoever gets it: somebody picking will
+    // call does not then have to ask where we are. What changed is who gets it.
+    // A first contact who asked a price is told nothing about our address,
+    // which is failure 3 of the 2026-08-19 transcript.
     expect(missingFields({ ...COMPLETE, fulfilment: null })).toEqual(['fulfilment']);
     expect(intakeAsk({ ...COMPLETE, fulfilment: null })).toContain(BUSINESS.willCallAddress);
     expect(intakeAsk({})).not.toContain(BUSINESS.willCallAddress);
   });
 
   it('asks for the address only once delivery is the chosen half', () => {
-    // While the choice is open the fulfilment clause already says "or delivery
-    // to your address", so a separate address clause in the same message is
-    // the serial ask compressed rather than removed.
+    // Will call needs no address, so until they have picked delivery there is
+    // nothing here to be short of.
     expect(missingFields({ ...COMPLETE, fulfilment: null })).not.toContain('address');
     expect(missingFields({ ...COMPLETE, fulfilment: 'delivery', address: null })).toEqual(['address']);
-    expect(intakeAsk({ ...COMPLETE, fulfilment: 'delivery', address: null })).toContain(
-      'the delivery address with the city and ZIP',
+    expect(intakeAsk({ ...COMPLETE, fulfilment: 'delivery', address: null })).toBe(
+      'For delivery we need the address, with the city and ZIP.',
     );
     // Will call needs no address at all, which is the whole reason the choice
     // is asked before it.
     expect(missingFields({ ...COMPLETE, fulfilment: 'will_call', address: null })).toEqual([]);
   });
 
-  it('never opens with a name, the company name, or a greeting', () => {
-    const opener = intakeAsk({ ...COMPLETE, name: null }).split(' ').slice(0, 3).join(' ');
-    expect(opener).toBe('Happy to get');
-    expect(intakeAsk({})).not.toMatch(/^(hi|hey|hello|dear)\b/i);
+  it('never opens with a greeting, a name, the company name, or a yes-word', () => {
+    // Karim, 2026-08-19: strictly professional, not expressive. The yes is the
+    // fact, not a word in front of it. "Happy to get that quote over" opened
+    // every one of these replies until then, and it is the thing being removed.
+    for (const known of [
+      {},
+      { product: 'tape' },
+      { ...COMPLETE, name: null },
+      { ...COMPLETE, fulfilment: null },
+      { ...COMPLETE, fulfilment: 'delivery' as const, address: null },
+      COMPLETE,
+    ]) {
+      const ask = intakeAsk(known);
+      expect(ask).not.toMatch(/^(hi|hey|hello|dear)\b/i);
+      expect(ask).not.toMatch(/^(happy|glad|sure|of course|yeah|yep|absolutely|great|no problem)\b/i);
+      expect(ask).not.toContain(BUSINESS.name);
+      expect(ask).not.toContain(String(COMPLETE.name));
+    }
   });
 
   it('stays GSM-7 clean and inside two segments at its longest', () => {
     const longest = intakeAsk({});
     expect(nonGsm7(longest)).toEqual([]);
-    // 153 usable characters per segment on a concatenated message. Two is the
-    // budget for the full ask: it is replacing four round trips, so it is
-    // allowed to be longer than one, and not longer than that.
-    expect(Math.ceil(longest.length / 153)).toBeLessThanOrEqual(2);
+    // One ask fits one segment. It was two while it asked for four things.
+    expect(longest.length).toBeLessThanOrEqual(160);
   });
 
   it('promises no price and no date of its own', () => {
@@ -178,14 +186,14 @@ describe('intake: the quote template is the ask', () => {
     expect(d.autoSend).toBe(true);
     // They said tape. Asking what they need is re-asking the question they just
     // answered, so the one ask is the count.
-    expect(d.reply).toBe('Happy to get that quote over. Let me know how many you need.');
-    expect(d.reply).not.toContain('the name it goes under');
+    expect(d.reply).toBe('We stock it. How many do you need?');
+    expect(d.reply).not.toMatch(/what name does it go under/i);
   });
 
   it('skips the name when the contact row already has one', async () => {
     const d = await draftSmsReply('what do you charge for tape', neverCalled(), { name: 'Harbor Movers' });
-    expect(d.reply).not.toContain('the name it goes under');
-    expect(d.reply).toContain('how many you need');
+    expect(d.reply).not.toMatch(/what name does it go under/i);
+    expect(d.reply).toContain('How many do you need?');
   });
 
   it('skips everything the one message already answered', async () => {
@@ -196,7 +204,7 @@ describe('intake: the quote template is the ask', () => {
     );
     // Items, email, address and the fulfilment choice all came in that text and
     // the name was on file, so there is nothing left to ask.
-    expect(d.reply).toBe('Happy to get that quote over. Someone from the team will send pricing shortly.');
+    expect(d.reply).toBe('The team has it and will send pricing.');
     expect(d.autoSend).toBe(true);
   });
 

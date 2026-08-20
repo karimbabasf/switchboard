@@ -79,26 +79,42 @@ export interface KnownCustomer {
 export type IntakeField = 'items' | 'quantity' | 'name' | 'email' | 'fulfilment' | 'address';
 
 /**
- * The one clause each missing field turns into.
+ * The whole reply for each missing field. Not a clause any more: exactly one of
+ * these is ever sent, so each one is written to stand on its own.
  *
- * Written to follow "Let me know", because exactly one of them is ever used and
- * a bare question ("what is the name") reads as an interrogation on its own.
+ * THE TONE IS SET AND IT IS NOT TASTE. Karim, 2026-08-19: strictly
+ * professional, not expressive. No "happy to", no "of course", no "yeah
+ * definitely". THE YES IS THE FACT, NOT A WORD IN FRONT OF IT. Karim,
+ * 2026-08-15, is the other half: never open on a policy, a limitation, or the
+ * word "quote" used as a hedge, because it reads as a wall. So each line leads
+ * with what we know, and asks second.
+ *
+ * Deleting a yes-word without writing the replacement is how the agent started
+ * leading with what it could not do, which is Karim's own warning about this
+ * edit. Every line below leads with something true instead.
  */
 const ASK: Readonly<Record<IntakeField, string>> = Object.freeze({
-  items: 'what you need and how many',
+  // Nothing was named, so there is no fact to lead with and the ask is the
+  // whole reply. The site belongs here and nowhere else: it is an alternative
+  // to telling us what they want, which is the thing missing.
+  items: `Send what you need and how many, and the team will price it. Or build it at ${BUSINESS.site}.`,
   // Used instead of `items` when the message already named a product. Asking
   // what they need after they have said "stretch film" is the failure this
-  // file was rewritten for, in miniature.
-  quantity: 'how many you need',
-  name: 'the name it goes under',
-  email: 'the best email for the quote',
+  // file was rewritten for, in miniature. NAMES_A_PRODUCT only matches words
+  // out of our own catalogue, so "we stock it" is checkable rather than a
+  // pleasantry, and it is the yes they asked for.
+  quantity: 'We stock it. How many do you need?',
+  // Only reachable once the items are known, which is what the first sentence
+  // states. It is the receipt a customer is owed before another question.
+  name: 'We have the items. What name does it go under?',
+  email: 'We have the items. What is the best email for it?',
   // Carries the will call address rather than only the word "will call", so
   // somebody choosing it does not have to send a second text asking where we
-  // are. That address is a standing fact and costs 30 characters.
-  fulfilment: `whether you want will call at ${BUSINESS.willCallAddress} or delivery to your address`,
+  // are. Same opening words as FULFILMENT_CHOICE_SMS below, on purpose.
+  fulfilment: `Will call or delivery? Will call is ${BUSINESS.willCallAddress}.`,
   // Only reachable when they have already SAID delivery and given no address,
   // hence naming the parts: a bare city or a ZIP does not invoice.
-  address: 'the delivery address with the city and ZIP',
+  address: 'For delivery we need the address, with the city and ZIP.',
 });
 
 /**
@@ -123,7 +139,7 @@ export function missingFields(known: KnownCustomer): IntakeField[] {
 }
 
 /**
- * The reply to a pricing question: one line of acknowledgement, then one ask.
+ * The reply to a pricing question. One fact, then one ask, and nothing else.
  *
  * The ask is `missing[0]`, which FIELD_ORDER has already put in the order that
  * unblocks the next step. Everything after it is deliberately unsaid. It is not
@@ -131,25 +147,14 @@ export function missingFields(known: KnownCustomer): IntakeField[] {
  * they are what actually blocks the invoice.
  *
  * Never opens with a name, Karim's standing rule, and never opens with the
- * company name either.
+ * company name, a greeting, or a yes-word either.
  */
 export function intakeAsk(known: KnownCustomer): string {
   const missing = missingFields(known);
-  if (missing.length === 0) {
-    // Nothing to ask and nothing to promise. Pricing is a human's, so this
-    // says a person is coming and stops.
-    return 'Happy to get that quote over. Someone from the team will send pricing shortly.';
-  }
-  const asking = missing[0];
-  return [
-    'Happy to get that quote over.',
-    `Let me know ${ASK[asking]}.`,
-    // The site is an alternative to telling us WHAT THEY WANT, and nothing
-    // else. Offered to somebody who has already named a product and only owes
-    // us a count, it reads as "go and start again", which is worse than the
-    // round trip it saves.
-    ...(asking === 'items' ? [`Or build it at ${BUSINESS.site}.`] : []),
-  ].join(' ');
+  // Nothing left to ask. lib/telnyx/sms.ts writes the quote_requests row before
+  // this reply goes out, so "the team has it" is a fact and not a comfort.
+  if (missing.length === 0) return 'The team has it and will send pricing.';
+  return ASK[missing[0]];
 }
 
 /**

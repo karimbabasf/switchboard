@@ -60,16 +60,29 @@ describe('the 2026-08-19 transcript: message 1, a price question', () => {
 
     expect(d.intent).toBe('pricing');
     expect(d.autoSend).toBe(true);
-    // They said stretch film. The only thing that blocks a quote is the count.
-    expect(d.reply).toBe('Happy to get that quote over. Let me know how many you need.');
+    // They said stretch film. The only thing that blocks a quote is the count,
+    // and the yes they asked for is the fact that we stock it.
+    expect(d.reply).toBe('We stock it. How many do you need?');
+  });
+
+  it('leads with the fact, not with a word in front of it', async () => {
+    // Karim, 2026-08-19: strictly professional, not expressive. The yes is the
+    // fact, not a word in front of it. This reply opened "Happy to get that
+    // quote over" until then, which is a yes-word AND the word quote used as a
+    // hedge, which he ruled out separately on 2026-08-15.
+    const d = await draftSmsReply(INBOUND, neverCalled());
+
+    expect(d.reply).not.toMatch(/^(happy|glad|sure|of course|yeah|yep|absolutely|great|no problem)\b/i);
+    expect(d.reply).not.toMatch(/^(hi|hey|hello|dear)\b/i);
+    expect(d.reply.split('.')[0]).toBe('We stock it');
   });
 
   it('names none of the three fields that block the invoice rather than the quote', async () => {
     const d = await draftSmsReply(INBOUND, neverCalled());
 
-    expect(d.reply).not.toContain('the name it goes under');
-    expect(d.reply).not.toContain('the best email for the quote');
-    expect(d.reply).not.toMatch(/delivery to your address/i);
+    expect(d.reply).not.toMatch(/what name does it go under/i);
+    expect(d.reply).not.toMatch(/best email/i);
+    expect(d.reply).not.toMatch(/will call or delivery/i);
   });
 
   it('does not read our own address out to somebody who asked a price', async () => {
@@ -135,6 +148,21 @@ describe('the 2026-08-19 transcript: message 2, do you not have me on file', () 
     await draftSmsReply(INBOUND, c.deps);
 
     expect(c.system()).toMatch(/never read the company name, the will/i);
+  });
+
+  it('never auto-sends a bare acknowledgement, whatever the model wrote', async () => {
+    // The fix is to the auto-send rule, not to the wording. `acknowledge` came
+    // off AUTO_SEND on 2026-08-19 for the reason `order_status` came off on
+    // 2026-08-03: it is a claim about one customer's record, and no guard in
+    // this file can check one. "Yes we do" holds no money, no date and no
+    // figure, so every guard passed it and it went out unread.
+    const d = await draftSmsReply(INBOUND, {
+      complete: async () => ({ intent: 'acknowledge', reply: 'Yes we do' }),
+    });
+
+    expect(d.reply).toBe('Yes we do'); // the draft still exists, as a card to tap
+    expect(d.autoSend).toBe(false);
+    expect(d.reason).toMatch(/acknowledge/);
   });
 
   it("keeps the customer's own words out of the system turn", async () => {

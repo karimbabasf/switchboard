@@ -61,13 +61,12 @@ export type SmsIntent = (typeof SMS_INTENTS)[number];
  * The only intents that go out unread by a human.
  *
  * Every one of them is a statement of standing fact that is already public on
- * the website, or an acknowledgement that promises nothing. Everything else,
- * including anything the model could not classify, waits for a tap.
+ * the website. Everything else, including anything the model could not
+ * classify, waits for a tap.
  */
 const AUTO_SEND: ReadonlySet<SmsIntent> = new Set<SmsIntent>([
   'hours',
   'products',
-  'acknowledge',
   // Required by the carriers on a registered campaign. A HELP that waits for a
   // human to tap Send is a HELP that did not happen.
   'help',
@@ -86,6 +85,26 @@ const AUTO_SEND: ReadonlySet<SmsIntent> = new Set<SmsIntent>([
  * Putting it back means giving this agent a real lookup first. Until then a
  * status question is a human, which is the honest answer rather than a
  * confident one.
+ */
+
+/**
+ * `acknowledge` came off the same list on 2026-08-19, for the same reason.
+ *
+ * "Do you not have me on file already?" was answered "Yes we do", unread by
+ * anybody. That is the order_status failure in different words: a claim about
+ * one customer's record, written by a model that had never been handed the
+ * record, and it cleared every guard below because two words hold no money, no
+ * date and no figure.
+ *
+ * It did more damage than a wrong answer, because it CLOSED the conversation.
+ * The customer read it as "they have my address", wrote "so send it to that
+ * address", and got our contact card back.
+ *
+ * A bare acknowledgement answers nothing, and an acknowledgement that does
+ * carry an answer is exactly the one worth a person's eyes. So it is a Telegram
+ * card with a Send button now, which is one tap rather than silence. The prompt
+ * carries the contact row as of the same day (`recordBlock` below), so the same
+ * question drafts a real answer; what changed is that a human sees it first.
  */
 
 /**
