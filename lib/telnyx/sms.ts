@@ -2,7 +2,7 @@ import { db } from '../db';
 import { env, assertE164, toE164 } from '../env';
 import { askAkmeDesk } from '../akme/desk';
 import { resolveTopic } from '../telegram/topics';
-import { deskDownCard, inboundSmsCard, orderChangeCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
+import { deskDownCard, deskSilentCard, inboundSmsCard, orderChangeCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
 import type { TextCardPayload } from '../telegram/cards';
 import { draftFallback, draftSmsReply, isCarrierKeyword, smsAgentDeps } from '../agent/sms';
 import { proposeChange } from '../agent/order-change';
@@ -317,11 +317,26 @@ async function replyWithAgent(
         return;
       }
 
-      // The desk took it and chose to say nothing. It has already posted whatever
-      // card it wanted a person to see, on Akme's own topic. Drafting a second
-      // answer here would talk straight over that card, which is the exact
-      // failure two brains in two repos produced before the door existed.
-      if (outcome.kind === 'silent') return;
+      // The desk took it and said nothing. That USED to be a design: an
+      // over-ceiling quote and an escalation both posted a card on Akme's side
+      // and stayed quiet on purpose. As of 2026-08-20 the deal engine always
+      // answers a customer who wrote in, so silence means a branch escaped
+      // without a holding line and the customer is sitting there.
+      //
+      // Still no draft. Two brains writing over each other is the failure the
+      // door exists to stop, and Akme has already posted its own card. This is
+      // an alarm, not a second answer.
+      if (outcome.kind === 'silent') {
+        console.error(`[desk] ${phone}: handled the message and returned no reply`);
+        await db()
+          .from('outbox')
+          .insert({
+            thread_id: threadId,
+            kind: 'text',
+            payload: deskSilentCard({ body: said }),
+          });
+        return;
+      }
 
       // Unknown, not "no". Akme claims a quote send BEFORE it returns the words,
       // so a door that never answered may have recorded a quote as sent. Drafting

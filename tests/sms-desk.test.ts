@@ -147,16 +147,23 @@ describe('an inbound text goes to Akme first', () => {
     });
   });
 
-  it('says nothing when the desk deliberately said nothing', async () => {
-    // An over-ceiling quote and an escalation both post a card on Akme's side
-    // and stay silent on purpose. A draft here would talk over that card.
+  it('never drafts over a desk that said nothing, but does raise it', async () => {
+    // Silence used to be a normal outcome here: an over-ceiling quote and an
+    // escalation both posted a card on Akme's side and said nothing to the
+    // customer. As of 2026-08-20 Akme always answers a customer who wrote in,
+    // so silence is now a DEFECT rather than a design, and a quiet `return`
+    // hides it. That is exactly how a real customer got over an hour of nothing
+    // on 2026-08-20 without anybody noticing.
+    //
+    // Still no draft: two brains writing over each other is the failure the
+    // door exists to stop. The card is the alarm, not a second answer.
     mockedDesk.mockResolvedValue({ kind: 'silent' });
-    queueFrom([]);
+    queueFrom([makeChain(ok(null))]); // outbox insert: the alarm card
 
     await smsEventDeps().reply(contact.phone, '200 cases of tape', 42, false, 'Jane Doe', 'msg-2');
 
-    expect(fromCalls()).toEqual([]);
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(fromCalls()).toContain('outbox');
   });
 
   it('falls back to the old drafter when the desk declines', async () => {

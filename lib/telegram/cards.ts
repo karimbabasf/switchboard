@@ -204,6 +204,36 @@ export function deskDownCard(input: DeskDownCardInput): TextCardPayload {
   };
 }
 
+export interface DeskSilentCardInput {
+  body: string;
+}
+
+/**
+ * Akme took the message and said nothing back to the customer.
+ *
+ * This used to be a normal outcome and a quiet `return`. As of 2026-08-20 the
+ * deal engine always answers a customer who wrote in, so silence is a defect:
+ * a branch that escalated without a holding line, or a reply that came back
+ * empty. A real customer sat in that hole for over an hour on 2026-08-20 and
+ * nothing anywhere said so.
+ *
+ * Carries NO draft and NO Send button, for the same reason deskDownCard does
+ * not: Akme has already posted whatever card it wanted a person to see, and a
+ * one-tap reply here would talk over it.
+ */
+export function deskSilentCard(input: DeskSilentCardInput): TextCardPayload {
+  return {
+    text: [
+      '⚠️ <b>The desk took this and said nothing</b>',
+      '',
+      'They wrote:',
+      escapeHtml(input.body),
+      '',
+      'Akme handled the message and returned no reply, which it should never do. The customer is waiting. Answer them here, then check why the engine went quiet.',
+    ].join('\n'),
+  };
+}
+
 export interface InboundSmsCardInput {
   body: string | null;
   media: MediaItem[];
