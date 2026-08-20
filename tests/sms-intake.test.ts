@@ -31,20 +31,22 @@ const COMPLETE: KnownCustomer = {
 };
 
 describe('intake: one ask, not four', () => {
-  // Karim, 2026-08-18: "properly gather the customers info from the first try.
-  // without being like whats the address, and then whats the name, whats the
-  // number." The old quote template asked for the items and nothing else, so
-  // the other three came one text at a time from a human afterwards.
+  // Karim, 2026-08-19, off a real transcript: a first contact asked what stretch
+  // film costs and got four requests joined by commas. The 2026-08-18 fix put
+  // four questions in one message; this one asks for the thing that blocks the
+  // next step and lets the rest travel with the quote.
 
-  it('asks for everything still needed in a single message', () => {
+  it('asks for one thing, and names none of the other three', () => {
     const ask = intakeAsk({});
+    // missingFields still reports everything we do not have. It is the honest
+    // answer to "what is missing"; the ask takes the first of them and stops.
     expect(missingFields({})).toEqual(['items', 'name', 'email', 'fulfilment']);
-    expect(ask).toContain('what you need and how many');
-    expect(ask).toContain('the name it goes under');
-    expect(ask).toContain('the best email for the quote');
-    expect(ask).toMatch(/will call .* or delivery/i);
-    // One message. Not four sentences of questions either: the clauses join
-    // into one "Let me know" list, which is what a person writes.
+    expect(ask).toBe(
+      `Happy to get that quote over. Let me know what you need and how many. Or build it at ${BUSINESS.site}.`,
+    );
+    expect(ask).not.toContain('the name it goes under');
+    expect(ask).not.toContain('the best email for the quote');
+    expect(ask).not.toMatch(/will call .* or delivery/i);
     expect(ask.match(/\?/g) ?? []).toHaveLength(0);
   });
 
@@ -71,8 +73,14 @@ describe('intake: one ask, not four', () => {
     expect(intakeAsk({})).not.toMatch(/phone|number to reach|best number/i);
   });
 
-  it('carries the will call address, so choosing pickup costs no second text', () => {
-    expect(intakeAsk({})).toContain(BUSINESS.willCallAddress);
+  it('carries the will call address only when the choice is the thing left', () => {
+    // The clause still saves a round trip for whoever gets it: somebody picking
+    // will call does not then have to ask where we are. What changed is who
+    // gets it. A first contact who asked a price is told nothing about our
+    // address, which is failure 3 of the 2026-08-19 transcript.
+    expect(missingFields({ ...COMPLETE, fulfilment: null })).toEqual(['fulfilment']);
+    expect(intakeAsk({ ...COMPLETE, fulfilment: null })).toContain(BUSINESS.willCallAddress);
+    expect(intakeAsk({})).not.toContain(BUSINESS.willCallAddress);
   });
 
   it('asks for the address only once delivery is the chosen half', () => {
@@ -164,18 +172,20 @@ describe('intake: what the message already answered is never asked again', () =>
 });
 
 describe('intake: the quote template is the ask', () => {
-  it('asks for everything when the record and the message hold nothing', async () => {
+  it('asks for the count alone when the message already named a product', async () => {
     const d = await draftSmsReply('what do you charge for tape', neverCalled());
     expect(d.intent).toBe('pricing');
     expect(d.autoSend).toBe(true);
-    expect(d.reply).toBe(renderTemplate('quote'));
-    expect(d.reply).toContain('the name it goes under');
+    // They said tape. Asking what they need is re-asking the question they just
+    // answered, so the one ask is the count.
+    expect(d.reply).toBe('Happy to get that quote over. Let me know how many you need.');
+    expect(d.reply).not.toContain('the name it goes under');
   });
 
   it('skips the name when the contact row already has one', async () => {
     const d = await draftSmsReply('what do you charge for tape', neverCalled(), { name: 'Harbor Movers' });
     expect(d.reply).not.toContain('the name it goes under');
-    expect(d.reply).toContain('what you need and how many');
+    expect(d.reply).toContain('how many you need');
   });
 
   it('skips everything the one message already answered', async () => {

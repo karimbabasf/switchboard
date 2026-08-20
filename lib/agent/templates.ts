@@ -66,16 +66,12 @@ const HOURS_SMS = `We are open ${BUSINESS.hours}. ${BUSINESS.fulfilment}`;
  * string. Every pricing question, on any channel, ends here: we do not quote in
  * the channel, we take the request into the one place a human prices it.
  *
- * IT USED TO BE FIXED AND IT ASKED FOR ONE THING. It read "Reply here with the
- * items and quantities you need", so a human then had to ask for the name, then
- * the address, then the email, one text at a time, which is exactly what Karim
- * said to stop doing on 2026-08-18. The items are one of four things a quote
- * needs and there is no reason to learn them one per round trip.
- *
- * So it is assembled instead: see lib/agent/intake.ts for what the four are and
- * where each one is read off Akme. A caller that knows nothing gets all four,
- * a caller that knows three gets a one-clause question, and nobody is asked for
- * something they have already given us.
+ * IT ASKED FOR FOUR THINGS AT ONCE until 2026-08-19, and a first contact who
+ * texted "how much is stretch film" got all four in one sentence. Karim read
+ * that transcript and called it a form. It is assembled from
+ * lib/agent/intake.ts, which now returns ONE ask: the thing that blocks the
+ * next step, and nothing about the rest. The name, the email and the address
+ * block the invoice rather than the quote, so they go out with the quote.
  */
 function quoteSms(known: KnownCustomer): string {
   return intakeAsk(known);
@@ -153,6 +149,37 @@ export function renderTemplate(key: TemplateKey, known: KnownCustomer = {}): str
 }
 
 /**
+ * The question has to be pointed at US.
+ *
+ * `address` WAS A BARE WORD IN THE CONTACT MATCHER and it cost a real
+ * conversation on 2026-08-19. A customer wrote "so send it to that address" and
+ * got our contact card back: our name, our will call address, our phone, our
+ * email and our hours, to somebody who had just told us where their order goes.
+ * That is failure 5 of the spec, a fact block that answers a question nobody
+ * asked, and it was a routing bug rather than a wording one.
+ *
+ * A bare "address" is almost always the CUSTOMER'S, stated or referred to. So
+ * every branch below needs a possessive, or a question form that can only be
+ * about us. "email address" went the same way: somebody typing their own is not
+ * asking for ours. What is left under-matches, which is this file's safe
+ * direction: a miss costs one completion, a wrong hit sends a confident answer
+ * to a question nobody asked.
+ */
+const ASKS_FOR_OUR_DETAILS = new RegExp(
+  [
+    // "where are you", "where are you located", "where r u"
+    String.raw`\bwhere\s+(?:are|r)\s+(?:you|u|ya|yall)\b`,
+    // "where is your warehouse", "where's your shop", "wheres your office"
+    String.raw`\bwhere(?:\s*'?s|\s+is)?\s+(?:your|ur|yr)\b`,
+    // "are you located in Springfield", "are you guys located near the freeway"
+    String.raw`\b(?:are|r)\s+(?:you|u)\b[^.?!]{0,25}\blocated\b`,
+    // The possessives, which is the whole fix in one line: ours, never theirs.
+    String.raw`\b(?:your|ur|yr)\s+(?:shop|store|yard|warehouse|office|street|mailing|business)?\s*(?:address|location|email(?:\s+address)?|phone(?:\s+number)?)\b`,
+  ].join('|'),
+  'i',
+);
+
+/**
  * Ordered most specific first. A text reading "what do you charge for tape"
  * is a pricing question that happens to name a product, so `quote` has to be
  * tested before `catalogue` or it answers the wrong question.
@@ -184,7 +211,7 @@ const MATCHERS: ReadonlyArray<{ key: TemplateKey; pattern: RegExp }> = [
   },
   {
     key: 'contact',
-    pattern: /\b(address|where are you|located|location|email address|your email|phone number)\b/i,
+    pattern: ASKS_FOR_OUR_DETAILS,
   },
 ];
 

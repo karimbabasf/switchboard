@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { draftSmsReply, unpublishedNumber, type SmsAgentDeps } from '../lib/agent/sms';
 import { BUSINESS } from '../lib/agent/brief';
+import { knownFor } from '../lib/agent/intake';
 import { matchTemplate, renderTemplate, nonGsm7 } from '../lib/agent/templates';
 import type { TemplateKey } from '../lib/agent/templates';
 
@@ -425,7 +426,10 @@ describe('draftSmsReply: the template layer runs before the model', () => {
     const complete = vi.fn(async () => ({ intent: 'other', reply: 'should never be seen' }));
     const d = await draftSmsReply(body, { complete });
 
-    expect(d.reply).toBe(renderTemplate(key));
+    // Rendered with what the agent itself read off the message, because the
+    // quote template is a function of that: "what do you charge for tape" names
+    // a product, so the ask is the count and not the whole question again.
+    expect(d.reply).toBe(renderTemplate(key, knownFor(body)));
     expect(d.autoSend).toBe(true);
     expect(d.reason).toBe(`template: ${key}`);
     expect(complete).not.toHaveBeenCalled(); // the credit-saving claim, proven, not assumed

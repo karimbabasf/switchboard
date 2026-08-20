@@ -348,7 +348,13 @@ async function replyWithAgent(
     // agent cannot see it.
     const draft = hasMedia
       ? draftFallback('the message has an attachment the agent cannot see')
-      : await draftSmsReply(body, smsAgentDeps());
+      // The contact row, handed over rather than left on the shelf. Without it
+      // the drafter asks a repeat customer for their own name, and the model is
+      // asked about our records while holding none of them, which on 2026-08-19
+      // produced "Yes we do" to "do you not have me on file already". Nothing
+      // else in this system writes display_name: it is null until a caller says
+      // their name out loud, so a value here is a name somebody gave us.
+      : await draftSmsReply(body, smsAgentDeps(), { name: displayName });
 
     // Record it, do not just decline to answer. Suppressing this one reply was
     // all that used to happen, so the next inbound text started clean and

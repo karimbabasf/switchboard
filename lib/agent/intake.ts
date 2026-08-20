@@ -1,43 +1,51 @@
 /**
- * Everything we still need from a customer, asked once.
+ * The one thing we still need from a customer, asked once.
  *
- * Karim, 2026-08-18, verbatim: "properly gather the customers info from the
- * first try. without being like whats the address, and then whats the name,
- * whats the number." Four texts to raise one quote is the thing being fixed,
- * and the fix is not a longer template. It is subtraction: work out what a
- * quote and an order genuinely need, take away what we already hold, and ask
- * for the remainder in one message.
+ * Karim, 2026-08-19, off a real transcript. Somebody asked what stretch film
+ * costs and got four requests joined by commas: what you need and how many, the
+ * name it goes under, the best email for the quote, and will call or delivery.
+ * That is a form, and a customer reads it as one. A price question got no price
+ * and four questions back.
  *
- * ASKING FOR FOUR THINGS EVERY TIME IS THE SAME BUG WEARING A DIFFERENT COAT.
- * A customer who gave us their address last week and is asking about tape
- * should be asked about tape. So the ask is assembled from `missingFields`, and
- * when one field is missing it is one clause long.
+ * THE RULE IS ONE ASK. At most one, and only when we cannot move without it.
+ * The thing we ask for is whatever unblocks the next step. Everything else
+ * rides along later, with the quote it is actually needed for.
  *
- * WHAT A QUOTE AND AN ORDER ACTUALLY NEED, read off Akme rather than guessed:
+ * IT USED TO BUNDLE and the reason is worth keeping, because it was half right.
+ * Karim, 2026-08-18: "properly gather the customers info from the first try.
+ * without being like whats the address, and then whats the name, whats the
+ * number." Four texts to raise one quote is a real failure. The fix taken then
+ * was to ask for all four at once, which turned four short questions into one
+ * long one and read worse. The fix now subtracts on the other axis: ask for the
+ * one thing that blocks the next step, and take the rest off the customer.
  *
- *   - the lines: `QuoteLine` in Akme lib/quote.ts is a product plus a count,
- *     and `decideQuote` in lib/ops/deal/quote.ts refuses the whole quote if one
- *     line has no count, so "what and how many" is the one thing with no
- *     fallback anywhere.
- *   - a name: `readIdentity` in lib/ops/deal/identity.ts lists exactly three
- *     askable fields, name, address and email, and a customer record cannot be
- *     created without a display name.
- *   - an address, but ONLY for delivery: `missingFrom` in lib/ops/deal/address.ts
- *     wants a street, a city and a ZIP, and it drives automated sales tax on the
- *     QuickBooks invoice. Will call needs none of it, which is why the
- *     fulfilment choice is asked before the address and not after.
- *   - an email: the written quote and the invoice have to reach somebody.
+ * WHAT BLOCKS WHAT, read off Akme rather than guessed:
+ *
+ *   - a product and a count BLOCK THE QUOTE. `QuoteLine` in Akme lib/quote.ts
+ *     is a product plus a count, and `decideQuote` in lib/ops/deal/quote.ts
+ *     refuses the whole quote if one line has no count. It is the one field
+ *     with no fallback anywhere, so it is what this file usually asks for.
+ *   - a name, an email and an address BLOCK THE INVOICE, not the quote.
+ *     `readIdentity` in lib/ops/deal/identity.ts lists those three as the
+ *     askable fields, and `missingFrom` in lib/ops/deal/address.ts wants a
+ *     street, a city and a ZIP to drive sales tax on the QuickBooks invoice.
+ *     All three are needed when money moves, which is after a price has gone
+ *     out. So they travel with the quote instead of standing in front of it.
+ *   - the fulfilment choice travels with the quote too, see
+ *     FULFILMENT_CHOICE_SMS below. It is asked here only when it is the last
+ *     thing outstanding.
  *
  * The phone is never asked for. They texted us.
  *
  * Akme's own rule for this is MAX_INFO_ASKS = 1 per deal, enforced with a
  * counter on the order row (identity.ts). Nothing here can count, because this
  * agent holds no order: it is reached from an inbound text and knows only what
- * the caller hands it. What stands in for the counter is that the ask fires on
- * a quote-shaped message only, and an answer to it ("Sam Carter, 4 cases of hot
- * melt, will call") matches no quote pattern, so it falls through to a human
- * instead of being asked again. A customer who asks a second pricing question
- * outright WILL be asked again, and the real counter belongs with the order.
+ * the caller hands it. One ask per reply is the version of that rule a
+ * stateless function can keep.
+ *
+ * `missingFields` still returns everything we do not have, in the order a
+ * person answers in. It is the honest answer to "what is missing". `intakeAsk`
+ * takes the first of them and says nothing at all about the rest.
  */
 
 import { BUSINESS } from './brief';
@@ -59,20 +67,29 @@ export interface KnownCustomer {
   address?: string | null;
   /** What they want and how many, in whatever words we have it in. */
   items?: string | null;
+  /**
+   * Something we sell, named with no count against it. "how much is stretch
+   * film" is this and not `items`: we know what they want and we cannot quote
+   * it, so the one ask is the count rather than the whole question again.
+   */
+  product?: string | null;
   fulfilment?: Fulfilment | null;
 }
 
-export type IntakeField = 'items' | 'name' | 'email' | 'fulfilment' | 'address';
+export type IntakeField = 'items' | 'quantity' | 'name' | 'email' | 'fulfilment' | 'address';
 
 /**
  * The one clause each missing field turns into.
  *
- * Written to follow "Let me know", which is what makes them join into a
- * sentence at any length. A question ("what is the name") reads as an
- * interrogation the moment there are three of them.
+ * Written to follow "Let me know", because exactly one of them is ever used and
+ * a bare question ("what is the name") reads as an interrogation on its own.
  */
 const ASK: Readonly<Record<IntakeField, string>> = Object.freeze({
   items: 'what you need and how many',
+  // Used instead of `items` when the message already named a product. Asking
+  // what they need after they have said "stretch film" is the failure this
+  // file was rewritten for, in miniature.
+  quantity: 'how many you need',
   name: 'the name it goes under',
   email: 'the best email for the quote',
   // Carries the will call address rather than only the word "will call", so
@@ -84,37 +101,37 @@ const ASK: Readonly<Record<IntakeField, string>> = Object.freeze({
   address: 'the delivery address with the city and ZIP',
 });
 
-/** Ask order, and it is the order a person answers in, not the order we file in. */
-const FIELD_ORDER: readonly IntakeField[] = ['items', 'name', 'email', 'fulfilment', 'address'];
+/**
+ * Ask order, and it is the order a person answers in, not the order we file in.
+ * `intakeAsk` takes the first of these and says nothing about the rest, so this
+ * list is also the priority: whatever blocks the next step comes first.
+ */
+const FIELD_ORDER: readonly IntakeField[] = ['items', 'quantity', 'name', 'email', 'fulfilment', 'address'];
 
 export function missingFields(known: KnownCustomer): IntakeField[] {
   const missing: IntakeField[] = [];
-  if (!known.items) missing.push('items');
+  // A named product with no count is one ask short of a quote, not four.
+  if (!known.items) missing.push(known.product ? 'quantity' : 'items');
   if (!known.name) missing.push('name');
   if (!known.email) missing.push('email');
   if (!known.fulfilment) missing.push('fulfilment');
-  // Not asked while the fulfilment choice is still open: that clause already
-  // says "or delivery to your address", so asking again in the same breath is
-  // the serial questioning this file exists to stop, compressed into one
-  // message where it reads worse rather than better.
+  // Not missing at all while the fulfilment choice is still open. Will call
+  // needs no address, so until they have picked delivery there is nothing here
+  // to be short of, which is why the choice is ordered ahead of it.
   else if (known.fulfilment === 'delivery' && !known.address) missing.push('address');
   return FIELD_ORDER.filter((f) => missing.includes(f));
 }
 
-/** "a", "a and b", "a, b, and c". */
-function join(parts: string[]): string {
-  if (parts.length <= 1) return parts[0] ?? '';
-  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
-  return `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`;
-}
-
 /**
- * The reply to a pricing question: one message, everything still needed.
+ * The reply to a pricing question: one line of acknowledgement, then one ask.
+ *
+ * The ask is `missing[0]`, which FIELD_ORDER has already put in the order that
+ * unblocks the next step. Everything after it is deliberately unsaid. It is not
+ * lost: the name, the email and the address are asked for with the quote, where
+ * they are what actually blocks the invoice.
  *
  * Never opens with a name, Karim's standing rule, and never opens with the
- * company name either. The site is kept in the tail because the quote builder
- * on akmeusa.com collects all of this properly in one form, and it converts;
- * dropping it to save a line would be a regression nobody asked for.
+ * company name either.
  */
 export function intakeAsk(known: KnownCustomer): string {
   const missing = missingFields(known);
@@ -123,13 +140,15 @@ export function intakeAsk(known: KnownCustomer): string {
     // says a person is coming and stops.
     return 'Happy to get that quote over. Someone from the team will send pricing shortly.';
   }
+  const asking = missing[0];
   return [
     'Happy to get that quote over.',
-    `Let me know ${join(missing.map((f) => ASK[f]))}.`,
+    `Let me know ${ASK[asking]}.`,
     // The site is an alternative to telling us WHAT THEY WANT, and nothing
-    // else. Offered to somebody we are only missing an email from, it reads as
-    // "go and start again", which is worse than the round trip it saves.
-    ...(missing.includes('items') ? [`Or build it at ${BUSINESS.site}.`] : []),
+    // else. Offered to somebody who has already named a product and only owes
+    // us a count, it reads as "go and start again", which is worse than the
+    // round trip it saves.
+    ...(asking === 'items' ? [`Or build it at ${BUSINESS.site}.`] : []),
   ].join(' ');
 }
 
@@ -185,6 +204,27 @@ const EMAIL = /\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i;
 const QUANTITY = /\b(\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|dozen)\b/i;
 
 /**
+ * Words that reach PRODUCT_WORDS out of an alias and name no product at all.
+ *
+ * "pallet wrap" and "big roll" are both real aliases for the eighteen inch
+ * film, so splitting them puts "pallet", "roll" and "big" into the vocabulary.
+ * On their own those words are a container or a size: "how much for a pallet"
+ * names nothing we sell. This mattered little while a product read only chose
+ * whether `items` was complete; it matters now, because a named product turns
+ * the ask into "how many you need", and asking that of somebody who never said
+ * what they want is the failure wearing a different coat.
+ */
+const NOT_A_PRODUCT_ALONE: ReadonlySet<string> = new Set([
+  'pallet',
+  'roll',
+  'big',
+  'small',
+  'inch',
+  'eighteen',
+  'five',
+]);
+
+/**
  * Every word a customer uses for something we sell, which is a WIDER list than
  * the one lib/agent/order-change.ts builds from the same data.
  *
@@ -198,7 +238,7 @@ const PRODUCT_WORDS: readonly string[] = [
     BUSINESS.products
       .flatMap((p) => [p.name, ...p.alsoCalled])
       .flatMap((n) => n.toLowerCase().split(/[^a-z0-9]+/))
-      .filter((w) => w.length > 2),
+      .filter((w) => w.length > 2 && !NOT_A_PRODUCT_ALONE.has(w)),
   ),
 ];
 
@@ -233,7 +273,11 @@ export function readKnownFromMessage(body: string | null | undefined): KnownCust
   // A product AND a count. Either alone is a question, not an order: "what do
   // you charge for tape" names a product and orders nothing, and "how much for
   // 4" counts something nobody has identified.
-  if (NAMES_A_PRODUCT.test(text) && QUANTITY.test(text)) known.items = text;
+  const named = NAMES_A_PRODUCT.exec(text);
+  if (named && QUANTITY.test(text)) known.items = text;
+  // The half-answer is worth holding on its own. It is what turns four asks
+  // into one: they told us what they want, so the only thing left is the count.
+  else if (named) known.product = named[0];
 
   if (STREET_NUMBER.test(text) && (STREET_TYPE.test(text) || ZIP.test(text))) known.address = text;
 
@@ -267,6 +311,10 @@ export function knownFor(body: string | null | undefined, onFile: KnownCustomer 
     email: fromMessage.email ?? onFile.email ?? null,
     address: fromMessage.address ?? onFile.address ?? null,
     items: fromMessage.items ?? onFile.items ?? null,
+    // Only ever read off this message. A product named last week does not tell
+    // us what today's text is about, and the wrong one here asks how many of
+    // something they never mentioned.
+    product: fromMessage.product ?? null,
     fulfilment: fromMessage.fulfilment ?? onFile.fulfilment ?? null,
   };
 }

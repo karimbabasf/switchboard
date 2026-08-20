@@ -551,7 +551,46 @@ function catalogueBlock(): string {
     .join('\n');
 }
 
-function systemPrompt(): string {
+/**
+ * What the contact row holds on the person texting, written out for the model.
+ *
+ * IT HELD NOTHING UNTIL 2026-08-19 and the prompt never mentioned the record at
+ * all. "Do you not have me on file already?" came back "Yes we do", which the
+ * model had no way to know: the record was loadable the whole time and was
+ * never handed over, so the only thing it could do with a question about our
+ * files was invent an answer. Two words with no money, no date and no figure in
+ * them clear every guard in this file, so it auto-sent. The next message said
+ * "so send it to that address" and got our own contact card back, because
+ * nothing in the reply had ever been about the customer's record.
+ *
+ * ONLY THE ROW GOES IN HERE, never anything read off the message. The message
+ * is already in the user turn and it is data: copying the customer's own words
+ * into the system turn is how a text talks its way into the rules. Each value
+ * is flattened to one line and capped for the same reason.
+ */
+function recordBlock(onFile: KnownCustomer): string {
+  const flat = (v: string) => v.replace(/\s+/g, ' ').trim().slice(0, 80);
+  const held = [
+    onFile.name ? `Name: ${flat(onFile.name)}` : null,
+    onFile.email ? `Email: ${flat(onFile.email)}` : null,
+    onFile.address ? `Address: ${flat(onFile.address)}` : null,
+    onFile.items ? `Last asked for: ${flat(onFile.items)}` : null,
+  ].filter((line): line is string => line !== null);
+
+  return [
+    'WHAT WE HOLD ON THE PERSON TEXTING YOU',
+    ...(held.length > 0 ? held : ['Nothing at all. This number is not on file.']),
+    'That list is everything we have. Never say we have somebody on file, and',
+    'never say we do not, beyond what is written there. Asked whether we have',
+    'their details, state the ones listed so they can correct them, and if the',
+    'list is empty say someone from the team will check. Never ask them for',
+    'anything the list already holds, and never read the company name, the will',
+    'call address, the phone number or the hours out to somebody who asked for',
+    'none of them.',
+  ].join('\n');
+}
+
+function systemPrompt(onFile: KnownCustomer): string {
   return `You write SMS replies for ${BUSINESS.name}, a moving and packing supply company in Springfield.
 
 WHAT WE SELL, most important first, with the facts you are allowed to state
@@ -575,6 +614,8 @@ one we make no claim about. Do not say everything we sell is made anywhere, and
 do not say a product is NOT made somewhere either. Say what is listed under the
 product they asked about, and for anything else say someone from the team will
 confirm it.
+
+${recordBlock(onFile)}
 
 HOURS AND FULFILMENT
 ${BUSINESS.hours}. ${BUSINESS.fulfilment}
@@ -785,7 +826,7 @@ export async function draftSmsReply(
 
   let raw: { intent: string; reply: string };
   try {
-    raw = await deps.complete(systemPrompt(), body);
+    raw = await deps.complete(systemPrompt(onFile), body);
   } catch (err) {
     console.error('[sms-agent] draft failed:', err);
     return draftFallback('the model call failed');
