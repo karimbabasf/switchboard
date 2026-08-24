@@ -49,6 +49,7 @@ vi.mock('../lib/telegram/cards', () => ({
   deskSilentCard: vi.fn(() => ({ text: 'silent' })),
   deskDownCard: vi.fn((input: { reason: string }) => ({ text: `deskdown:${input.reason}` })),
   smsBlockedCard: vi.fn((input: { reason: string }) => ({ text: `blocked:${input.reason}` })),
+  smsSendFailedCard: vi.fn((input: { reason: string }) => ({ text: `sendfailed:${input.reason}` })),
   attachmentOnlyCard: vi.fn(() => ({ text: 'attachment' })),
   orderChangeCard: vi.fn(async () => ({ text: 'orderchange' })),
 }));
@@ -394,10 +395,14 @@ describe('a text the allowlist refuses is said out loud', () => {
     expect(vi.mocked(noteOutboundSms)).not.toHaveBeenCalled();
   });
 
-  // Everything that is not a block keeps the swallow it always had: the inbound
-  // message is already filed and already in Telegram, so a Telnyx outage costs
-  // an automatic reply and not the message.
-  it('still swallows a send that failed for any other reason', async () => {
+  // A carrier failure still costs the automatic reply and not the message: the
+  // inbound text is already filed and already in Telegram, so this never
+  // rethrows and Telnyx is never asked to redeliver. What changed on
+  // 2026-08-24 is that it no longer costs the reply SILENTLY. The throw used to
+  // land in replyWithAgent's outer catch, a bare console.error, so a Telnyx 500
+  // meant nothing sent, no card, no timeline row, and nobody told, while Akme
+  // had already recorded the quote as sent.
+  it('swallows a send that failed for any other reason, and posts a card about it', async () => {
     mockedDesk.mockResolvedValue({ kind: 'answer', reply: 'Hi, that is $24.42 a case.' });
     queueFrom(sendChains());
     vi.mocked(fetch).mockRejectedValue(new Error('ECONNRESET'));
@@ -405,6 +410,42 @@ describe('a text the allowlist refuses is said out loud', () => {
     await expect(
       smsEventDeps().reply(contact.phone, 'how much', 42, false, 'Jane Doe', 'msg-17'),
     ).resolves.toBeUndefined();
-    expect(outboxCards()).toEqual([]);
+    // The failure card and nothing else. An auto-sent card beside it would
+    // claim a customer read something the carrier never accepted.
+    expect(outboxCards()).toEqual([{ text: 'sendfailed:ECONNRESET' }]);
+    expect(vi.mocked(noteOutboundSms)).not.toHaveBeenCalled();
+  });
+
+  // A carrier refusal and this repo's own door refusing are different problems:
+  // one is fixed by resending, the other by a config line. Two cards, because a
+  // reader who cannot tell them apart looks in the wrong place first.
+  it('keeps the carrier failure and the allowlist refusal on separate cards', async () => {
+    vi.stubEnv('SMS_ALLOWLIST', '+15550000000');
+    mockedDesk.mockResolvedValue({ kind: 'answer', reply: 'Hi, that is $24.42 a case.' });
+    queueFrom([makeChain(ok(null))]);
+
+    await smsEventDeps().reply(contact.phone, 'how much', 42, false, 'Jane Doe', 'msg-18');
+
+    expect(outboxCards()).toEqual([{ text: `blocked:${contact.phone} is not on SMS_ALLOWLIST` }]);
+  });
+
+  // The decline path posts its own card AFTER the send, so a rethrow here used
+  // to cost that card too: the operator lost both the reason Akme declined and
+  // the fact that its holding line never left.
+  it('keeps the declined card when the holding line fails at the carrier', async () => {
+    mockedDesk.mockResolvedValue({
+      kind: 'declined',
+      reason: 'desk_wrote_nothing',
+      reply: 'Hi, a person is picking this up now.',
+    });
+    queueFrom([...sendChains(), makeChain(ok(null))]);
+    vi.mocked(fetch).mockRejectedValue(new Error('telnyx /messages: 500 internal error'));
+
+    await smsEventDeps().reply(contact.phone, 'anything', 42, false, 'Jane Doe', 'msg-19');
+
+    expect(outboxCards()).toEqual([
+      { text: 'sendfailed:telnyx /messages: 500 internal error' },
+      { text: 'declined:desk_wrote_nothing:unsent' },
+    ]);
   });
 });

@@ -268,6 +268,72 @@ export function smsBlockedCard(input: SmsBlockedCardInput): TextCardPayload {
   };
 }
 
+export interface SmsSendFailedCardInput {
+  phone: string;
+  /** The words that were written and never reached the wire. */
+  reply: string;
+  reason: string;
+}
+
+/**
+ * How much of a third party's error text a card is allowed to carry.
+ *
+ * Telegram caps a message at 4096 characters and a gateway answering with an
+ * HTML page will spend all of it. The words the customer missed are the point
+ * of the card, so the reason is what gets clipped.
+ */
+const FAILURE_REASON_LIMIT = 300;
+
+/**
+ * Strips anything credential-shaped out of text this repo did not write.
+ *
+ * Matched on the env var NAME rather than against a fixed list of values,
+ * because a list drifts the moment somebody adds a secret and this card would
+ * then be the thing that leaks it. Anything named like a credential, and long
+ * enough to be one, is replaced wherever it appears. The Bearer sweep after it
+ * catches a token that never came from the environment at all.
+ */
+function redactSecrets(text: string): string {
+  let out = text;
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!value || value.length < 8) continue;
+    if (!/SECRET|KEY|TOKEN|PASSWORD/.test(name)) continue;
+    out = out.split(value).join('[redacted]');
+  }
+  return out.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, FAILURE_REASON_LIMIT);
+}
+
+/**
+ * The desk wrote a reply and the carrier would not take it.
+ *
+ * Separate from smsBlockedCard on purpose. That one is this repo refusing on
+ * purpose, and the fix is a config line. This one is Telnyx or the network
+ * failing, and the fix is to send the same words again by hand.
+ *
+ * It was the last silent outcome on the reply path. A Telnyx 500 rethrew into
+ * replyWithAgent's outer catch, which is a bare console.error, so until
+ * 2026-08-24 the customer got nothing, `crm_timeline` got no outbound row,
+ * Telegram showed only the inbound card, and nobody found out, while Akme had
+ * already recorded the quote as sent.
+ *
+ * No Send button, for the same reason deskDownCard has none: the state on
+ * Akme's side is unknown, and a one-tap reply invites a second answer over a
+ * first nobody knew about.
+ */
+export function smsSendFailedCard(input: SmsSendFailedCardInput): TextCardPayload {
+  return {
+    text: [
+      '❌ <b>A reply was written and the carrier refused it</b>',
+      `<i>${escapeHtml(redactSecrets(input.reason))}</i>`,
+      '',
+      `Nothing reached ${escapeHtml(formatPhoneForDisplay(input.phone))}. It would have said:`,
+      escapeHtml(input.reply),
+      '',
+      'Nobody has answered them. Send this by hand, and read the order in Akme first: a quote may already be recorded as sent.',
+    ].join('\n'),
+  };
+}
+
 export interface AttachmentOnlyCardInput {
   attachments: number;
 }

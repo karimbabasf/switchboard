@@ -11,6 +11,7 @@ import {
   orderChangeCard,
   smsAutoSentCard,
   smsBlockedCard,
+  smsSendFailedCard,
 } from '../telegram/cards';
 import type { TextCardPayload } from '../telegram/cards';
 import { carrierIntent, draftCarrierReply, isBargaining, isCarrierKeyword } from '../agent/sms';
@@ -289,7 +290,7 @@ async function card(threadId: number, payload: TextCardPayload): Promise<void> {
 }
 
 /**
- * Sends, and says out loud when the door refuses.
+ * Sends, and says out loud whenever the words do not reach the customer.
  *
  * SMS_ALLOWLIST is enforced in sendSms and Akme deliberately holds no copy of
  * it: the gate belongs where every caller passes, and a second copy over there
@@ -299,9 +300,18 @@ async function card(threadId: number, payload: TextCardPayload): Promise<void> {
  * time it happens the desk has spent a model call and may have claimed a quote
  * against the order, so it is not a detail.
  *
- * ONLY SmsBlocked is caught. Everything else keeps the swallow it always had:
- * the inbound message is already filed and already in Telegram, so a Telnyx
- * outage costs an automatic reply rather than the message itself.
+ * NEITHER FAILURE IS SILENT NOW. A refusal at this repo's own door and a
+ * carrier failure are different problems, so they get different cards, but both
+ * get one. The Telnyx failure was the last quiet outcome on this path: it used
+ * to rethrow into replyWithAgent's outer catch, which is a bare console.error,
+ * so a 500 on the reply meant nothing sent, no card, no timeline row, and
+ * nobody told.
+ *
+ * It still never rethrows. The inbound message is already filed and already in
+ * Telegram, so a Telnyx outage costs an automatic reply rather than the message
+ * itself, and a throw from here would also cost the caller its own card: the
+ * decline path posts one after the send, and that card is how an operator
+ * learns a holding line never left.
  *
  * Returns whether the words really went out, so no caller posts a card claiming
  * a customer received something they did not.
@@ -311,9 +321,14 @@ async function sendOrSayWhyNot(phone: string, reply: string, threadId: number): 
     await sendSms(phone, reply);
     return true;
   } catch (err) {
-    if (!(err instanceof SmsBlocked)) throw err;
-    console.error(`[sms] ${phone}: ${err.message}`);
-    await card(threadId, smsBlockedCard({ phone, reply, reason: err.message }));
+    if (err instanceof SmsBlocked) {
+      console.error(`[sms] ${phone}: ${err.message}`);
+      await card(threadId, smsBlockedCard({ phone, reply, reason: err.message }));
+      return false;
+    }
+    console.error(`[sms] ${phone}: the carrier refused the reply:`, err);
+    const reason = err instanceof Error ? err.message : String(err);
+    await card(threadId, smsSendFailedCard({ phone, reply, reason }));
     return false;
   }
 }
