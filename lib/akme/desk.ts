@@ -21,16 +21,28 @@ const TOKEN_TTL_SECONDS = 60;
 /**
  * Long, and deliberately so.
  *
- * One turn behind this door can price an order off live QuickBooks and run a
- * classifier, which is seconds and not milliseconds. The webhook has already been
- * acked by the time this runs, so nothing is waiting on it but the customer.
+ * One turn behind this door is a full LLM turn with a tool loop, the same one
+ * the email path runs: live QuickBooks facts, a classifier, and two to four
+ * model rounds, where every guard refusal buys another round. That is tens of
+ * seconds and not milliseconds. It was 20s until 2026-08-24, which is marginal
+ * on the happy path and gone the moment one refusal lands, so a normal turn
+ * came back as `unreachable` and the customer heard nothing.
+ *
+ * The webhook has already been acked by the time this runs, so nothing is
+ * waiting on it but the customer. What they experience at 60s: at worst a text
+ * that takes a minute to come back, which reads like a person who stepped away
+ * from the desk. Past it they get nothing at all and a person is asked for
+ * instead, which is worse, and rarer than it was at 20s.
+ *
+ * This is only the caller's half of the budget. The door's own limit is set in
+ * Akme, and this number has to sit under it or the wait buys nothing.
  *
  * The cost of being too tight is worse than the cost of being slow: Akme claims
  * the quote send BEFORE it answers, so a timeout can leave a quote recorded as
  * sent that this repo never sent. That is why a timeout is reported as
  * `unreachable` and not as `declined`.
  */
-const TIMEOUT_MS = 20_000;
+const TIMEOUT_MS = 60_000;
 
 /** Mirrors lib/ops/signing.ts in Akme. One HMAC over a base64url body. */
 function signToken(payload: Record<string, unknown>, secret: string, ttlSeconds: number): string {

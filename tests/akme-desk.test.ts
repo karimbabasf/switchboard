@@ -186,7 +186,11 @@ describe('askAkmeDesk: when the state is unknown', () => {
     expect(out.kind === 'unreachable' && out.reason).toContain('ECONNREFUSED');
   });
 
-  it('reports a timeout as unreachable', async () => {
+  // The number is asserted, not just the shape. One turn behind this door is a
+  // full LLM turn with a tool loop, and every guard refusal costs another model
+  // round, so the budget is the difference between a slow answer and no answer
+  // at all. It was 20s until 2026-08-24, which a single refusal spent.
+  it('reports a timeout as unreachable, and names the 60s budget', async () => {
     vi.mocked(fetch).mockImplementation(async () => {
       const err = new Error('aborted');
       err.name = 'AbortError';
@@ -194,7 +198,7 @@ describe('askAkmeDesk: when the state is unknown', () => {
     });
     const out = await askAkmeDesk(input);
     expect(out.kind).toBe('unreachable');
-    expect(out.kind === 'unreachable' && out.reason).toContain('did not answer');
+    expect(out.kind === 'unreachable' && out.reason).toBe('Akme did not answer in 60s');
   });
 
   // A 500 IS a decision Akme made: its own route catches and answers
