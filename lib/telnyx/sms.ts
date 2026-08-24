@@ -2,12 +2,19 @@ import { db } from '../db';
 import { env, assertE164, toE164 } from '../env';
 import { askAkmeDesk } from '../akme/desk';
 import { resolveTopic } from '../telegram/topics';
-import { deskDownCard, deskSilentCard, inboundSmsCard, orderChangeCard, smsAutoSentCard, smsDraftCard } from '../telegram/cards';
+import {
+  attachmentOnlyCard,
+  deskDeclinedCard,
+  deskDownCard,
+  deskSilentCard,
+  inboundSmsCard,
+  orderChangeCard,
+  smsAutoSentCard,
+} from '../telegram/cards';
 import type { TextCardPayload } from '../telegram/cards';
-import { draftFallback, draftSmsReply, isCarrierKeyword, smsAgentDeps } from '../agent/sms';
-import { proposeChange } from '../agent/order-change';
+import { carrierIntent, draftCarrierReply, isBargaining, isCarrierKeyword } from '../agent/sms';
+import { isOrderChangeRequest, proposeChange } from '../agent/order-change';
 import { identifyCaller, orderLinesFor, recentOrdersFor } from '../qbo/lookup';
-import { recordQuoteRequest } from '../quote-requests';
 import { noteInboundSms, noteOutboundSms } from '../crm/timeline';
 import type { Contact, Message, MediaItem } from '../types';
 
@@ -275,13 +282,30 @@ async function handleMessageReceived(
   );
 }
 
+/** Puts one card on the contact's Telegram thread. */
+async function card(threadId: number, payload: TextCardPayload): Promise<void> {
+  await db().from('outbox').insert({ thread_id: threadId, kind: 'text', payload });
+}
+
 /**
- * Drafts a reply and either sends it or puts it in front of a human.
+ * Answers an inbound text, or says out loud that nobody did.
  *
  * Never throws into the webhook path. The inbound message is already stored and
  * already in Telegram by the time this runs, so a failure here costs an
  * automatic reply, not the message itself. Rethrowing would fail the whole event
  * and make Telnyx redeliver a text that is already filed.
+ *
+ * NO SECOND WRITER. Every sentence a customer reads was written in Akme, by the
+ * deal engine or by the LLM desk, and this function's only remaining job is to
+ * put it on the wire and say so on Telegram. The templates, the intake asks and
+ * the model call that used to live below the desk call are the "two brains"
+ * failure the 2026-08-20 spec names: the same question got two different answers
+ * depending on whether the customer emailed or texted, and a decline was read as
+ * permission to draft a template answer, which is where "the team will price it"
+ * came from. Deleting them is what fixes it.
+ *
+ * The one exception is the carrier machinery below, and it is an exception
+ * because a carrier requires it rather than because it is convenient.
  */
 async function replyWithAgent(
   phone: string,
@@ -292,155 +316,113 @@ async function replyWithAgent(
   messageId: string | null,
 ): Promise<void> {
   try {
-    // ---------------------------------------------------------------------
-    // Akme's deal engine gets first refusal on anything a customer said.
-    // ---------------------------------------------------------------------
-    //
-    // Two exclusions, and neither is a judgement about quality. A CARRIER
-    // KEYWORD is a command to the compliance machinery, not conversation: STOP
-    // belongs to the opt-out ledger below and must never become a deal event.
-    // An MMS is a photo of a damaged pallet or a purchase order, and the
-    // attachment IS the message, so no text-only reader should answer it.
     const said = body?.trim() ?? '';
-    if (said && !hasMedia && !isCarrierKeyword(body)) {
-      const outcome = await askAkmeDesk({ phone, body: said, displayName, messageId });
 
-      if (outcome.kind === 'answer') {
+    // ---------------------------------------------------------------------
+    // The carrier keywords, which are commands to the compliance machinery
+    // rather than conversation, and never reach Akme.
+    // ---------------------------------------------------------------------
+    switch (carrierIntent(said)) {
+      case 'opt_out': {
+        // Record it, do not just decline to answer. Suppressing this one reply
+        // was all that used to happen, so the next inbound text started clean
+        // and nothing stopped a human, or the voice agent's text_me_the_list,
+        // texting them afterwards. The stamp is what the door reads.
+        const { error } = await db()
+          .from('contacts')
+          .update({ opted_out_at: new Date().toISOString() })
+          .eq('phone', phone)
+          .is('opted_out_at', null); // first opt-out wins, so the date stays the date they asked
+        if (error) console.error('[sms] failed to record opt-out:', error.message);
+        return;
+      }
+      case 'opt_in': {
+        // The other direction, and the reason START must not share a branch with
+        // STOP: without this the door stays shut forever and the customer has no
+        // way back in short of someone editing the database by hand.
+        const { error } = await db()
+          .from('contacts')
+          .update({ opted_out_at: null })
+          .eq('phone', phone)
+          .not('opted_out_at', 'is', null);
+        if (error) console.error('[sms] failed to clear opt-out:', error.message);
+        return;
+      }
+      case 'help': {
+        const draft = draftCarrierReply('help');
+        await sendSms(phone, draft.reply);
+        await card(threadId, smsAutoSentCard({ intent: draft.intent, reply: draft.reply }));
+        return;
+      }
+      default:
+        break;
+    }
+
+    // A photo with no words never reaches Akme. It is a damaged pallet or a
+    // purchase order, the attachment IS the message, and a text-only reader
+    // answering it would be answering something it cannot see. Nothing is sent,
+    // and the card is what stops that silence being invisible.
+    if (!said) {
+      if (hasMedia) await card(threadId, attachmentOnlyCard({ attachments: 1 }));
+      return;
+    }
+
+    // A change request gets the order and its lines on a card, plus an Apply
+    // button when the message named a quantity clearly enough to parse one. It
+    // stays because it is a Telegram surface and not a customer sentence: Akme
+    // still writes what the customer reads, below. Best effort, because losing
+    // the operator's card must never cost the customer their answer.
+    if (isOrderChangeRequest(said)) {
+      try {
+        await card(threadId, await orderChangePayload({ phone, body: said }));
+      } catch (err) {
+        console.error(`[sms-agent] order change card for ${phone} failed:`, err);
+      }
+    }
+
+    const outcome = await askAkmeDesk({
+      phone,
+      body: said,
+      displayName,
+      messageId,
+      // A boolean is all this path is handed, so one is the honest floor: the
+      // fact that matters to Akme is that words are not the whole message.
+      attachments: hasMedia ? 1 : 0,
+      ...(isBargaining(said) ? { hint: 'bargaining' as const } : {}),
+    });
+
+    switch (outcome.kind) {
+      case 'answer':
         await sendSms(phone, outcome.reply);
-        await db()
-          .from('outbox')
-          .insert({
-            thread_id: threadId,
-            kind: 'text',
-            payload: smsAutoSentCard({ intent: 'deal desk', reply: outcome.reply }),
-          });
+        await card(threadId, smsAutoSentCard({ intent: 'desk', reply: outcome.reply }));
         return;
-      }
 
-      // The desk took it and said nothing. That USED to be a design: an
-      // over-ceiling quote and an escalation both posted a card on Akme's side
-      // and stayed quiet on purpose. As of 2026-08-20 the deal engine always
-      // answers a customer who wrote in, so silence means a branch escaped
-      // without a holding line and the customer is sitting there.
-      //
-      // Still no draft. Two brains writing over each other is the failure the
-      // door exists to stop, and Akme has already posted its own card. This is
-      // an alarm, not a second answer.
-      if (outcome.kind === 'silent') {
+      case 'declined':
+        // A decline now carries its own words when a customer is waiting, and
+        // carries null when nobody is (the channel is simply not armed).
+        if (outcome.reply) await sendSms(phone, outcome.reply);
+        await card(threadId, deskDeclinedCard({ reason: outcome.reason, body: said, reply: outcome.reply }));
+        return;
+
+      case 'silent':
+        // The desk took it and said nothing. That USED to be a design: an
+        // over-ceiling quote and an escalation both posted a card on Akme's
+        // side and stayed quiet on purpose. As of 2026-08-20 the deal engine
+        // always answers a customer who wrote in, so silence means a branch
+        // escaped without a holding line and the customer is sitting there.
         console.error(`[desk] ${phone}: handled the message and returned no reply`);
-        await db()
-          .from('outbox')
-          .insert({
-            thread_id: threadId,
-            kind: 'text',
-            payload: deskSilentCard({ body: said }),
-          });
+        await card(threadId, deskSilentCard({ body: said }));
         return;
-      }
 
-      // Unknown, not "no". Akme claims a quote send BEFORE it returns the words,
-      // so a door that never answered may have recorded a quote as sent. Drafting
-      // a fallback on top of that is how one customer gets two prices, so this
-      // stops and asks for eyes instead.
-      if (outcome.kind === 'unreachable') {
+      case 'unreachable':
+        // Unknown, not "no". Akme claims a quote send BEFORE it returns the
+        // words, so a door that never answered may have recorded a quote as
+        // sent. A second answer on top of that is how one customer gets two
+        // prices, so this stops and asks for eyes instead.
         console.error(`[desk] ${phone}: ${outcome.reason}`);
-        await db()
-          .from('outbox')
-          .insert({
-            thread_id: threadId,
-            kind: 'text',
-            payload: deskDownCard({ reason: outcome.reason, body: said }),
-          });
+        await card(threadId, deskDownCard({ reason: outcome.reason, body: said }));
         return;
-      }
-      // `declined` falls through: the desk is not armed for this channel, or it
-      // read the message and had nothing to add. The old path is still the whole
-      // system in that case.
     }
-
-    // An MMS is a picture of something, usually a damaged pallet or a purchase
-    // order. Whatever the text says, the attachment is the message, and the
-    // agent cannot see it.
-    const draft = hasMedia
-      ? draftFallback('the message has an attachment the agent cannot see')
-      // The contact row, handed over rather than left on the shelf. Without it
-      // the drafter asks a repeat customer for their own name, and the model is
-      // asked about our records while holding none of them, which on 2026-08-19
-      // produced "Yes we do" to "do you not have me on file already". Nothing
-      // else in this system writes display_name: it is null until a caller says
-      // their name out loud, so a value here is a name somebody gave us.
-      : await draftSmsReply(body, smsAgentDeps(), { name: displayName });
-
-    // Record it, do not just decline to answer. Suppressing this one reply was
-    // all that used to happen, so the next inbound text started clean and
-    // nothing stopped a human, or the voice agent's text_me_the_list, texting
-    // them afterwards. The stamp is what the door reads.
-    if (draft.intent === 'opt_out') {
-      const { error } = await db()
-        .from('contacts')
-        .update({ opted_out_at: new Date().toISOString() })
-        .eq('phone', phone)
-        .is('opted_out_at', null); // first opt-out wins, so the date stays the date they asked
-      if (error) console.error('[sms] failed to record opt-out:', error.message);
-      return;
-    }
-
-    // The other direction, and the reason START must not share a branch with
-    // STOP: without this the door stays shut forever and the customer has no way
-    // back in short of someone editing the database by hand.
-    if (draft.intent === 'opt_in') {
-      const { error } = await db()
-        .from('contacts')
-        .update({ opted_out_at: null })
-        .eq('phone', phone)
-        .not('opted_out_at', 'is', null);
-      if (error) console.error('[sms] failed to clear opt-out:', error.message);
-      return;
-    }
-
-    // Covers both triggers in one check: draftSmsReply maps the `quote`
-    // template's hit to intent 'pricing', the same value the model uses for a
-    // pricing question, so a template match and a model classification land
-    // here identically. Recording the work item and replying to the customer
-    // are independent outcomes, so a failure here must not skip the reply below.
-    if (draft.intent === 'pricing') {
-      const wants = body?.trim();
-      if (wants) {
-        try {
-          await recordQuoteRequest({ phone, source: 'sms', wants, callerName: displayName });
-        } catch (err) {
-          console.error(`[sms-agent] recordQuoteRequest for ${phone} failed:`, err);
-        }
-      }
-    }
-
-    if (draft.autoSend) {
-      await sendSms(phone, draft.reply);
-      await db()
-        .from('outbox')
-        .insert({
-          thread_id: threadId,
-          kind: 'text',
-          payload: smsAutoSentCard({ intent: draft.intent, reply: draft.reply }),
-        });
-      return;
-    }
-
-    // A change request gets the order and its lines on the card, plus an Apply
-    // button when the message named a quantity clearly enough to parse one. The
-    // lookup is best effort: if it throws or finds nothing, the card still goes
-    // out carrying their words, which is strictly better than no card.
-    const payload =
-      draft.intent === 'order_change'
-        ? await orderChangePayload({ phone, body, draft })
-        : await smsDraftCard({
-            phone,
-            intent: draft.intent,
-            reply: draft.reply,
-            reason: draft.reason,
-          });
-
-    await db().from('outbox').insert({ thread_id: threadId, kind: 'text', payload });
   } catch (err) {
     console.error(`[sms-agent] reply for ${phone} failed:`, err);
   }
@@ -456,23 +438,18 @@ async function replyWithAgent(
  */
 const CHANGEABLE = new Set(['awaiting_approval', 'quote_sent', 'negotiating']);
 
-async function orderChangePayload(input: {
-  phone: string;
-  body: string | null;
-  draft: { intent: string; reply: string; reason: string };
-}): Promise<TextCardPayload> {
-  const { phone, body, draft } = input;
-  const base = { phone, intent: draft.intent, reply: draft.reply, reason: draft.reason };
+async function orderChangePayload(input: { phone: string; body: string }): Promise<TextCardPayload> {
+  const { phone, body } = input;
 
   try {
     const identity = await identifyCaller(phone);
     const orders = identity?.customer_id ? await recentOrdersFor(identity.customer_id, 5) : [];
     const order = orders.find((o) => CHANGEABLE.has(o.status)) ?? null;
-    if (!order) return orderChangeCard({ ...base, order: null, lines: [], proposal: null });
+    if (!order) return orderChangeCard({ body, order: null, lines: [], proposal: null });
 
     const lines = await orderLinesFor(order.id);
     return orderChangeCard({
-      ...base,
+      body,
       order: { id: order.id, reference: order.reference, status: order.status },
       lines,
       proposal: proposeChange(body, lines),
@@ -481,7 +458,7 @@ async function orderChangePayload(input: {
     // Never lose the card over a failed lookup. The message is the thing that
     // has to reach a human; the order context is what makes that easier.
     console.error(`[sms-agent] order lookup for ${phone} failed:`, err);
-    return orderChangeCard({ ...base, order: null, lines: [], proposal: null });
+    return orderChangeCard({ body, order: null, lines: [], proposal: null });
   }
 }
 

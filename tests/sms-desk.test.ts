@@ -1,23 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
- * The door between a customer's text and Akme's deal engine.
+ * The door between a customer's text and Akme, and the whole of the reply path.
  *
  * Before this existed, every inbound text ran this repo's own SMS agent, which
  * drafted a reply and put a Send button in Telegram. That is the ping Karim got
  * on 2026-08-19 when he texted the business asking to order: nothing was wrong,
  * the text had simply never been wired to the engine that knows about orders.
  *
- * What these tests pin is the routing, and above all the two cases that are easy
- * to collapse into one: the desk saying "I did nothing" (safe to answer around)
- * and the desk not answering at all (NOT safe, because it may have recorded a
- * quote as sent one millisecond after the socket closed).
+ * What these tests pin now is that there is ONE WRITER. Every sentence a
+ * customer reads was written in Akme, by the deal engine or by the desk, and
+ * the only words this repo still owns are the carrier's: the registered HELP
+ * reply. The four desk outcomes are the whole of the path, and the two that are
+ * easy to collapse into one are the reason the type has four cases: the desk
+ * saying "I did nothing" (safe, and it now hands over its own holding line) and
+ * the desk not answering at all (NOT safe, because it may have recorded a quote
+ * as sent one millisecond after the socket closed).
  */
 function makeChain(result: { data: unknown; error: { message: string; code?: string } | null }) {
   const chain: Record<string, unknown> = {};
   const self = () => chain;
   chain.select = vi.fn(self);
   chain.eq = vi.fn(self);
+  chain.is = vi.fn(self);
+  chain.not = vi.fn(self);
   chain.insert = vi.fn(self);
   chain.update = vi.fn(self);
   chain.upsert = vi.fn(self);
@@ -37,12 +43,13 @@ vi.mock('../lib/telegram/cards', () => ({
   smsAutoSentCard: vi.fn((input: { intent: string; reply: string }) => ({
     text: `auto:${input.intent}:${input.reply}`,
   })),
-  smsDraftCard: vi.fn(async (input: { intent: string; reply: string }) => ({
-    text: `draft:${input.intent}:${input.reply}`,
-  })),
+  deskDeclinedCard: vi.fn((input: { reason: string | null }) => ({ text: `declined:${input.reason}` })),
+  deskSilentCard: vi.fn(() => ({ text: 'silent' })),
   deskDownCard: vi.fn((input: { reason: string }) => ({ text: `deskdown:${input.reason}` })),
+  smsBlockedCard: vi.fn((input: { reason: string }) => ({ text: `blocked:${input.reason}` })),
+  attachmentOnlyCard: vi.fn(() => ({ text: 'attachment' })),
+  orderChangeCard: vi.fn(async () => ({ text: 'orderchange' })),
 }));
-vi.mock('../lib/quote-requests', () => ({ recordQuoteRequest: vi.fn(async () => ({ id: 'qr_1' })) }));
 vi.mock('../lib/crm/timeline', () => ({
   noteInboundSms: vi.fn(async () => {}),
   noteOutboundSms: vi.fn(async () => {}),
@@ -51,7 +58,9 @@ vi.mock('../lib/akme/desk', () => ({ askAkmeDesk: vi.fn() }));
 
 import { db } from '../lib/db';
 import { askAkmeDesk } from '../lib/akme/desk';
+
 import { smsEventDeps } from '../lib/telnyx/sms';
+import { renderTemplate } from '../lib/agent/templates';
 
 const mockedDb = vi.mocked(db);
 const mockedDesk = vi.mocked(askAkmeDesk);
@@ -78,6 +87,25 @@ function fromCalls(): string[] {
   return fromMock.mock.calls.map((c) => c[0] as string);
 }
 
+/** Every payload that reached the outbox, in order, whatever table came first. */
+function outboxCards(): { text: string }[] {
+  const out: { text: string }[] = [];
+  fromMock.mock.calls.forEach((call, i) => {
+    if (call[0] !== 'outbox') return;
+    const chain = fromMock.mock.results[i].value as { insert: ReturnType<typeof vi.fn> };
+    const row = chain.insert.mock.calls[0]?.[0] as { payload?: { text: string } } | undefined;
+    if (row?.payload) out.push(row.payload);
+  });
+  return out;
+}
+
+/** The text Telnyx was asked to put on the wire, or null if it never was. */
+function sentText(): string | null {
+  const call = vi.mocked(fetch).mock.calls[0];
+  if (!call) return null;
+  return (JSON.parse(call[1]?.body as string) as { text: string }).text;
+}
+
 /** contacts(select) -> messages(insert) -> messages(update) -> outbox(insert). */
 function sendChains() {
   const row = {
@@ -98,12 +126,19 @@ function sendChains() {
   ];
 }
 
+function telnyxAccepts() {
+  vi.mocked(fetch).mockImplementation(
+    async () => new Response(JSON.stringify({ data: { id: 'telnyx_1' } }), { status: 200 }),
+  );
+}
+
 beforeEach(() => {
   vi.stubEnv('TELNYX_API_KEY', 'test-key');
   vi.stubEnv('TELNYX_NUMBER', '+14155550100');
   vi.stubEnv('SMS_ALLOWLIST', '*');
   vi.stubGlobal('fetch', vi.fn());
   mockedDesk.mockReset();
+
 });
 
 afterEach(() => {
@@ -112,39 +147,48 @@ afterEach(() => {
   mockedDb.mockReset();
 });
 
-describe('an inbound text goes to Akme first', () => {
-  it('sends what the desk decided, and shows it on the thread', async () => {
-    mockedDesk.mockResolvedValue({ kind: 'answer', reply: 'Quote AK-00042. Total $1,689.60 plus tax.' });
+describe('the four desk outcomes are the whole of the reply path', () => {
+  it("sends the desk's words and writes nothing of its own", async () => {
+    mockedDesk.mockResolvedValue({ kind: 'answer', reply: 'Hi, that is $24.42 a case. How many do you need?' });
     queueFrom(sendChains());
-    vi.mocked(fetch).mockImplementation(
-      async () => new Response(JSON.stringify({ data: { id: 'telnyx_1' } }), { status: 200 }),
-    );
+    telnyxAccepts();
 
-    await smsEventDeps().reply(contact.phone, '40 cases of clear tape please', 42, false, 'Jane Doe', 'msg-1');
+    await smsEventDeps().reply(contact.phone, 'how much is the tape', 42, false, 'Jane Doe', 'msg-1');
 
     expect(fromCalls()).toEqual(['contacts', 'messages', 'messages', 'outbox']);
-    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]?.body as string);
-    expect(body.text).toBe('Quote AK-00042. Total $1,689.60 plus tax.');
+    expect(sentText()).toBe('Hi, that is $24.42 a case. How many do you need?');
   });
 
-  // The idempotency key. Akme hashes the order id from the party and this
-  // value, so a Telnyx webhook retry lands on the order it already opened.
-  it('carries the message row id through as the source', async () => {
-    mockedDesk.mockResolvedValue({ kind: 'declined' });
-    queueFrom([makeChain(ok(null))]);
-    vi.stubEnv('NEAR_AI_API_KEY', 'k');
-    vi.mocked(fetch).mockImplementation(
-      async () => new Response(JSON.stringify({ choices: [{ message: { content: 'x' } }] }), { status: 200 }),
-    );
-
-    await smsEventDeps().reply(contact.phone, 'hello there', 42, false, 'Jane Doe', 'msg-77');
-
-    expect(mockedDesk).toHaveBeenCalledWith({
-      phone: contact.phone,
-      body: 'hello there',
-      displayName: 'Jane Doe',
-      messageId: 'msg-77',
+  it('sends the holding line Akme wrote on a decline, and never one of its own', async () => {
+    mockedDesk.mockResolvedValue({
+      kind: 'declined',
+      reason: 'desk_wrote_nothing',
+      reply: 'Hi, a person is picking this up now.',
     });
+    queueFrom(sendChains());
+    telnyxAccepts();
+
+    await smsEventDeps().reply(contact.phone, 'anything', 42, false, 'Jane Doe', 'msg-2');
+
+    expect(sentText()).toBe('Hi, a person is picking this up now.');
+    expect(outboxCards()).toEqual([{ text: 'declined:desk_wrote_nothing' }]);
+  });
+
+  /**
+   * A decline with no words is nobody waiting: the channel is simply not armed.
+   *
+   * This is the case that used to fall through to draftSmsReply, and it is where
+   * "the team will price it" came from. There is no drafter left to fall through
+   * to, so the assertion is the strongest available: nothing went on the wire.
+   */
+  it('sends nothing when a decline carries no words, and raises it instead', async () => {
+    mockedDesk.mockResolvedValue({ kind: 'declined', reason: 'channel_not_armed', reply: null });
+    queueFrom([makeChain(ok(null))]);
+
+    await smsEventDeps().reply(contact.phone, 'what are your hours', 42, false, 'Jane Doe', 'msg-3');
+
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(outboxCards()).toEqual([{ text: 'declined:channel_not_armed' }]);
   });
 
   it('never drafts over a desk that said nothing, but does raise it', async () => {
@@ -154,95 +198,142 @@ describe('an inbound text goes to Akme first', () => {
     // so silence is now a DEFECT rather than a design, and a quiet `return`
     // hides it. That is exactly how a real customer got over an hour of nothing
     // on 2026-08-20 without anybody noticing.
-    //
-    // Still no draft: two brains writing over each other is the failure the
-    // door exists to stop. The card is the alarm, not a second answer.
     mockedDesk.mockResolvedValue({ kind: 'silent' });
-    queueFrom([makeChain(ok(null))]); // outbox insert: the alarm card
+    queueFrom([makeChain(ok(null))]);
 
-    await smsEventDeps().reply(contact.phone, '200 cases of tape', 42, false, 'Jane Doe', 'msg-2');
+    await smsEventDeps().reply(contact.phone, '200 cases of tape', 42, false, 'Jane Doe', 'msg-4');
 
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
-    expect(fromCalls()).toContain('outbox');
+    expect(outboxCards()).toEqual([{ text: 'silent' }]);
   });
 
-  it('falls back to the old drafter when the desk declines', async () => {
-    // `declined` is Akme saying it did nothing: not armed for sms, or nothing to
-    // add. The path that has been answering since July is still the whole system
-    // in that case, so a customer is never left with silence.
-    mockedDesk.mockResolvedValue({ kind: 'declined' });
-    queueFrom([makeChain(ok(null))]); // outbox insert: the draft card
-    vi.stubEnv('NEAR_AI_API_KEY', 'k');
-    vi.mocked(fetch).mockImplementation(
-      async () =>
-        new Response(
-          JSON.stringify({
-            choices: [
-              {
-                message: {
-                  tool_calls: [
-                    {
-                      function: {
-                        name: 'draft_sms_reply',
-                        arguments: JSON.stringify({ intent: 'pricing', reply: 'I will get a quote over to you.' }),
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          }),
-          { status: 200 },
-        ),
-    );
-
-    const inbound = 'I need forty cases of tape for a job next month, what would that run me';
-    await smsEventDeps().reply(contact.phone, inbound, 42, false, 'Jane Doe', 'msg-3');
-
-    expect(mockedDesk).toHaveBeenCalled();
-    expect(fromCalls()).toEqual(['outbox']); // the old path drafted and posted a card
-  });
-
-  it('sends NOTHING and asks for eyes when the door did not answer', async () => {
+  it('stays silent and posts a card when the door is unreachable', async () => {
     // The case that must not be folded into `declined`. Akme claims a quote send
     // before it returns the words, so a timeout may mean a quote is recorded as
-    // sent that never left. A fallback draft on top of that is two prices to one
+    // sent that never left. A second answer on top of that is two prices to one
     // customer.
     mockedDesk.mockResolvedValue({ kind: 'unreachable', reason: 'Akme did not answer in 20s' });
-    queueFrom([makeChain(ok(null))]); // outbox insert: the desk-down card
+    queueFrom([makeChain(ok(null))]);
 
-    await smsEventDeps().reply(contact.phone, '40 cases of tape', 42, false, 'Jane Doe', 'msg-4');
+    await smsEventDeps().reply(contact.phone, '40 cases of tape', 42, false, 'Jane Doe', 'msg-5');
 
-    expect(fromCalls()).toEqual(['outbox']);
-    const inserted = fromMock.mock.results[0].value as { insert: ReturnType<typeof vi.fn> };
-    expect(inserted.insert.mock.calls[0][0].payload.text).toContain('deskdown:');
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(outboxCards()).toEqual([{ text: 'deskdown:Akme did not answer in 20s' }]);
+  });
+
+  // The idempotency key. Akme hashes the order id from the party and this
+  // value, so a Telnyx webhook retry lands on the order it already opened.
+  it('carries the message row id through as the source', async () => {
+    mockedDesk.mockResolvedValue({ kind: 'declined', reason: null, reply: null });
+    queueFrom([makeChain(ok(null))]);
+
+    await smsEventDeps().reply(contact.phone, 'hello there', 42, false, 'Jane Doe', 'msg-77');
+
+    expect(mockedDesk).toHaveBeenCalledWith({
+      phone: contact.phone,
+      body: 'hello there',
+      displayName: 'Jane Doe',
+      messageId: 'msg-77',
+      attachments: 0,
+    });
+  });
+
+  it('tells Akme an attachment exists rather than answering around it', async () => {
+    mockedDesk.mockResolvedValue({ kind: 'declined', reason: null, reply: null });
+    queueFrom([makeChain(ok(null))]);
+
+    await smsEventDeps().reply(contact.phone, 'is this the right one', 42, true, null, 'msg-6');
+
+    expect(mockedDesk.mock.calls[0][0]).toMatchObject({ attachments: 1 });
+  });
+
+  /**
+   * The deterministic bargaining stop stays HERE and its sentence does not.
+   *
+   * Karim's rule is zero tolerance, and a detector that has to survive a model
+   * call is not a stop. What moved is the answer: this repo reports what it saw
+   * and Akme writes the line, so a customer opening a negotiation gets one
+   * voice rather than two.
+   */
+  it('reports bargaining as a hint instead of answering it', async () => {
+    mockedDesk.mockResolvedValue({ kind: 'declined', reason: null, reply: null });
+    queueFrom([makeChain(ok(null))]);
+
+    await smsEventDeps().reply(contact.phone, "what's your best price on tape", 42, false, null, 'msg-7');
+
+    expect(mockedDesk.mock.calls[0][0]).toMatchObject({ hint: 'bargaining' });
   });
 });
 
-describe('what never reaches the deal engine', () => {
-  it('keeps carrier keywords out of it', async () => {
+describe('the carrier machinery still answers itself', () => {
+  it('answers HELP itself, without asking Akme', async () => {
+    queueFrom(sendChains());
+    telnyxAccepts();
+
+    await smsEventDeps().reply(contact.phone, 'HELP', 42, false, 'Jane Doe', 'msg-8');
+
+    expect(mockedDesk).not.toHaveBeenCalled();
+    expect(sentText()).toBe(renderTemplate('help'));
+  });
+
+  it('still stamps an opt-out and sends nothing', async () => {
+    const contacts = makeChain(ok(null));
+    queueFrom([contacts]);
+
+    await smsEventDeps().reply(contact.phone, 'STOP', 42, false, 'Jane Doe', 'msg-9');
+
+    expect(fromCalls()).toEqual(['contacts']);
+    expect(contacts.update).toHaveBeenCalledWith(expect.objectContaining({ opted_out_at: expect.any(String) }));
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(mockedDesk).not.toHaveBeenCalled();
+  });
+
+  // Without this the door stays shut forever and the customer has no way back in
+  // short of somebody editing the database by hand.
+  it('clears the stamp on an opt-in and sends nothing', async () => {
+    const contacts = makeChain(ok(null));
+    queueFrom([contacts]);
+
+    await smsEventDeps().reply(contact.phone, 'START', 42, false, 'Jane Doe', 'msg-10');
+
+    expect(contacts.update).toHaveBeenCalledWith({ opted_out_at: null });
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it('keeps every carrier keyword off the desk', async () => {
     // STOP is a command to the compliance machinery, not conversation. A row
     // reading "STOP" on a deal timeline reads as a customer saying it mid-order.
     for (const keyword of ['STOP', 'stop', 'START', 'HELP']) {
       mockedDesk.mockClear();
-      queueFrom([makeChain(ok(null)), makeChain(ok(null))]);
-      await smsEventDeps().reply(contact.phone, keyword, 42, false, 'Jane Doe', 'msg-5');
+      queueFrom(sendChains());
+      telnyxAccepts();
+      await smsEventDeps().reply(contact.phone, keyword, 42, false, 'Jane Doe', 'msg-11');
       expect(mockedDesk, keyword).not.toHaveBeenCalled();
     }
   });
+});
 
-  it('keeps attachments out of it', async () => {
-    // The photo of the damaged pallet IS the message, and a text-only reader
-    // answering it would be answering something it cannot see.
+describe('what never reaches the deal engine', () => {
+  /**
+   * A photo with no words is a damaged pallet or a purchase order, and it needs
+   * a person's eyes. Nothing here can read it, so nothing here may answer it,
+   * and the card is what stops that silence being invisible.
+   */
+  it('gives an attachment with no words to a person, not to the desk', async () => {
     queueFrom([makeChain(ok(null))]);
-    await smsEventDeps().reply(contact.phone, 'see attached', 42, true, 'Jane Doe', 'msg-6');
+
+    await smsEventDeps().reply(contact.phone, '   ', 42, true, 'Jane Doe', 'msg-12');
+
     expect(mockedDesk).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(outboxCards()).toEqual([{ text: 'attachment' }]);
   });
 
-  it('keeps an empty text out of it', async () => {
+  it('keeps an empty text with no attachment out of it', async () => {
     queueFrom([makeChain(ok(null))]);
-    await smsEventDeps().reply(contact.phone, '   ', 42, false, 'Jane Doe', 'msg-7');
+    await smsEventDeps().reply(contact.phone, '   ', 42, false, 'Jane Doe', 'msg-13');
     expect(mockedDesk).not.toHaveBeenCalled();
+    expect(fromCalls()).toEqual([]);
   });
 });
+

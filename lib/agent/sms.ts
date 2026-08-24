@@ -449,9 +449,47 @@ const HELP = /^\s*(help|info)\s*$/i;
  * machinery, not a message to the business.
  */
 export function isCarrierKeyword(body: string | null | undefined): boolean {
+  return carrierIntent(body) !== null;
+}
+
+export type CarrierIntent = 'opt_out' | 'opt_in' | 'help';
+
+/**
+ * Which of the three a text is, or null for a customer talking to us.
+ *
+ * The three-way split is the whole point and is why this is not a boolean: STOP
+ * stamps and stays quiet, START clears the stamp and stays quiet, and HELP
+ * answers. One regex for all three is the 2026-08-03 bug that blacklisted
+ * anybody who asked for help.
+ */
+export function carrierIntent(body: string | null | undefined): CarrierIntent | null {
   const text = body?.trim() ?? '';
-  if (!text) return false;
-  return OPT_OUT.test(text) || OPT_IN.test(text) || HELP.test(text);
+  if (!text) return null;
+  if (OPT_OUT.test(text)) return 'opt_out';
+  if (OPT_IN.test(text)) return 'opt_in';
+  if (HELP.test(text)) return 'help';
+  return null;
+}
+
+export interface CarrierDraft {
+  intent: CarrierIntent;
+  /** Empty for both opt branches: the carrier sends its own confirmation. */
+  reply: string;
+  autoSend: boolean;
+}
+
+/**
+ * The only reply this repo still writes, and it writes it because a carrier
+ * requires it.
+ *
+ * HELP must go out unread by a human: a HELP that waits for a tap is a HELP that
+ * failed. Both opt branches send NOTHING. On a registered campaign the carrier
+ * sends its own confirmation, and two messages for one word reads as a system
+ * that did not understand.
+ */
+export function draftCarrierReply(intent: CarrierIntent): CarrierDraft {
+  if (intent === 'help') return { intent, reply: renderTemplate('help'), autoSend: true };
+  return { intent, reply: '', autoSend: false };
 }
 
 /**
@@ -506,6 +544,20 @@ const BARGAINING = new RegExp(
     .join('|'),
   'i',
 );
+
+/**
+ * Whether the customer has started to negotiate.
+ *
+ * A DETECTOR ONLY, as of 2026-08-24. The stop stays here because it has to run
+ * before anything can answer, and a detector that has to survive a model call is
+ * not a stop. The SENTENCE moved to Akme: this reports what it saw through the
+ * desk's `hint` field, and the one writer decides what a person opening a
+ * negotiation reads.
+ */
+export function isBargaining(body: string | null | undefined): boolean {
+  const text = body?.trim() ?? '';
+  return text.length > 0 && BARGAINING.test(text);
+}
 
 export interface SmsDraft {
   intent: SmsIntent;

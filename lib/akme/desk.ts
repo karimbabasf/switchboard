@@ -51,8 +51,18 @@ export type DeskOutcome =
    * purpose. Answering anyway would talk over the card.
    */
   | { kind: 'silent' }
-  /** The desk is not armed for this, or could not read it. The old path answers. */
-  | { kind: 'declined' }
+  /**
+   * The desk did not take it, and says why.
+   *
+   * A DECLINE NOW CARRIES ITS OWN WORDS when a customer is waiting, and that is
+   * the field this type had no room for until 2026-08-24. There used to be an
+   * old path below this one: a decline fell through to a local drafter that
+   * wrote its own sentence out of a template, which is the second writer the
+   * door exists to remove. The drafter is gone, so a decline that leaves a
+   * customer waiting has to arrive with Akme's holding line on it. `reply` is
+   * null when nobody is waiting, which is the channel simply not being armed.
+   */
+  | { kind: 'declined'; reason: string | null; reply: string | null }
   /**
    * The door never answered, so what it did is UNKNOWN.
    *
@@ -70,6 +80,22 @@ export async function askAkmeDesk(input: {
   displayName: string | null;
   /** The `messages` row this text was filed as, so Akme can point back at it. */
   messageId: string | null;
+  /**
+   * How many attachments came with the words.
+   *
+   * Nothing here can read one, and nothing here may describe one either, so the
+   * only honest thing to pass on is that one exists. Akme decides what to say
+   * about a message it has been told it is not seeing all of.
+   */
+  attachments: number;
+  /**
+   * What this repo noticed deterministically, ahead of any model.
+   *
+   * `bargaining` is Karim's zero-tolerance stop, and it stays here because a
+   * detector that has to survive a model call is not a stop. Only the SENTENCE
+   * moved: this reports what it saw, and the one writer decides the words.
+   */
+  hint?: 'bargaining';
 }): Promise<DeskOutcome> {
   const base = optionalEnv('AKME_BASE_URL', 'http://localhost:3001').replace(/\/$/, '');
 
@@ -78,9 +104,9 @@ export async function askAkmeDesk(input: {
     token = signToken({ scope: 'desk_inbound' }, env('DESK_INBOUND_SECRET'), TOKEN_TTL_SECONDS);
   } catch {
     // No secret configured means the desk was never set up here. That is the
-    // pre-desk state, in which the old path is the whole system, so it is a
-    // decline and not an outage.
-    return { kind: 'declined' };
+    // pre-desk state, and it is a configuration fact rather than an outage, so
+    // it declines with no words: nothing here is entitled to answer instead.
+    return { kind: 'declined', reason: 'no desk secret is configured here', reply: null };
   }
 
   const controller = new AbortController();
@@ -95,6 +121,10 @@ export async function askAkmeDesk(input: {
         body: input.body,
         displayName: input.displayName,
         sourceId: input.messageId,
+        attachments: input.attachments,
+        // Omitted rather than sent as null, so the field's presence is the
+        // signal and the door does not have to read a null as an absence.
+        ...(input.hint ? { hint: input.hint } : {}),
       }),
       signal: controller.signal,
     });
@@ -106,12 +136,20 @@ export async function askAkmeDesk(input: {
     if (res.status === 401 || res.status === 503) {
       return { kind: 'unreachable', reason: `Akme answered ${res.status}` };
     }
-    if (!res.ok) return { kind: 'declined' };
+    if (!res.ok) return { kind: 'declined', reason: `Akme answered ${res.status}`, reply: null };
 
-    const json = (await res.json().catch(() => ({}))) as { handled?: boolean; reply?: string | null };
-    if (!json.handled) return { kind: 'declined' };
-
+    const json = (await res.json().catch(() => ({}))) as {
+      handled?: boolean;
+      reply?: string | null;
+      reason?: string | null;
+    };
     const reply = typeof json.reply === 'string' ? json.reply.trim() : '';
+
+    // A decline can still carry words. Akme answers `{handled:false}` with a
+    // holding line whenever a customer is left waiting, and with a null reply
+    // when nobody is, so both halves of the field are meaningful.
+    if (!json.handled) return { kind: 'declined', reason: json.reason ?? null, reply: reply || null };
+
     return reply ? { kind: 'answer', reply } : { kind: 'silent' };
   } catch (err) {
     const reason =

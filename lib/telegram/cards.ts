@@ -60,46 +60,15 @@ export interface MarkQuoteHandledParams {
   id: string;
 }
 
-export interface SmsDraftCardInput {
-  phone: string;
-  intent: string;
-  reply: string;
-  /** Why this one is waiting for a tap instead of having gone already. */
-  reason: string;
-}
-
-/**
- * A drafted reply the agent would not send on its own.
- *
- * The draft is shown in full, so the decision is "is this right" rather than
- * "what did it want to say". Tapping Send sends exactly this text; typing a
- * reply in the topic instead sends that, through the path that already exists.
- */
-export async function smsDraftCard(input: SmsDraftCardInput): Promise<TextCardPayload> {
-  const lines = [
-    '<b>Draft reply</b>',
-    `<i>${escapeHtml(input.intent)} · ${escapeHtml(input.reason)}</i>`,
-    '',
-    escapeHtml(input.reply),
-    '',
-    '<i>Send it, or just type your own reply here.</i>',
-  ];
-
-  const send = await makeCallbackButton('Send', CALLBACK_ACTIONS.SEND_SMS, {
-    phone: input.phone,
-    text: input.reply,
-  } satisfies SendSmsParams);
-
-  return { text: lines.join('\n'), reply_markup: { inline_keyboard: [[send]] } };
-}
-
 export interface ApplyOrderChangeParams {
   order_id: string;
   sku: string;
   qty: number;
 }
 
-export interface OrderChangeCardInput extends SmsDraftCardInput {
+export interface OrderChangeCardInput {
+  /** The customer's own words, which is what "make it 5" has to be read against. */
+  body: string;
   /** Null when we could not tell which of their orders this is about. */
   order: { id: string; reference: string | null; status: string } | null;
   lines: { sku: string; name: string; qty: number; unit: string }[];
@@ -118,6 +87,12 @@ export interface OrderChangeCardInput extends SmsDraftCardInput {
  * The button is frequently absent and that is the design working: no confident
  * number, no button. The card is still worth sending, because it carries their
  * words and their order.
+ *
+ * IT CARRIES NO DRAFT REPLY, as of 2026-08-24. It used to, with a Send button
+ * beside Apply, and both of those are now wrong: the reply was a sentence this
+ * repo wrote, and by the time this card exists Akme's desk has already answered
+ * the customer, so a second tap would text them twice. What is left is what this
+ * card was always for, which is acting on the order.
  */
 export async function orderChangeCard(input: OrderChangeCardInput): Promise<TextCardPayload> {
   const lines = ['<b>Order change requested</b>'];
@@ -129,11 +104,11 @@ export async function orderChangeCard(input: OrderChangeCardInput): Promise<Text
     lines.push('<i>No open order matched this number.</i>');
   }
 
+  lines.push('', 'They wrote:', escapeHtml(input.body));
+
   if (input.lines.length) {
     lines.push('', ...input.lines.map((l) => `· ${escapeHtml(l.name)} x ${l.qty} ${escapeHtml(l.unit)}`));
   }
-
-  lines.push('', '<b>Draft reply</b>', escapeHtml(input.reply));
 
   const buttons: InlineKeyboardButton[] = [];
   if (input.proposal && input.order) {
@@ -148,16 +123,9 @@ export async function orderChangeCard(input: OrderChangeCardInput): Promise<Text
     );
   }
 
-  buttons.push(
-    await makeCallbackButton('Send reply', CALLBACK_ACTIONS.SEND_SMS, {
-      phone: input.phone,
-      text: input.reply,
-    } satisfies SendSmsParams),
-  );
-
-  // One button per row: "Apply" changes an order and "Send reply" texts a
-  // customer, and side by side at thumb width they are one mis-tap apart.
-  return { text: lines.join('\n'), reply_markup: { inline_keyboard: buttons.map((b) => [b]) } };
+  return buttons.length > 0
+    ? { text: lines.join('\n'), reply_markup: { inline_keyboard: buttons.map((b) => [b]) } }
+    : { text: lines.join('\n') };
 }
 
 export interface SmsAutoSentCardInput {
@@ -230,6 +198,95 @@ export function deskSilentCard(input: DeskSilentCardInput): TextCardPayload {
       escapeHtml(input.body),
       '',
       'Akme handled the message and returned no reply, which it should never do. The customer is waiting. Answer them here, then check why the engine went quiet.',
+    ].join('\n'),
+  };
+}
+
+export interface DeskDeclinedCardInput {
+  /** Akme's own word for why, or null when it did not give one. */
+  reason: string | null;
+  body: string;
+  /** The holding line Akme wrote and this repo sent, or null if it sent nothing. */
+  reply: string | null;
+}
+
+/**
+ * Akme read the message and did not take it.
+ *
+ * This used to be invisible, because a decline fell through to a local drafter
+ * and the customer got a template. There is no drafter now, so a decline is
+ * either Akme's own holding line going out or nothing going out at all, and
+ * both need saying: the first so nobody answers twice, the second because a
+ * customer is sitting in silence.
+ *
+ * No Send button, for the same reason deskSilentCard has none. Whatever should
+ * be said next is a person's sentence, typed in the topic.
+ */
+export function deskDeclinedCard(input: DeskDeclinedCardInput): TextCardPayload {
+  const lines = [
+    input.reply ? '💬 <b>The desk declined, and sent its holding line</b>' : '⚠️ <b>The desk declined and nothing was sent</b>',
+    `<i>${escapeHtml(input.reason ?? 'no reason given')}</i>`,
+    '',
+    'They wrote:',
+    escapeHtml(input.body),
+  ];
+  if (input.reply) lines.push('', 'We sent:', escapeHtml(input.reply));
+  else lines.push('', 'Nobody has answered them. Reply here.');
+  return { text: lines.join('\n') };
+}
+
+export interface SmsBlockedCardInput {
+  phone: string;
+  /** The words that were written and then refused at the door. */
+  reply: string;
+  reason: string;
+}
+
+/**
+ * The desk wrote a reply and this repo refused to send it.
+ *
+ * SMS_ALLOWLIST is enforced here and Akme deliberately holds no copy of it, so
+ * Akme's turn can report a clean send for a number the door then refuses. That
+ * landed in a console.error inside a catch that swallowed everything until
+ * 2026-08-24. By the time it happens the desk has spent a model call and may
+ * have claimed a quote against the order, so the refusal is not a detail.
+ *
+ * The words are shown in full: the point is that a person can see what the
+ * customer did NOT receive, and decide whether the allowlist is the bug.
+ */
+export function smsBlockedCard(input: SmsBlockedCardInput): TextCardPayload {
+  return {
+    text: [
+      '🚫 <b>A reply was written and then blocked at the door</b>',
+      `<i>${escapeHtml(input.reason)}</i>`,
+      '',
+      `Nothing reached ${escapeHtml(formatPhoneForDisplay(input.phone))}. It would have said:`,
+      escapeHtml(input.reply),
+      '',
+      'Check SMS_ALLOWLIST. Akme may already hold a quote against this order.',
+    ].join('\n'),
+  };
+}
+
+export interface AttachmentOnlyCardInput {
+  attachments: number;
+}
+
+/**
+ * A picture and no words, which nothing in this system can read.
+ *
+ * It is usually a damaged pallet or a purchase order, and the attachment IS the
+ * message. It is deliberately never sent to Akme: a text-only reader answering
+ * it would be answering something it cannot see. So nothing is sent, and this
+ * card is what stops that silence being invisible. The attachment itself is
+ * already in the topic on the inbound card above it.
+ */
+export function attachmentOnlyCard(input: AttachmentOnlyCardInput): TextCardPayload {
+  return {
+    text: [
+      '📎 <b>An attachment with no words</b>',
+      '',
+      `${input.attachments} attachment${input.attachments === 1 ? '' : 's'} and nothing written. Nobody can read it but a person, so nothing was sent and nothing was asked of Akme.`,
     ].join('\n'),
   };
 }
