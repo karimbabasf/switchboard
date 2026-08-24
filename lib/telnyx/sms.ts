@@ -10,6 +10,7 @@ import {
   inboundSmsCard,
   orderChangeCard,
   smsAutoSentCard,
+  smsBlockedCard,
 } from '../telegram/cards';
 import type { TextCardPayload } from '../telegram/cards';
 import { carrierIntent, draftCarrierReply, isBargaining, isCarrierKeyword } from '../agent/sms';
@@ -288,6 +289,36 @@ async function card(threadId: number, payload: TextCardPayload): Promise<void> {
 }
 
 /**
+ * Sends, and says out loud when the door refuses.
+ *
+ * SMS_ALLOWLIST is enforced in sendSms and Akme deliberately holds no copy of
+ * it: the gate belongs where every caller passes, and a second copy over there
+ * is drift this repo has paid for once. The cost is that Akme's turn can report
+ * a clean send for a number this door then refuses, and until 2026-08-24 that
+ * landed in a console.error inside a catch that swallowed everything. By the
+ * time it happens the desk has spent a model call and may have claimed a quote
+ * against the order, so it is not a detail.
+ *
+ * ONLY SmsBlocked is caught. Everything else keeps the swallow it always had:
+ * the inbound message is already filed and already in Telegram, so a Telnyx
+ * outage costs an automatic reply rather than the message itself.
+ *
+ * Returns whether the words really went out, so no caller posts a card claiming
+ * a customer received something they did not.
+ */
+async function sendOrSayWhyNot(phone: string, reply: string, threadId: number): Promise<boolean> {
+  try {
+    await sendSms(phone, reply);
+    return true;
+  } catch (err) {
+    if (!(err instanceof SmsBlocked)) throw err;
+    console.error(`[sms] ${phone}: ${err.message}`);
+    await card(threadId, smsBlockedCard({ phone, reply, reason: err.message }));
+    return false;
+  }
+}
+
+/**
  * Answers an inbound text, or says out loud that nobody did.
  *
  * Never throws into the webhook path. The inbound message is already stored and
@@ -350,8 +381,9 @@ async function replyWithAgent(
       }
       case 'help': {
         const draft = draftCarrierReply('help');
-        await sendSms(phone, draft.reply);
-        await card(threadId, smsAutoSentCard({ intent: draft.intent, reply: draft.reply }));
+        if (await sendOrSayWhyNot(phone, draft.reply, threadId)) {
+          await card(threadId, smsAutoSentCard({ intent: draft.intent, reply: draft.reply }));
+        }
         return;
       }
       default:
@@ -393,16 +425,23 @@ async function replyWithAgent(
 
     switch (outcome.kind) {
       case 'answer':
-        await sendSms(phone, outcome.reply);
-        await card(threadId, smsAutoSentCard({ intent: 'desk', reply: outcome.reply }));
+        if (await sendOrSayWhyNot(phone, outcome.reply, threadId)) {
+          await card(threadId, smsAutoSentCard({ intent: 'desk', reply: outcome.reply }));
+        }
         return;
 
-      case 'declined':
+      case 'declined': {
         // A decline now carries its own words when a customer is waiting, and
-        // carries null when nobody is (the channel is simply not armed).
-        if (outcome.reply) await sendSms(phone, outcome.reply);
-        await card(threadId, deskDeclinedCard({ reason: outcome.reason, body: said, reply: outcome.reply }));
+        // carries null when nobody is (the channel is simply not armed). The
+        // card reports what really went out, so a blocked holding line reads as
+        // a customer still waiting rather than as one who was answered.
+        const sent = outcome.reply ? await sendOrSayWhyNot(phone, outcome.reply, threadId) : false;
+        await card(
+          threadId,
+          deskDeclinedCard({ reason: outcome.reason, body: said, reply: sent ? outcome.reply : null }),
+        );
         return;
+      }
 
       case 'silent':
         // The desk took it and said nothing. That USED to be a design: an

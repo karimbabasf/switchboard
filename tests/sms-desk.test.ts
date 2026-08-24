@@ -43,7 +43,9 @@ vi.mock('../lib/telegram/cards', () => ({
   smsAutoSentCard: vi.fn((input: { intent: string; reply: string }) => ({
     text: `auto:${input.intent}:${input.reply}`,
   })),
-  deskDeclinedCard: vi.fn((input: { reason: string | null }) => ({ text: `declined:${input.reason}` })),
+  deskDeclinedCard: vi.fn((input: { reason: string | null; reply: string | null }) => ({
+    text: `declined:${input.reason}${input.reply ? '' : ':unsent'}`,
+  })),
   deskSilentCard: vi.fn(() => ({ text: 'silent' })),
   deskDownCard: vi.fn((input: { reason: string }) => ({ text: `deskdown:${input.reason}` })),
   smsBlockedCard: vi.fn((input: { reason: string }) => ({ text: `blocked:${input.reason}` })),
@@ -58,6 +60,7 @@ vi.mock('../lib/akme/desk', () => ({ askAkmeDesk: vi.fn() }));
 
 import { db } from '../lib/db';
 import { askAkmeDesk } from '../lib/akme/desk';
+import { noteOutboundSms } from '../lib/crm/timeline';
 
 import { smsEventDeps } from '../lib/telnyx/sms';
 import { renderTemplate } from '../lib/agent/templates';
@@ -138,7 +141,7 @@ beforeEach(() => {
   vi.stubEnv('SMS_ALLOWLIST', '*');
   vi.stubGlobal('fetch', vi.fn());
   mockedDesk.mockReset();
-
+  vi.mocked(noteOutboundSms).mockClear();
 });
 
 afterEach(() => {
@@ -188,7 +191,7 @@ describe('the four desk outcomes are the whole of the reply path', () => {
     await smsEventDeps().reply(contact.phone, 'what are your hours', 42, false, 'Jane Doe', 'msg-3');
 
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
-    expect(outboxCards()).toEqual([{ text: 'declined:channel_not_armed' }]);
+    expect(outboxCards()).toEqual([{ text: 'declined:channel_not_armed:unsent' }]);
   });
 
   it('never drafts over a desk that said nothing, but does raise it', async () => {
@@ -337,3 +340,71 @@ describe('what never reaches the deal engine', () => {
   });
 });
 
+
+/**
+ * SMS_ALLOWLIST is enforced here, at the door, and Akme deliberately holds no
+ * copy of it (decision 3 of the 2026-08-24 plan: the gate belongs where every
+ * caller passes, and a second copy in Akme is drift this repo has paid for
+ * once). So Akme's turn can report a clean send for a number this repo then
+ * refuses. That used to land in a console.error inside a catch that swallowed
+ * everything, and by the time it happens the desk has spent a model call and may
+ * have claimed a quote against the order, so the refusal has to be visible.
+ */
+describe('a text the allowlist refuses is said out loud', () => {
+  it("posts a card when the allowlist blocks the desk's reply", async () => {
+    vi.stubEnv('SMS_ALLOWLIST', '+15550000000');
+    mockedDesk.mockResolvedValue({ kind: 'answer', reply: 'Hi, that is $24.42 a case.' });
+    queueFrom([makeChain(ok(null))]);
+
+    await smsEventDeps().reply(contact.phone, 'how much', 42, false, 'Jane Doe', 'msg-14');
+
+    // The blocked card and nothing else: an auto-sent card here would claim a
+    // customer received a message that never left.
+    expect(outboxCards()).toEqual([{ text: `blocked:${contact.phone} is not on SMS_ALLOWLIST` }]);
+  });
+
+  it('says a decline was blocked too, rather than reporting it as sent', async () => {
+    vi.stubEnv('SMS_ALLOWLIST', '+15550000000');
+    mockedDesk.mockResolvedValue({
+      kind: 'declined',
+      reason: 'desk_wrote_nothing',
+      reply: 'Hi, a person is picking this up now.',
+    });
+    queueFrom([makeChain(ok(null)), makeChain(ok(null))]);
+
+    await smsEventDeps().reply(contact.phone, 'anything', 42, false, 'Jane Doe', 'msg-15');
+
+    expect(outboxCards()).toEqual([
+      { text: `blocked:${contact.phone} is not on SMS_ALLOWLIST` },
+      { text: 'declined:desk_wrote_nothing:unsent' },
+    ]);
+  });
+
+  // Nothing anywhere may claim a customer received a message that Telnyx never
+  // accepted. Akme writes no outbound row on a live hand-back, and the door
+  // writes one only after a send succeeds, so a block leaves the timeline
+  // correctly empty rather than showing an answer nobody got.
+  it('leaves no outbound timeline row when the send was blocked', async () => {
+    vi.stubEnv('SMS_ALLOWLIST', '+15550000000');
+    mockedDesk.mockResolvedValue({ kind: 'answer', reply: 'Hi, that is $24.42 a case.' });
+    queueFrom([makeChain(ok(null))]);
+
+    await smsEventDeps().reply(contact.phone, 'how much', 42, false, 'Jane Doe', 'msg-16');
+
+    expect(vi.mocked(noteOutboundSms)).not.toHaveBeenCalled();
+  });
+
+  // Everything that is not a block keeps the swallow it always had: the inbound
+  // message is already filed and already in Telegram, so a Telnyx outage costs
+  // an automatic reply and not the message.
+  it('still swallows a send that failed for any other reason', async () => {
+    mockedDesk.mockResolvedValue({ kind: 'answer', reply: 'Hi, that is $24.42 a case.' });
+    queueFrom(sendChains());
+    vi.mocked(fetch).mockRejectedValue(new Error('ECONNRESET'));
+
+    await expect(
+      smsEventDeps().reply(contact.phone, 'how much', 42, false, 'Jane Doe', 'msg-17'),
+    ).resolves.toBeUndefined();
+    expect(outboxCards()).toEqual([]);
+  });
+});
