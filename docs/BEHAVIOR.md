@@ -8,6 +8,15 @@ behavior the agent has.
 a human may make a promise. A price, a date, a discount, an accepted order and an
 invoice are all promises.
 
+**ONE ENGINE, BOTH CHANNELS, from 2026-08-25.** Email used to run Akme's LLM
+desk (`lib/ops/agent/turn.ts`) while a text ran the deal ladder
+(`lib/ops/deal/run.ts`), so the same question got a different answer depending on
+how it arrived. Email now runs the ladder too, through
+`lib/ops/deal/email-door.ts`, and falls through to the desk only when the ladder
+declines. The sequence, the questions and their order are identical on both;
+only the register and the transport differ. This page is still the contract for
+both.
+
 ---
 
 ## Both channels
@@ -53,6 +62,24 @@ four". They live together in `BUSINESS.spoken` so a new one cannot be forgotten.
 - **A discount**, or that one might exist.
 - **A delivery date or a time window.** We do not have that data and a date is a promise.
 - **Stock levels, lead times, minimums, returns, or payment terms.** Not in the facts, so not in the mouth.
+
+  NARROWED TO THE FIGURE, Karim 2026-08-25. A COUNT still never leaves: the
+  guard is `statesStockCount` in Akme's `lib/ops/crm/guards.ts` and it withholds
+  the whole reply, not the sentence. What is now allowed is the BINARY, and only
+  in a catalogue list: "5\" Hand Wrap Film (out of stock) - $31.68 per case". A
+  customer asking what we offer is owed the answer to that question, and naming
+  what we cannot ship today is not a number.
+
+  Two related rules went the same day and are recorded here because the code that
+  enforced them is gone:
+
+  - **A short quote is no longer capped to the shelf.** Akme quoted 21 of 25
+    cases on the live line, with no reason given, and the customer read it as a
+    refusal. `decideQuote` now prices the whole ask and posts a Telegram card
+    with the shortfall. The customer is told nothing about it, which is the same
+    rule as above pointed at the same figure.
+  - **The `short_supply` sentence is deleted.** It said "priced 21 of the 22 you
+    asked for". There is nothing left for it to describe.
 - **Anything invented.** If it is not a frozen fact or something a tool just returned, the answer is a person, not a guess.
 
 ### On a CALL, a human is offered, not imposed
