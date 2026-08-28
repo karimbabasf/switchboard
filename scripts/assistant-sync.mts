@@ -72,7 +72,26 @@ if (pinned) {
   // No pinned id: find by name before creating, so a second run without the env
   // var set does not quietly produce a duplicate.
   const list = await api<{ data: Assistant[] }>('/ai/assistants');
-  const existing = (list.data ?? []).find((a) => a.name === config.name);
+  /**
+ * The assistant answering the live phone line, which this repo must never touch.
+ *
+ * Belt on top of the braces. The name is different now, so the search below
+ * cannot find it, but a name is one careless edit from colliding again and the
+ * cost of that edit is a customer hearing an untested system. An id is not.
+ */
+const V1_ASSISTANT_ID = 'assistant-00000000-0000-4000-8000-000000000001';
+
+const existing = (list.data ?? []).find((a) => a.name === config.name);
+
+if (existing?.id === V1_ASSISTANT_ID || process.env.TELNYX_ASSISTANT_ID === V1_ASSISTANT_ID) {
+  console.error(
+    `\nRefusing to sync: that is the assistant on the LIVE line (${V1_ASSISTANT_ID}).\n` +
+      `This repo is the fork. Syncing it here rewrites what real callers hear.\n` +
+      `If you genuinely mean to move the line to this repo, do it with pnpm repoint,\n` +
+      `which changes all five pointers together and can be undone the same way.\n`,
+  );
+  process.exit(1);
+}
 
   if (existing) {
     await api<unknown>(`/ai/assistants/${existing.id}`, {

@@ -14,23 +14,31 @@ two, which are the ones that change what a real caller hears.
 - `pnpm preflight`: all 27 checks pass
 - `pnpm vitest run`: 678 pass, 0 fail. `npx tsc --noEmit`: clean
 
-## The two steps that change the live line
+## The assistant is already made
 
-Nothing a caller hears changes until both of these run. The number still answers
-on v1 until then.
+`pnpm assistant:sync` has been run. It created **Akme line 2**,
+`assistant-00000000-0000-4000-8000-000000000002`, with all nine tools pointing
+at switchboard-2. The live assistant, **Akme line**,
+`assistant-00000000-0000-4000-8000-000000000001`, still has its six tools and
+still points at switchboard-v1. Nothing on the phone has changed.
+
+**It went wrong the first time and the fix is in the repo.** The plan was that
+a blank `TELNYX_ASSISTANT_ID` would make the sync CREATE rather than overwrite.
+It does not: the script falls back to finding an assistant BY NAME, the fork
+carried the same name as v1, and the first sync rewrote the live assistant with
+this repo's brief and tool URLs. Nobody called in the ninety seconds before it
+was caught and reverted, and that was luck rather than design. Two things now
+stop it: the assistant here is named `Akme line 2`, and `assistant-sync.mts`
+refuses outright if the id it is about to write is v1's.
+
+## The one step that changes the live line
 
 ```bash
 cd ../switchboard-2
-pnpm assistant:sync            # 1. makes a NEW Telnyx assistant, does not touch v1's
-pnpm repoint https://switchboard.example.com   # 2. points the number here
+pnpm repoint https://switchboard.example.com
 ```
 
-`assistant:sync` is safe on its own. `TELNYX_ASSISTANT_ID` is deliberately blank
-in this repo, so the sync CREATES an assistant rather than overwriting the one
-answering the phone right now. That blank is the only thing standing between a
-sync and a silent rewrite of the live line, so do not fill it in by hand.
-
-`repoint` is the one that moves real callers. It changes five things at once:
+That is the only command left, and it is the one that moves real callers. It changes five things at once:
 the Call Control webhook, the messaging webhook, the assistant's tool URLs, the
 Telegram webhook, and `switchboard_settings.public_base_url` which the pg_cron
 worker reads.

@@ -631,7 +631,20 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
       : undefined;
 
   return {
-    name: 'Akme line',
+    // 'Akme line 2', NOT 'Akme line', and the difference is not cosmetic.
+  //
+  // assistant-sync.mts falls back to finding an assistant BY NAME when
+  // TELNYX_ASSISTANT_ID is blank, and TELNYX_ASSISTANT_ID is deliberately blank
+  // in this repo so a sync cannot overwrite the live line. Those two safeguards
+  // cancelled each other out on 2026-08-27: the blank id sent the script to the
+  // name search, the name still matched v1's assistant, and `pnpm
+  // assistant:sync` rewrote the assistant answering real customers with this
+  // repo's brief and this repo's tool URLs. Nobody called during the ninety
+  // seconds it took to notice, and that was luck.
+  //
+  // A fork sharing a name with the thing it forked from is the whole bug. Do not
+  // rename this back while v1 exists.
+  name: 'Akme line 2',
     // Latency is the product on a phone line, so this defaults to a native
     // Telnyx-hosted model with no external hop. NEAR AI Cloud stays the default
     // everywhere latency is free (summaries, SMS drafting) and Task 11 measures
