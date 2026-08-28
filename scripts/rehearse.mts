@@ -109,7 +109,23 @@ const TOOLS = assistantConfig({ publicBaseUrl: 'https://rehearsal.invalid', tool
  * says. A tool result here only has to be plausible enough for the conversation
  * to carry on to the next caller turn.
  */
-const TOOL_RESULT: Record<string, string> = {
+/**
+ * A stub may be a FUNCTION of the arguments the model passed.
+ *
+ * Added 2026-08-27 because a static stub is a lie the model will fill in. The
+ * price_products stub returned two products' prices no matter what was asked,
+ * and on a real run the model answered a question about hand wrap film by
+ * inventing "one forty nine dollars a case" (it is $48.40) and then a pallet
+ * total of "seven thousand one fifty two dollars", which is both a made up
+ * number and the arithmetic the prompt forbids. Nothing in the order checks
+ * caught it; an unrelated check did, by accident.
+ *
+ * A stub that answers what it was actually asked removes the gap. What the model
+ * says after that is the model's, not the harness's.
+ */
+type Stub = string | ((args: Record<string, unknown>) => string);
+
+const TOOL_RESULT: Record<string, Stub> = {
   // What the server ACTUALLY says now. The rehearsal used to reply "Ringing the
   // team now" to every escalate, which quietly rehearsed a world where the dial
   // always goes through: the agent never saw a refusal, so nothing here could
@@ -123,9 +139,26 @@ const TOOL_RESULT: Record<string, string> = {
   check_order: 'No recent order on this number.',
   // The three order tools. Their replies carry REAL numbers, because the check
   // that matters is whether the agent repeats the tool's number or invents one.
-  price_products: 'Bubble cushion wrap is $52.80 a bundle. Newsprint packing paper is $17.38 a bundle.',
-  price_order:
-    '25 cases of tan hot melt tape at $24.42, 25 cases of 18 inch stretch film at $42.90, and 25 bundles of bubble cushion wrap at $52.80. Subtotal $3,003.00.',
+  // Answers what it was asked, off the real catalogue, so the model is never
+  // handed a gap where a price should be.
+  price_products: (args) => {
+    const asked = Array.isArray(args.products) ? (args.products as string[]) : [];
+    const picked = BUSINESS.products.filter((p) => asked.length === 0 || asked.includes(p.id));
+    if (picked.length === 0) return 'No such product.';
+    return picked.map((p) => `${p.spokenName} is ${say(p.unitPrice)} a ${p.unit}.`).join(' ');
+  },
+  price_order: (args) => {
+    const lines = Array.isArray(args.lines) ? (args.lines as { product: string; units: number }[]) : [];
+    const priced = lines
+      .map((l) => ({ p: BUSINESS.products.find((x) => x.id === l.product), units: l.units }))
+      .filter((x): x is { p: (typeof BUSINESS.products)[number]; units: number } => Boolean(x.p));
+    if (priced.length === 0) return 'Nothing to price.';
+    const total = priced.reduce((sum, x) => sum + Math.round(x.p.unitPrice * 100) * x.units, 0);
+    const reading = priced
+      .map((x) => `${x.units} ${x.p.unit}${x.units === 1 ? '' : 's'} of ${x.p.spokenName} at ${say(x.p.unitPrice)}`)
+      .join(', ');
+    return `${reading}. Subtotal ${say(total / 100)}.`;
+  },
   send_order_link: 'Sent. The link is on its way to the number you are calling from.',
 };
 
@@ -149,6 +182,10 @@ interface Transcript {
 
 type Check = (t: Transcript) => string | null;
 
+/** The six real prices, spoken the way the agent has to say them. */
+const say = (n: number) =>
+  n % 1 === 0 ? `${n} dollars` : `${Math.floor(n)} ${String(Math.round((n % 1) * 100)).padStart(2, '0')}`;
+
 interface Scenario {
   name: string;
   why: string;
@@ -160,7 +197,7 @@ interface Scenario {
    * that the server can now REFUSE an escalation, and an agent that is never
    * refused in rehearsal is an agent nobody has rehearsed the refusal with.
    */
-  toolResult?: Record<string, string>;
+  toolResult?: Record<string, Stub>;
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +364,24 @@ const FILM_WIDTHS = /\b(5|five|18|eighteen)[- ]?inch(es)?\b/gi;
  * Reciting a spec at somebody who did not ask for one. Widths are stripped
  * before matching, so "five inch" is fine and "five inch, 80 gauge" is not.
  */
+/**
+ * A dollar figure attached to a pallet, anywhere on any scenario.
+ *
+ * PROMOTED TO A GLOBAL CHECK 2026-08-27, the same reasoning as THIRD_PARTY
+ * above: it was scored on the two scenarios that mention a pallet, and the run
+ * that produced "a pallet comes to roughly seven thousand one fifty two dollars"
+ * was neither of them. `palletCountsConfirmed` is false, so every pallet count
+ * in the brief is inferred from a standard build and checked against nothing.
+ * Multiplying an unconfirmed count by a real price gives a confident number
+ * built on a guess, said out loud, on a recorded call, to somebody who is then
+ * told the price does not move.
+ */
+const PALLET_TOTAL = /\$[\d,.]+ (?:a|per) pallet|a pallet (?:is|runs|costs|comes to|would be)\s+(?:\$|roughly|about|around)?\s*[\d,.]*\s*(?:thousand|hundred|\d)/i;
+const noPalletTotal = (): Check => (t) => {
+  const hit = t.said.find((x) => PALLET_TOTAL.test(x));
+  return hit ? `priced a whole pallet off an unconfirmed count: "${hit.trim().slice(0, 140)}"` : null;
+};
+
 const saysNoSpec = (): Check => (t) => {
   const hit = t.said.find((s) => SPEC.test(s.replace(FILM_WIDTHS, '')));
   return hit ? `recited a spec nobody asked for: "${hit.trim().slice(0, 140)}"` : null;
@@ -500,6 +555,9 @@ const repeatedOpener = (): Check => (t) => {
  */
 const GLOBAL_CHECKS: Check[] = [
   mustNotSay(FILLER, 'filler or performed hesitation'),
+  // Global since 2026-08-27. A price the invoice cannot honour is the one
+  // failure on this line that costs real money, and it was caught by accident.
+  noPalletTotal(),
   mustNotSay(REINTRODUCES, 'a second introduction, after the opener already gave one'),
   (t) => {
     const long = t.said.filter((s) => sentencesIn(s) > 3);
@@ -956,7 +1014,10 @@ const SCENARIOS: Scenario[] = [
     caller: ['What do you guys carry?', 'What about the prices?'],
     checks: [
       mustCall('price_products'),
-      mustSay(/\$|\d+\.\d{2}/, 'a price once one was asked for'),
+      // MONEY, not a digit regex. This asked for /\$|\d+\.\d{2}/ and the agent
+      // said "fifty-two dollars and eighty cents" and "seventeen thirty-eight", which is correct for a
+      // voice and matches neither. A check written for a page, scoring a phone.
+      mustSay(MONEY, 'a price once one was asked for'),
     ],
   },
   {
@@ -1170,7 +1231,10 @@ async function run(s: Scenario): Promise<Transcript> {
         turns.push({
           role: 'tool',
           tool_call_id: c.id,
-          content: s.toolResult?.[c.function.name] ?? TOOL_RESULT[c.function.name] ?? 'Done.',
+          content: ((): string => {
+            const stub = s.toolResult?.[c.function.name] ?? TOOL_RESULT[c.function.name] ?? 'Done.';
+            return typeof stub === 'function' ? stub(args) : stub;
+          })(),
         });
       }
     }
