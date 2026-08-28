@@ -71,3 +71,25 @@ free.
 Telegram gets its own group and its own order card later, Karim's call. The
 draft row already carries `large_order` for the card that does not exist yet.
 Text and email automation are the next job.
+
+## Known, not fixed
+
+The rehearsal sat at 30/39 on 2026-08-27. v1, which answers real customers
+today, scored 23/28 on the same harness through the same gateway, so this is not
+worse than what is live. Two of the failures are v1's too. What is left:
+
+- **The three sentence cap bites on a priced turn.** Reading the lines back, then
+  the subtotal, then "would you like me to send you the confirmation link" is
+  three sentences with nothing spare, and a longer order overruns. The fix is in
+  the prompt rather than in the check: say the subtotal WITHOUT reading the lines
+  back, since the customer is about to see every line on the form anyway. Called
+  in advance by the agent that wrote the brief, before the run that proved it.
+- **`order-prices-only-when-asked` is flaky.** Same prompt, two runs: it priced
+  all six once, and answered "Which of those would you like a price on?" the
+  next. Karim's rule is that a price question naming no product prices all six.
+- **Two failures are inherited.** `complaint-then-yes-transfers` and
+  `we-not-the-team` fail on v1 as well, so they are not this work's regressions
+  and fixing them belongs to whoever next touches the shared brief.
+- **The rehearsal is nondeterministic.** Three runs of the same code scored 28,
+  28 and 30, with different scenarios failing each time. Judge a trend across
+  runs, never a single number.
