@@ -278,8 +278,10 @@ also the number both repos print in code: `BUSINESS.phone` here and
 `CONTACT_PHONE` in Akme on `dev`. It stopped being a "test number" that day, on
 Karim's instruction to make everything use it.
 
-What has NOT moved is www.akmeusa.com, which runs off Akme `main` and still
-publishes (555) 555-0158, on Google Voice, unported. **So nothing a customer
-dials today touches this system.** Closing that needs two things shipped
-together: `lib/site.ts` onto `main`, and the 10DLC campaign copy, which names the
-old number as the published call to action.
+**Closed 2026-08-27.** Akme `dev` merged into `main`, www.akmeusa.com now serves
+the real app, and it publishes +1 555 555 0124. The 10DLC campaign copy went in the
+same change, so the message flow on file still describes the page a carrier reviewer
+opens. **A customer who dials the number on the site now reaches this system.**
+
+Still on the old number: the QuickBooks company record (`PrimaryPhone`), so invoices
+generated there carry it. That is a write to live books, so it is Karim's to make.

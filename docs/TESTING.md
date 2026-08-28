@@ -5,9 +5,9 @@ Written 2026-08-03, after the day-one build. Everything below is live right now.
 ## Before you start
 
 **Call and text +1 555 555 0124.** That is the Telnyx number this system answers.
-The number in code is now the Telnyx one, +1 555 555 0124. The number the LIVE SITE
-still publishes, (555) 555-0158, is on Google Voice and is not ported,
-so nothing you do to it touches any of this.
+From 2026-08-27 the live site publishes it too: www.akmeusa.com serves the real app
+and the confirmation link resolves there. (555) 555-0158 is the old Google Voice line,
+now unpublished and forwarded here, so nothing you do to it touches this directly.
 
 **Texts only reach your own phone.** `SMS_ALLOWLIST` is `+14155550142` and
 nothing else, so `sendSms` refuses every other recipient. That is deliberate and
