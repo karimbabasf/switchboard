@@ -66,6 +66,16 @@ describe('brief.ts: the business facts are one source', () => {
     });
   });
 
+  it('carries no dollar figure at all, real or invented', () => {
+    // Stronger than the six-prices check below, and it is the live failure of
+    // 2026-08-27 written down: the number the model said was not one of ours, so
+    // pinning only the real six would have passed a prompt that taught a fake
+    // one. The rule about inventing prices must not itself contain a price.
+    const prompt = systemPrompt();
+    expect(prompt).not.toMatch(/\$\s?\d/);
+    expect(prompt).not.toMatch(/\d+(?:\.\d{2})? dollars/i);
+  });
+
   it('keeps every price out of the prompt, so the model has nothing to multiply', () => {
     // The whole no-arithmetic rule rests on the model never seeing a number it
     // could work with. Prices live on the product rows and reach the caller only
@@ -166,13 +176,21 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     // one, total one, build one, or send one". Karim opened the line up to
     // prices and orders that day, so what guards the caller now is not a ban on
     // pricing, it is where the number came from.
-    expect(prompt).toMatch(/EVERY NUMBER YOU SAY CAME BACK FROM A TOOL, AND YOU NEVER DO ARITHMETIC/);
+    expect(prompt).toMatch(/A NUMBER YOU DID NOT JUST HEAR FROM A TOOL IS A NUMBER YOU MADE UP/);
+    // REWRITTEN AS THE FAILURE, NOT THE OPERATION, after the live run of
+    // 2026-08-27. "Never do arithmetic" was in the prompt and the model still
+    // said a case price for a product nobody had priced and a pallet total off
+    // it, because it did not experience either as arithmetic: it experienced
+    // being helpful about a pallet. The rule now names what it feels like.
+    expect(prompt).toMatch(/IT WILL NOT FEEL LIKE MAKING IT UP/);
+    expect(prompt).toMatch(/ON THIS TURN, for THAT product, in THAT unit/);
+    expect(prompt).toMatch(/AND YOU NEVER DO ARITHMETIC/);
     // Verb by verb rather than as one sentence, so rewording cannot quietly drop
     // one of them the way a single exact-phrase match would.
     for (const verb of [/do not add/i, /multiply/i, /round/i, /estimate/i]) {
       expect(prompt).toMatch(verb);
     }
-    expect(prompt).toMatch(/ONLY when a tool handed it to you on this call/i);
+    expect(prompt).toMatch(/cannot point at the tool result it came out of, you are making it up/i);
     // The old prompt told the agent to say "I will get a quote out to you today",
     // which is the agent promising to do the one thing it cannot do.
     expect(prompt).not.toMatch(/say: "I do not have pricing in front of me, but I will get a quote/i);
@@ -415,6 +433,12 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     expect(prompt).toMatch(/HOW MANY IS NOT ON THAT LIST ANY MORE/);
     expect(prompt).toMatch(/NEVER ASK HOW MANY OF SOMEBODY WHO ASKED A PRICE/);
     expect(prompt).toMatch(/one each and never two in a turn/i);
+    // Delivery or will call is NOT one of them since the live run of
+    // 2026-08-27: two turns went on asking it and the order never got sent. The
+    // link collects it, with the address and who they are, which is what the
+    // link is for.
+    expect(prompt).toMatch(/NEVER ASK DELIVERY OR WILL CALL/);
+    expect(prompt).toMatch(/Delivery or will call is NOT one of them/);
     // The upsell half is untouched and still banned everywhere it was.
     expect(prompt).toMatch(/Never "what else can I get you", never "anything else"/);
   });
@@ -998,6 +1022,8 @@ describe('brief.ts: the line prices and takes orders, from 2026-08-27', () => {
     // The failure this pins is the one offer_human already had: saying it is on
     // the way and calling nothing sends nothing.
     expect(prompt).toMatch(/Tell them it is on the way and STOP THERE/i);
+    // And say WHICH channel, or the caller looks in their email for a text.
+    expect(prompt).toMatch(/SAY THE WORD TEXT WHEN YOU SAY IT IS ON THE WAY/);
   });
 
   it('answers "email me the link" with the channels that actually exist', () => {

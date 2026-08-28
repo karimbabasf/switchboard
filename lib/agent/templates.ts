@@ -172,11 +172,19 @@ const RELAY_TEMPLATES: Readonly<
       `${BUSINESS.name}: your order is ready to confirm here: ${v.url} ` +
       `The link works for 48 hours. Questions? Call ${BUSINESS.phone}.`,
   },
+  // THE ONLY ONE OF THE THREE THAT CARRIES STOP, and the difference is who
+  // started it. A verification code and an order link are both answers to
+  // something the customer just did: they typed their number, or they said yes
+  // on the phone. This one arrives a day later at somebody who did not reply,
+  // which is the message a carrier looks hardest at on a 10DLC campaign and the
+  // one a person is most likely to read as a company that will not leave them
+  // alone. Carriers answer STOP at the network level on a registered campaign,
+  // so this is about being honest with the person, not about making STOP work.
   order_nudge: {
     vars: ['url'],
     render: (v) =>
       `${BUSINESS.name}: your order is still waiting on you. Confirm it here: ${v.url} ` +
-      `The link closes 24 hours from now. Call ${BUSINESS.phone} if you need a hand.`,
+      `Closes 24 hours from now. Call ${BUSINESS.phone} for a hand. Reply STOP to opt out.`,
   },
 });
 

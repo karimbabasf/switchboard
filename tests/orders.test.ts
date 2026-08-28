@@ -184,13 +184,17 @@ describe('parsing what the model handed us', () => {
     expect(parseLines('twenty five boxes of tape')).toBeNull();
   });
 
-  it('reads only the two fulfilment words, and asks when it is neither', () => {
+  it('reads the two fulfilment words, and reads anything else as nobody said', () => {
     expect(parseFulfilment('delivery')).toBe('delivery');
     expect(parseFulfilment('willcall')).toBe('willcall');
     expect(parseFulfilment('will call')).toBe('willcall');
     expect(parseFulfilment('pickup')).toBe('willcall');
+    // Null is "nobody has said yet", not "ask them". Failing closed here means
+    // never guessing which one, and the order page is where it gets settled.
     expect(parseFulfilment('whenever')).toBeNull();
     expect(parseFulfilment(undefined)).toBeNull();
+    expect(parseFulfilment(null)).toBeNull();
+    expect(parseFulfilment(42)).toBeNull();
   });
 });
 

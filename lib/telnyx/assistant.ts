@@ -444,7 +444,7 @@ const TOOL_SPECS: ToolSpec[] = [
       // "It does the arithmetic, so you never do" is the load-bearing sentence.
       // The model can multiply, will offer to, and is wrong often enough that a
       // subtotal it worked out lands on a real order at a real price.
-      'Price a whole order and get the subtotal to say out loud. Use as soon as the caller has said how many of something they want, including when they name several things at once. It does the arithmetic, so you never do: the subtotal it hands back is the only total you may say, and you say it exactly as it came back. It also tells you when we do not have that many, which you say plainly along with what we do have. A caller who says "boxes", "cartons" or "rolls" means that many cases or bundles: send the number as they said it and do not ask them which they meant. It hands back a token for send_order_link, which is for that tool and is never said out loud. If you are missing something it needs, the width of a film or whether it is delivery or will call, give the per unit prices with price_products first and ask for the missing piece after them, so the caller hears a number before they are asked a question.',
+      'Price a whole order and get the subtotal to say out loud. Use as soon as the caller has said how many of something they want, including when they name several things at once. It does the arithmetic, so you never do: the subtotal it hands back is the only total you may say, and you say it exactly as it came back. It also tells you when we do not have that many, which you say plainly along with what we do have. A caller who says "boxes", "cartons" or "rolls" means that many cases or bundles: send the number as they said it and do not ask them which they meant. It hands back a token for send_order_link, which is for that tool and is never said out loud. If you are missing something it needs, such as which of the two films they mean, give the per unit prices with price_products first and ask for the missing piece after them, so the caller hears a number before they are asked a question.',
     properties: {
       ...CALLER_PHONE,
       lines: {
@@ -463,13 +463,17 @@ const TOOL_SPECS: ToolSpec[] = [
           required: ['product', 'units'],
         },
       },
+      // OPTIONAL, and never asked for. The confirmation link collects delivery
+      // or will call along with the address and who they are, which is what the
+      // link is FOR. On the live run of 2026-08-27, this being required cost two
+      // turns to "delivery or will call?" and the order was never sent.
       fulfilment: {
         type: 'string',
         description:
-          'Exactly one of: "delivery" if we are sending it out to them, or "willcall" if they are collecting it. Ask them once, briefly, if they have not said.',
+          'Exactly one of: "delivery" if we are sending it out to them, or "willcall" if they are collecting it. Pass it ONLY if the caller said so themselves. Never ask them for it: the link asks that.',
       },
     },
-    required: ['caller_phone', 'lines', 'fulfilment'],
+    required: ['caller_phone', 'lines'],
   },
   {
     name: 'send_order_link',

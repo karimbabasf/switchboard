@@ -90,11 +90,19 @@ export function parseLines(raw: unknown): OrderLine[] | null {
 }
 
 /**
- * Delivery or will call, or null.
+ * Delivery or will call, or null, where NULL MEANS NOBODY HAS SAID YET.
  *
- * Null makes the tool ask, and asking is the point: a defaulted fulfilment is a
- * silent promise about how somebody is getting their pallets, and the two
- * answers have different lead times.
+ * Null is not an error and it does not make the tool ask. Fulfilment changes no
+ * number in a subtotal, and the website already collects it: the texted link
+ * exists so the customer picks delivery or will call, confirms the address and
+ * proves who they are on the form. Asking on the phone duplicated that form and
+ * made a caller answer a question before hearing a price, which cost three
+ * rehearsal scenarios their order on 2026-08-27.
+ *
+ * Failing closed here means never GUESSING which one, not refusing to price. An
+ * unrecognised word is null for the same reason a missing one is: we do not know,
+ * so the form asks. A defaulted fulfilment would be a silent promise about how
+ * somebody is getting their pallets, and the two have different lead times.
  */
 export function parseFulfilment(raw: unknown): Fulfilment | null {
   if (typeof raw !== 'string') return null;
@@ -213,7 +221,3 @@ export const DID_NOT_CATCH =
 /** Said when nothing in the list was one of ours. */
 export const WHICH_PRODUCTS =
   'I can give you the price on any of our six products. Which ones were you asking about?';
-
-/** Rule 6 lives in the prompt; this is the one the tool itself has to ask. */
-export const DELIVERY_OR_WILLCALL =
-  'Are you picking that up, or would you like it delivered? I will total it up either way, I just need to know which.';

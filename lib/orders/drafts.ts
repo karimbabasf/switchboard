@@ -38,7 +38,8 @@ export interface PhoneOrderDraft {
   call_id: string | null;
   caller_phone: string;
   lines: OrderLine[];
-  fulfilment: Fulfilment;
+  /** Null means the order page asks, with neither option preselected. */
+  fulfilment: Fulfilment | null;
   subtotal_cents: number;
   large_order: boolean;
   created_at: string;
@@ -103,7 +104,7 @@ export interface NewDraft {
   callId: string | null;
   callerPhone: string;
   lines: OrderLine[];
-  fulfilment: Fulfilment;
+  fulfilment: Fulfilment | null;
   subtotalCents: number;
 }
 

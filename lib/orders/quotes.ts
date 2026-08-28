@@ -34,7 +34,8 @@ export interface QuoteRow {
   call_id: string | null;
   caller_phone: string;
   lines: OrderLine[];
-  fulfilment: Fulfilment;
+  /** Null means nobody said on the call. Carried to the draft exactly as left. */
+  fulfilment: Fulfilment | null;
   subtotal_cents: number;
   short_stock: ShortStock[];
   created_at: string;
@@ -75,7 +76,7 @@ export interface NewQuote {
   callId: string | null;
   callerPhone: string;
   lines: OrderLine[];
-  fulfilment: Fulfilment;
+  fulfilment: Fulfilment | null;
   subtotalCents: number;
   shortStock: ShortStock[];
 }

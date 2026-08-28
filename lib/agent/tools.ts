@@ -43,7 +43,6 @@ import { toE164 } from '../env';
 import { isProductId, orderedProductIds, type ProductId } from '../orders/catalog';
 import { stockFor } from '../qbo/stock';
 import {
-  DELIVERY_OR_WILLCALL,
   DID_NOT_CATCH,
   WHICH_PRODUCTS,
   orderSpeech,
@@ -557,8 +556,13 @@ async function priceOrder(args: Args, deps: ToolDeps): Promise<ToolResult> {
   const lines = parseLines(args.lines);
   if (!lines) return { speech: DID_NOT_CATCH };
 
+  // OPTIONAL, AND NEVER ASKED FOR. Null means nobody said, which is the normal
+  // case and a fine one: fulfilment changes no number in the subtotal, and the
+  // order page collects it with neither option preselected. Requiring it here
+  // spent two turns of a rehearsal call on "delivery or will call?" before the
+  // caller heard a price, and that call never reached send_order_link. If they
+  // volunteer it, it is kept and passed straight through to the draft.
   const fulfilment = parseFulfilment(args.fulfilment);
-  if (!fulfilment) return { speech: DELIVERY_OR_WILLCALL };
 
   const priced = priceLines(lines);
 
@@ -620,9 +624,16 @@ async function sendOrderLink(args: Args, deps: ToolDeps): Promise<ToolResult> {
   // The row is ours and was validated on the way in, so this is belt and braces.
   // It costs one pass over at most six lines and it means a row that somehow got
   // edited cannot become a draft, a text and a form.
+  //
+  // A NULL FULFILMENT IS LEGITIMATE and passes straight through: it means nobody
+  // said on the call, and the order page is where that gets settled. Only a
+  // present value has to still be one of the two words.
   const lines = parseLines(verdict.quote.lines);
-  const fulfilment = parseFulfilment(verdict.quote.fulfilment);
-  if (!lines || !fulfilment) {
+  const fulfilment =
+    verdict.quote.fulfilment === null || verdict.quote.fulfilment === undefined
+      ? null
+      : parseFulfilment(verdict.quote.fulfilment);
+  if (!lines || (verdict.quote.fulfilment != null && !fulfilment)) {
     console.error(`[agent] send_order_link found an unusable quote for ${phone}`);
     return refuseSendLink('expired');
   }

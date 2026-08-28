@@ -20,7 +20,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { runTool, type ToolDeps } from '../lib/agent/tools';
 import { SEND_LINK_NEXT_MOVE } from '../lib/orders/refusals';
-import { DELIVERY_OR_WILLCALL, DID_NOT_CATCH, WHICH_PRODUCTS } from '../lib/orders/pricing';
+import { DID_NOT_CATCH, WHICH_PRODUCTS } from '../lib/orders/pricing';
 import { LARGE_ORDER_CENTS, type PhoneOrderDraft } from '../lib/orders/drafts';
 import { QUOTE_TTL_MS, type QuoteRow, type QuoteVerdict } from '../lib/orders/quotes';
 import type { CallFlow, VoiceStore } from '../lib/telnyx/voice';
@@ -223,11 +223,43 @@ describe('price_order', () => {
     expect(t.savedQuotes).toHaveLength(0);
   });
 
-  it('asks which way it is going rather than assuming one', async () => {
+  it('prices without a fulfilment, because the form is where that gets asked', async () => {
+    // The 2026-08-27 rehearsal failure, pinned. Requiring fulfilment spent two
+    // turns on "delivery or will call?" before the caller heard a number, and
+    // that call never reached send_order_link. Fulfilment changes no number in
+    // the subtotal and the order page collects it, so its absence must cost the
+    // caller nothing at all.
+    const t = testDeps();
+    const { fulfilment: _dropped, ...noFulfilment } = order;
+    const out = await runTool('price_order', noFulfilment, t.deps);
+
+    expect(out.subtotalCents).toBe(42900);
+    expect(out.speech).toMatch(/four hundred twenty-nine dollars/);
+    expect(out.quoteToken).toBe('quote-1');
+    expect(t.savedQuotes).toHaveLength(1);
+    expect(t.savedQuotes[0]).toMatchObject({ fulfilment: null, subtotalCents: 42900 });
+
+    // And it must not ask. No question about delivery, no hedge, nothing at all
+    // between the caller and their price.
+    expect(out.speech).not.toMatch(/will call|picking (?:it|that) up|delivered|deliver/i);
+    expect(out.speech).toMatch(/Would you like me to send you the confirmation link\?$/);
+  });
+
+  it('reads an unrecognised fulfilment as nobody said, and still prices', async () => {
+    // Failing closed means never guessing which one, not refusing to price. The
+    // assistant schema documents the two words rather than enumerating them, so
+    // a third value is reachable and has to land softly.
     const t = testDeps();
     const out = await runTool('price_order', { ...order, fulfilment: 'whenever' }, t.deps);
-    expect(out.speech).toBe(DELIVERY_OR_WILLCALL);
-    expect(t.savedQuotes).toHaveLength(0);
+    expect(out.subtotalCents).toBe(42900);
+    expect(out.quoteToken).toBe('quote-1');
+    expect(t.savedQuotes[0]).toMatchObject({ fulfilment: null });
+  });
+
+  it('keeps a fulfilment the caller volunteered', async () => {
+    const t = testDeps();
+    await runTool('price_order', { ...order, fulfilment: 'will call' }, t.deps);
+    expect(t.savedQuotes[0]).toMatchObject({ fulfilment: 'willcall' });
   });
 
   it('says what we have when we are short, and still prices what they asked for (rule 8)', async () => {
@@ -392,6 +424,26 @@ describe('send_order_link, the send', () => {
     expect(t.texted[0].phone).toBe(CALLER);
     expect(t.texted[0].body).toContain('https://akmeusa.com/order/draft-token-1');
     expect(t.texted[0].body).toMatch(/^Akme USA/);
+    expect(out.speech).toMatch(/on your phone now/i);
+  });
+
+  it('writes a draft with a null fulfilment when nobody said on the call', async () => {
+    // The other half of the same fix. A quote taken without a fulfilment is
+    // still spendable, and the draft carries the null through, so Akme's order
+    // page opens with neither option preselected and the customer picks there.
+    const t = testDeps({
+      claim: { ok: true, quote: { ...testDeps().liveQuote, fulfilment: null } },
+    });
+    const out = await runTool(
+      'send_order_link',
+      { caller_phone: CALLER, quoteToken: 'live-token' },
+      t.deps,
+    );
+
+    expect(t.drafts).toHaveLength(1);
+    expect(t.drafts[0]).toMatchObject({ fulfilment: null, subtotalCents: 8580, callerPhone: CALLER });
+    expect(t.texted).toHaveLength(1);
+    expect(t.texted[0].body).toContain('https://akmeusa.com/order/draft-token-1');
     expect(out.speech).toMatch(/on your phone now/i);
   });
 
