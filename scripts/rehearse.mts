@@ -121,6 +121,12 @@ const TOOL_RESULT: Record<string, string> = {
   take_message: 'Saved for the team.',
   lookup_invoice: 'That invoice is still open.',
   check_order: 'No recent order on this number.',
+  // The three order tools. Their replies carry REAL numbers, because the check
+  // that matters is whether the agent repeats the tool's number or invents one.
+  price_products: 'Bubble cushion wrap is $52.80 a bundle. Newsprint packing paper is $17.38 a bundle.',
+  price_order:
+    '25 cases of tan hot melt tape at $24.42, 25 cases of 18 inch stretch film at $42.90, and 25 bundles of bubble cushion wrap at $52.80. Subtotal $3,003.00.',
+  send_order_link: 'Sent. The link is on its way to the number you are calling from.',
 };
 
 interface Turn {
@@ -183,6 +189,24 @@ const mustPass = (name: string, arg: string, want: string): Check => (t) => {
   if (!hit) return `never called ${name}`;
   const got = hit.args[arg];
   return got === want ? null : `${name} passed ${arg}=${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`;
+};
+
+/**
+ * price_products was called for EXACTLY these products, no more.
+ *
+ * Karim's rule is that asking about two products prices two products. The
+ * failure this catches is the helpful one: the agent hears a price question and
+ * reads the whole catalogue, which is the spec recital the prompt already bans
+ * in every other form.
+ */
+const pricedExactly = (ids: string[]): Check => (t) => {
+  const hit = t.calls.find((c) => c.name === 'price_products');
+  if (!hit) return 'never called price_products';
+  const got = Array.isArray(hit.args.products) ? [...(hit.args.products as string[])].sort() : [];
+  const want = [...ids].sort();
+  return JSON.stringify(got) === JSON.stringify(want)
+    ? null
+    : `priced ${JSON.stringify(got)}, wanted exactly ${JSON.stringify(want)}`;
 };
 
 /**
@@ -852,6 +876,147 @@ const SCENARIOS: Scenario[] = [
     checks: [
       mustSay(/still|same|good to hear|welcome back|glad/i, 'that we are still here, before the products'),
       mustNotSay(/^definitely[.,]/i, 'a sales yes to a question about the company'),
+    ],
+  },
+  // -------------------------------------------------------------------------
+  // Taking an order. Every scenario below pins one rule Karim set on
+  // 2026-08-27, in his words, when he asked for the line to be able to sell.
+  //
+  // The whole feature is a reversal: this prompt used to say "never quote a
+  // price, a rate, a discount, or a total. Not a range, not a ballpark". These
+  // are the checks that stop the reversal going too far, because the failure
+  // that costs real money is not silence about price, it is a number the
+  // invoice then contradicts.
+  // -------------------------------------------------------------------------
+  {
+    name: 'order-list-carries-no-prices',
+    why: 'Karim, 2026-08-27: "when its asked to list the products it doesnt" give prices. The list is unchanged by all of this.',
+    caller: ['What do you guys carry?'],
+    checks: [
+      mustSay(/film|tape|paper|bubble/i, 'the products'),
+      mustNotSay(/\$|\bdollars?\b|\d+\.\d{2}/i, 'a price nobody asked for'),
+      mustNotCall('price_products', 'pricing a question that was not about price'),
+      mustNotCall('price_order', 'opening an order nobody asked for'),
+    ],
+  },
+  {
+    name: 'order-prices-only-when-asked',
+    why: 'Karim: "if the client asks what about the prices it Give the list with the prices".',
+    caller: ['What do you guys carry?', 'What about the prices?'],
+    checks: [
+      mustCall('price_products'),
+      mustSay(/\$|\d+\.\d{2}/, 'a price once one was asked for'),
+    ],
+  },
+  {
+    name: 'order-prices-only-the-items-named',
+    why: 'Karim: "if the client requests prices for certain items, we only give him the prices for those items". Two asked for means two priced, not six.',
+    caller: ['How much is the bubble wrap and the newsprint?'],
+    checks: [
+      mustCall('price_products'),
+      pricedExactly(['cushion-wrap', 'newsprint']),
+    ],
+  },
+  {
+    name: 'order-no-quantity-means-no-total',
+    why: 'Karim: "if the customer hasnt specified how many he wants, we just give per unit". Nothing is added up until there is something to add up.',
+    caller: ['What does the tan tape run?'],
+    checks: [
+      mustCall('price_products'),
+      mustNotCall('price_order', 'totalling an order with no quantities in it'),
+      mustNotSay(/subtotal|comes out to|total (?:is|of)|altogether/i, 'a total for one unpriced unit'),
+    ],
+  },
+  {
+    name: 'order-asks-which-shrink',
+    why: 'Karim: "The assistant asks what shrink he would like because we offer multiple types of shrink... 18-inch or 5-inch?". Both films are stocked, so the word alone is not an order.',
+    caller: ['I want to place an order. 25 boxes of tape, 25 boxes of shrink, and 25 boxes of bubble wrap.'],
+    checks: [
+      mustSay(/eighteen|18/i, 'the 18 inch option'),
+      mustSay(/five|5[- ]?inch/i, 'the 5 inch option'),
+      // The tape half is NOT ambiguous by Karim's rule. Asking about it too
+      // turns one clarifying question into an interrogation.
+      mustNotSay(/(?:case|roll)s? (?:or|of) (?:case|roll)s?\?|how many rolls/i, 'a second unit question about the tape'),
+    ],
+  },
+  {
+    name: 'order-subtotal-comes-from-the-tool',
+    why: 'THE AGENT NEVER DOES ARITHMETIC. Every number it says came back from a tool, so the invoice can never contradict the call.',
+    caller: [
+      'I want 25 boxes of tan tape, 25 of the 18 inch shrink and 25 bubble wrap.',
+      'Eighteen inch, yes.',
+    ],
+    checks: [
+      mustCall('price_order'),
+      mustSay(/3,?412\.50/, 'the subtotal the tool returned'),
+    ],
+  },
+  {
+    name: 'order-offers-the-confirmation-link',
+    why: 'Karim: after the subtotal, "Confirm with: Would you like me to send you the confirmation link?" The call has to end somewhere.',
+    caller: [
+      'Give me 25 tan tape, 25 of the 18 inch, 25 bubble wrap.',
+      'Eighteen inch.',
+    ],
+    checks: [
+      mustSay(/link|text|send/i, 'the offer to send the link'),
+      mustNotCall('send_order_link', 'texting a link before they said yes'),
+    ],
+  },
+  {
+    name: 'order-sends-only-after-yes',
+    why: 'Asking and sending are two turns. Same rule as the 2026-08-15 transfer defect, which asked and connected in one breath.',
+    caller: [
+      'I need 25 tan tape, 25 eighteen inch, 25 bubble wrap.',
+      'Eighteen inch.',
+      'Yes please, send it.',
+    ],
+    checks: [mustCall('send_order_link')],
+  },
+  {
+    name: 'order-cannot-email-the-link',
+    why: 'Karim: "If he says to send it by email, say that over the phone. You can only text to the number, call, or email us at sales@akmeusa.com."',
+    caller: [
+      'I want 25 tan tape, 25 eighteen inch shrink, 25 bubble wrap.',
+      'Eighteen inch.',
+      'Can you email that to me instead?',
+    ],
+    checks: [
+      mustSay(/text|number you(?:'re| are) (?:on|calling)|this number/i, 'that texting is the one thing it can send'),
+      mustSay(/acme u s a|akmeusa|sales at/i, 'the email address they can write to'),
+      mustNotSay(/i(?:'ll| will) email|sending you an email|emailed it/i, 'a promise to email something it cannot email'),
+    ],
+  },
+  {
+    name: 'order-holds-the-price',
+    why: 'Karim, 2026-08-27: on price pushback after the subtotal, "dont offer to forward. Just stick with the price". This is a deliberate exception to offering a person when they push.',
+    caller: [
+      'I want 25 tan tape, 25 eighteen inch, 25 bubble wrap.',
+      'Eighteen inch.',
+      'Wow, that is way too expensive. Can you do better than that?',
+    ],
+    checks: [
+      mustNotCall('offer_human', 'handing a price objection to a person, which Karim ruled out'),
+      mustNotCall('escalate_to_human', 'transferring on a price objection'),
+      mustNotSay(/discount|knock (?:it|that) down|better price|work with you on|see what i can do|lower/i, 'a discount it cannot give'),
+      mustNotSay(/put you through|connect you (?:to|with)|someone on our team can/i, 'a transfer on a price objection'),
+    ],
+  },
+  {
+    name: 'order-short-stock-offers-what-we-have',
+    why: 'Karim: "We are currently dont have x amount in stock, offer however many we have but professionaly."',
+    caller: [
+      'I need 40 cases of the tan tape.',
+      'Yeah, tan hot melt.',
+    ],
+    toolResult: {
+      price_order:
+        'We have 12 cases of tan hot melt tape available right now, not 40. Your subtotal for 12 is $293.04.',
+    },
+    checks: [
+      mustSay(/12|twelve/i, 'how many we actually have'),
+      mustSay(/right now|currently|at the moment|today/i, 'that the shortage is about now, not forever'),
+      mustNotSay(/sorry about that|unfortunately|afraid/i, 'an apology instead of an offer'),
     ],
   },
 ];
