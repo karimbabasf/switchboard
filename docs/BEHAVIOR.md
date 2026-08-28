@@ -127,12 +127,16 @@ Silence after a handoff is correct. Two voices answering one customer is not.
 The phone's job is to get the caller off the phone and into a written quote, or to
 answer the one thing they rang about.
 
-1. **Route first.** Anything about price, an order, or a quantity gets the route in
-   the first turn: the form at akmeusa.com, or text or email us the list. Not on
-   the third ask. The first.
-2. **Never take an order.** Not item by item, not "what else". One description,
-   however vague, goes on the team's queue and the call moves on. A list collected
-   on a call we cannot price is a list that dies on the call.
+1. **Answer the price question.** REVERSED 2026-08-27; this said "route first"
+   until then. Asked what something costs, say what it costs, for the items named
+   and no others. Quantities on the table means a subtotal. Every number comes
+   back from a tool, never from the model's own arithmetic.
+2. **Take the order.** Item by item, quantities included, then text the
+   confirmation link to the number they are on. What does NOT change: no
+   invoicing, no discounting, and no pallet total while the pallet counts are
+   unconfirmed. On price pushback the number holds and nobody is transferred:
+   Karim's call, because handing a price objection to a person teaches callers to
+   push.
 3. **Listing is titles. Detail is a follow-up.** "What do you sell" gets six names
    in one sentence, no sizes, no measurements. "How many rolls in a case" gets that
    one product's spec.

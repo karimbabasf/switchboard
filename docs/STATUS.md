@@ -1,11 +1,17 @@
-# Status: 2026-07-29
+# Status: 2026-08-27
 
 What exists and what is proven. Everything here was checked against a running
 system or a real database row on the day it was written, not recalled.
 
-**In one line:** an AI agent answers the Telnyx test line as "Robin", talks about
-Akme's products, never quotes a price, and pushes every pricing question into a
-written quote request that lands in its own Telegram queue. Calls are recorded,
+**THE ORDER TAKING BELOW IS BUILT, NOT PROVEN.** It was forked from switchboard
+and written on 2026-08-27. It passes the unit suite and the rehearsal, and no
+real caller has been through it. Everything else on this page predates the fork
+and is unchanged.
+
+**In one line:** an AI agent answers the Telnyx line as "Robin", talks about
+Akme's products, gives prices when it is asked for them, takes an order over
+the phone and texts a pre filled confirmation link the caller finishes on the
+website. Calls are recorded,
 transcribed and summarised. SMS now answers the four most common questions from
 templates with no model call at all, but has still never handled a real text.
 
@@ -57,14 +63,21 @@ exactly from the brief, one product at a time. It used to be told to say the who
 spec table "freely", and it read measurements at people who had only asked what we
 sell.
 
-**It may never produce, price, or send a quote or an invoice.** Every pricing
-question ends the same way: the website, an email, or a text, and a
-`quote_requests` row so a human sees it. That row is the point of the phone line.
+**It prices what it is asked about, and nothing more.** REVERSED 2026-08-27 by
+Karim; this page said the opposite until then. Listing what we stock still
+carries no prices. A price question about two products prices two products, not
+six. With no quantities it gives the per unit price and stops. With quantities it
+gives the subtotal.
 
-**It does not take orders.** Not item by item, not "what else", not quantities. It
-cannot price any of it, so a list collected on the call is a list that dies on the
-call. One description, however vague, goes straight to `text_me_the_list` and the
-team works from there.
+**It never does arithmetic.** Every number it says came back from a tool, so the
+number on the call and the number on the invoice cannot disagree. A pallet is not
+a priceable quantity while `palletCountsConfirmed` is false: it prices the case,
+hedges how many go on a pallet, and lets the caller give the number.
+
+**It takes orders, and it still may not invoice.** It opens a draft, texts a link
+to the number the caller is on, and the customer confirms on the website, where
+recognition and the address live. Creating, pricing or sending an INVOICE is
+still a human's job and always was.
 
 **It only says what is in the brief or what a tool just returned.** Stock levels,
 lead times, delivery dates, minimums, returns and payment terms are in neither, so
