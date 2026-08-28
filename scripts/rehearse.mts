@@ -281,9 +281,21 @@ const saysWeNotThey = (): Check => (t) => {
   return hit ? `talked about us as a third party: "${hit.trim().slice(0, 140)}"` : null;
 };
 
-/** Order-taker behaviour: the failure this whole pass exists to kill. */
-const ORDER_TAKING =
-  /what else|anything else|how many (do you|would you|cases|rolls|bundles)|how much do you need|what quantit|add(ing)? that to|put(ting)? (that|you) down for/i;
+/**
+ * Upsell filler, and ONLY upsell filler.
+ *
+ * This was ORDER_TAKING, and its comment read "the failure this whole pass
+ * exists to kill". That premise died on 2026-08-27, when Karim asked the line to
+ * take orders. "How many cases do you need?" was the defect and is now the job,
+ * so scoring it as a failure would have held the new behaviour down while the
+ * prompt told the model to do it: a check and a rule that disagree, where the
+ * check wins silently.
+ *
+ * What survives is the half that was never about orders. "What else can I get
+ * you" is a tic wherever it appears, because it asks the caller to do the
+ * remembering, and it is still banned on every scenario that banned it before.
+ */
+const UPSELL_FILLER = /what else|anything else/i;
 
 /**
  * Reciting measurements at somebody who asked what we sell.
@@ -568,20 +580,34 @@ const SCENARIOS: Scenario[] = [
   },
   {
     name: 'order-intent-replay',
-    why: 'The real 2026-07-29 call: three "I want to order" and it never mentioned a route.',
+    why: 'The real 2026-07-29 call: three "I want to order" and it never mentioned a route. The defect was that it went nowhere. Since 2026-08-27 the destination is the order itself rather than the website, so routesBy is gone and advances() carries the rule.',
     caller: ["I'd like to place an order.", "I'm looking for tape and a couple other things.", 'Hot melt tape.'],
     checks: [
-      routesBy(2),
-      mustNotSay(ORDER_TAKING, 'order-taker filler'),
-      mustNotSay(MONEY, 'a price'),
+      advances(),
+      mustNotSay(UPSELL_FILLER, 'upsell filler'),
+      // They named a product and never asked what it costs, so nothing is priced.
+      mustNotSay(MONEY, 'a price nobody asked for'),
+      mustNotCall('price_products', 'pricing a product on the caller\'s behalf'),
+      // Answering "I want to order" with "what are you looking for" is the
+      // interrogation the real call died of. Naming the product is not.
       asksWhatTheyNeedAtMost(0),
     ],
   },
   {
     name: 'order-with-a-list',
-    why: 'A caller who reels off items must get the route, not an interrogation.',
+    why: 'Was "a caller who reels off items must get the route". Karim reversed that on 2026-08-27: quantities plus a price question is a priced order now. What survives is the original point, that a caller who has already said everything must not be interrogated.',
     caller: ['I need four cases of clear tape and a pallet of the machine film. What is that going to run me?'],
-    checks: [routesBy(1), mustNotSay(MONEY, 'a price'), mustNotSay(ORDER_TAKING, 'order-taker filler')],
+    checks: [
+      mustSay(MONEY, 'the price they asked for'),
+      mustNotSay(UPSELL_FILLER, 'upsell filler'),
+      asksWhatTheyNeedAtMost(0),
+      // A pallet is not a priceable quantity: PALLET_COUNTS_CONFIRMED is false,
+      // so turning "a pallet" into cases is arithmetic on a number nobody has
+      // checked against a real pallet. Price the case, hedge the pallet count,
+      // let them give you the number.
+      mustNotSay(/\$[\d,.]+ (?:a|per) pallet|a pallet (?:is|runs|costs|comes to) \$/i, 'a pallet total built on an unconfirmed count'),
+      mustSay(/roughly|about|approximate|around/i, 'a hedge on the pallet count'),
+    ],
   },
   {
     name: 'what-do-you-stock',
@@ -599,7 +625,7 @@ const SCENARIOS: Scenario[] = [
       // The whole point of the 2026-08-14 pass. A correct list that ends in
       // silence is the turn Karim described as wanting to hang up on.
       advances(),
-      mustNotSay(ORDER_TAKING, 'order-taker filler'),
+      mustNotSay(UPSELL_FILLER, 'upsell filler'),
     ],
   },
   {
@@ -611,8 +637,11 @@ const SCENARIOS: Scenario[] = [
     checks: [
       mustSay(/cushion|bubble/i, 'that we have it'),
       advances(),
-      routesBy(2),
-      mustNotSay(ORDER_TAKING, 'order-taker filler'),
+      // routesBy dropped 2026-08-27. "We go through a lot of it" is buying
+      // signal, and the better move on it is now to start the order rather than
+      // to read out three ways to reach us. advances() still requires the turn
+      // to go somewhere.
+      mustNotSay(UPSELL_FILLER, 'upsell filler'),
       // "Do you carry X" is a yes/no question. It answered yes and then read out
       // the full spec, unprompted, which doubles the turn and buries the bridge.
       saysNoSpec(),
@@ -635,12 +664,19 @@ const SCENARIOS: Scenario[] = [
   },
   {
     name: 'price-pressure',
-    why: 'The no-prices rule under a caller who pushes twice.',
+    why: 'Was "the no-prices rule under a caller who pushes twice". Since 2026-08-27 the line CAN price a case, so the pressure has moved: the honest answer is the case price plus a hedged pallet count, and the failure is inventing a pallet total off a number nobody has confirmed.',
     caller: [
       'Just give me a ballpark on a pallet of hand wrap film.',
       'I understand, I am not going to hold you to it. Roughly what does a pallet cost?',
     ],
-    checks: [mustNotSay(MONEY, 'a price'), routesBy(2), opensWithoutRefusing(), advances()],
+    checks: [
+      mustSay(MONEY, 'the case price it is allowed to give'),
+      mustNotSay(/\$[\d,.]+ (?:a|per) pallet|a pallet (?:is|runs|costs|comes to) \$/i, 'a pallet total built on an unconfirmed count'),
+      opensWithoutRefusing(),
+      advances(),
+      // Asked twice is not a reason to say the same sentence twice.
+      repeatedOpener(),
+    ],
   },
   {
     name: 'bubble-wrap-alias',
