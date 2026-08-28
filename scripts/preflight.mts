@@ -9,7 +9,7 @@
  */
 // Explicit .ts extensions: this runs under node directly, whose ESM resolver
 // will not guess one. Same rule as scripts/assistant-sync.mts.
-import { OPENER } from '../lib/agent/brief.ts';
+import { BUSINESS, OPENER } from '../lib/agent/brief.ts';
 import { optionalEnv } from '../lib/env.ts';
 import { agentVoice } from '../lib/telnyx/assistant.ts';
 import { OPENER_BUILD, openerFingerprint, openerText } from '../lib/telnyx/opener.ts';
@@ -537,6 +537,130 @@ const checks: Check[] = [
         return fail('identical to TELEGRAM_WEBHOOK_SECRET, they must be different secrets');
       }
       return w.length >= 32 ? pass(`${w.length} chars, distinct`) : fail(`${w.length} chars, want 32+`);
+    },
+  },
+  {
+    group: 'Internal',
+    name: 'RELAY_SECRET is set and distinct',
+    run: async () => {
+      const r = env('RELAY_SECRET');
+      // Same rule as WORKER_SECRET above. This one opens an endpoint that sends
+      // SMS from the 10DLC registered number, so sharing it with the desk secret
+      // would mean one leak reaches both the deal engine and the phone number.
+      const clashes = (
+        [
+          ['WORKER_SECRET', process.env.WORKER_SECRET],
+          ['DESK_INBOUND_SECRET', process.env.DESK_INBOUND_SECRET],
+          ['AGENT_TOOL_SECRET', process.env.AGENT_TOOL_SECRET],
+          ['TELEGRAM_WEBHOOK_SECRET', process.env.TELEGRAM_WEBHOOK_SECRET],
+        ] as const
+      )
+        .filter(([, value]) => value && value.trim() === r)
+        .map(([name]) => name);
+      if (clashes.length) return fail(`identical to ${clashes.join(' and ')}, they must all differ`);
+      return r.length >= 32 ? pass(`${r.length} chars, distinct`) : fail(`${r.length} chars, want 32+`);
+    },
+  },
+  {
+    group: 'Internal',
+    name: 'AKME_ORDER_BASE_URL is a URL a customer can open',
+    run: async () => {
+      const raw = env('AKME_ORDER_BASE_URL');
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        return fail(`"${raw}" is not a URL`);
+      }
+      if (url.protocol !== 'https:' && url.hostname !== 'localhost') {
+        return fail(`${url.protocol}// is not https, and this link goes to a customer's phone`);
+      }
+      return pass(`order links will be ${raw.replace(/\/+$/, '')}/order/<token>`);
+    },
+  },
+
+  // --- Akme ---------------------------------------------------------------
+  {
+    group: 'Akme',
+    name: 'the six catalogue prices match Akme',
+    run: async () => {
+      // THE DRIFT ALARM. The prices are duplicated into lib/agent/brief.ts on
+      // purpose, so a call never waits on a network read to say a number. The
+      // cost of that decision is that the two copies can disagree, and the only
+      // acceptable place to find out is here, at deploy, rather than out loud on
+      // a phone call.
+      const base = env('AKME_BASE_URL').replace(/\/+$/, '');
+      const target = `${base}/api/catalog`;
+
+      let res: Response;
+      try {
+        res = await fetch(target, { headers: { accept: 'application/json' } });
+      } catch (err) {
+        return fail(`${target} is unreachable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (res.status === 404) {
+        // Named explicitly rather than folded into "not ok". A missing route is
+        // the likeliest reason this check is red on a first run, and "HTTP 404"
+        // on its own sends somebody looking at the wrong repo.
+        return fail(
+          `${target} returned 404. Akme has no /api/catalog route yet, so price drift CANNOT be checked. ` +
+            'Add it on Akme\'s dev branch, returning the six products with their ids and unit prices.',
+        );
+      }
+      if (!res.ok) return fail(`${target} returned HTTP ${res.status}`);
+
+      let payload: unknown;
+      try {
+        payload = await res.json();
+      } catch {
+        return fail(`${target} did not return JSON`);
+      }
+
+      const items = Array.isArray(payload)
+        ? payload
+        : ((payload as { products?: unknown[]; catalog?: unknown[] })?.products ??
+          (payload as { catalog?: unknown[] })?.catalog);
+      if (!Array.isArray(items)) {
+        return fail(`${target} returned no product array (expected an array, or {products: [...]})`);
+      }
+
+      // Cents, both sides, so the comparison never turns on a float. 42.90 and
+      // 48.750000000000004 are the same price and must not fail this check;
+      // 42.90 and 42.95 are not and must.
+      const cents = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) : null;
+
+      const theirs = new Map<string, number>();
+      for (const item of items) {
+        if (typeof item !== 'object' || item === null) continue;
+        const row = item as Record<string, unknown>;
+        const id = typeof row.id === 'string' ? row.id : null;
+        const price = cents(row.unitPrice) ?? cents(row.unit_price) ?? cents(row.price);
+        if (id && price !== null) theirs.set(id, price);
+      }
+      if (theirs.size === 0) {
+        return fail(`${target} returned ${items.length} items with no id and unitPrice on any of them`);
+      }
+
+      const drift: string[] = [];
+      for (const product of BUSINESS.products) {
+        const mine = Math.round(product.unitPrice * 100);
+        const found = theirs.get(product.id);
+        if (found === undefined) {
+          drift.push(`${product.id} is not in Akme's catalogue`);
+        } else if (found !== mine) {
+          drift.push(`${product.id} is ${(mine / 100).toFixed(2)} here and ${(found / 100).toFixed(2)} at Akme`);
+        }
+      }
+      // The other direction matters too: a seventh product at Akme is a product
+      // this line cannot price and will not mention, which is a decision
+      // somebody should make on purpose rather than discover.
+      for (const id of theirs.keys()) {
+        if (!BUSINESS.products.some((p) => p.id === id)) drift.push(`${id} is at Akme and not here`);
+      }
+
+      if (drift.length) return fail(drift.join('; '));
+      return pass(`all ${BUSINESS.products.length} prices agree with ${target}`);
     },
   },
 ];

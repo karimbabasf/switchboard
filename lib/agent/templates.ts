@@ -122,3 +122,97 @@ export function nonGsm7(text: string): string[] {
     '^{}\\[~]|€';
   return [...new Set([...text].filter((c) => !GSM7.includes(c)))];
 }
+
+/**
+ * The three messages Akme may send through this repo's number, and the reason
+ * they are names rather than words.
+ *
+ * Akme has no SMS sender. It gets one at POST /api/relay/sms, so a recognition
+ * code goes over the 10DLC registered number instead of a second, unregistered
+ * one. The door takes a TEMPLATE NAME AND VARIABLES, never a body: if Akme
+ * could post text, then anything that reached Akme's desk with an instruction
+ * in it would have a path to Akme's customers over our registered number, and
+ * the campaign that gets pulled would be ours.
+ *
+ * So the words live here, in the repo that holds the Telnyx credential and the
+ * carrier obligation. That is not the second writer this file's header warns
+ * about: Akme still decides WHETHER to send and to whom, and these three are
+ * transactional strings with no opinion in them, not answers to a customer.
+ *
+ * GSM-7 like everything else here, and the variables are held to the same rule,
+ * because a code or a URL with a curly quote in it silently turns a one segment
+ * message into a three segment one.
+ */
+export const RELAY_TEMPLATE_NAMES = ['recognition_code', 'order_link', 'order_nudge'] as const;
+
+export type RelayTemplateName = (typeof RELAY_TEMPLATE_NAMES)[number];
+
+export function isRelayTemplateName(value: unknown): value is RelayTemplateName {
+  return typeof value === 'string' && (RELAY_TEMPLATE_NAMES as readonly string[]).includes(value);
+}
+
+/**
+ * A ceiling on what a variable may be. Long enough for any URL we generate,
+ * short enough that no value Akme passes can turn one message into forty.
+ */
+const MAX_VAR_LENGTH = 200;
+
+const RELAY_TEMPLATES: Readonly<
+  Record<RelayTemplateName, { vars: readonly string[]; render: (v: Record<string, string>) => string }>
+> = Object.freeze({
+  recognition_code: {
+    vars: ['code'],
+    render: (v) =>
+      `${BUSINESS.name}: your verification code is ${v.code}. It expires in 10 minutes. ` +
+      'We will never call or text you to ask for it.',
+  },
+  order_link: {
+    vars: ['url'],
+    render: (v) =>
+      `${BUSINESS.name}: your order is ready to confirm here: ${v.url} ` +
+      `The link works for 48 hours. Questions? Call ${BUSINESS.phone}.`,
+  },
+  order_nudge: {
+    vars: ['url'],
+    render: (v) =>
+      `${BUSINESS.name}: your order is still waiting on you. Confirm it here: ${v.url} ` +
+      `The link closes 24 hours from now. Call ${BUSINESS.phone} if you need a hand.`,
+  },
+});
+
+/** Newlines and control characters: both are ways to make one message look like several. */
+const CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
+
+/**
+ * The rendered message, or null when the variables are not usable.
+ *
+ * Null rather than a throw, and null rather than a partial render: the relay
+ * turns it into `{sent: false, reason}` so Akme learns its call was wrong
+ * instead of a customer receiving a sentence with a gap in it.
+ *
+ * The variable lands INSIDE the template, it never replaces it. Whatever Akme
+ * fills in, the message still opens with who we are and still says what it is,
+ * which is what stops this endpoint being a way to send free text.
+ */
+export function renderRelayTemplate(
+  name: RelayTemplateName,
+  vars: Record<string, string>,
+): string | null {
+  const template = RELAY_TEMPLATES[name];
+  const checked: Record<string, string> = {};
+  for (const key of template.vars) {
+    const value = vars[key];
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > MAX_VAR_LENGTH) return null;
+    if (CONTROL_CHARS.test(trimmed)) return null;
+    if (nonGsm7(trimmed).length > 0) return null;
+    checked[key] = trimmed;
+  }
+  return template.render(checked);
+}
+
+/** Which variables a template needs, so the relay can name the missing one. */
+export function relayTemplateVars(name: RelayTemplateName): readonly string[] {
+  return RELAY_TEMPLATES[name].vars;
+}

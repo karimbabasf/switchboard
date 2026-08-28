@@ -1,18 +1,29 @@
 /**
- * The five things the agent can actually do.
+ * The nine things the agent can actually do.
  *
  * Every tool returns one sentence for the agent to say, never a JSON blob for
  * it to narrate. A model handed `{"status":"PAID","balance":0}` reads the field
  * names out loud eventually; a model handed "Invoice ten forty three is paid"
  * cannot.
  *
- * Two rules hold across all five:
- *  - NO MONEY LEAVES THIS FILE. Akme quotes no prices by policy, and the
- *    reliable way to keep a number out of the agent's mouth is to keep it out
- *    of the string it is given.
+ * Two rules hold across all nine:
  *  - NOTHING IS INVENTED. If the mirror has no row, the sentence says so. An
  *    agent that guesses a status on a phone call is worse than one that takes a
  *    message.
+ *  - THE AGENT NEVER DOES ARITHMETIC. Every number it says came back from a
+ *    tool, as finished words.
+ *
+ * "NO MONEY LEAVES THIS FILE" WAS THE THIRD RULE AND IT IS GONE, as of the
+ * 2026-08-27 spec. The line may quote prices now. What has NOT changed is the
+ * mechanism the old rule relied on: the reliable way to keep a wrong number out
+ * of the agent's mouth is to keep it out of the string it is given, so the three
+ * order tools hand over a spoken sentence and the agent has no price and no
+ * quantity to multiply for itself. `lookup_invoice` still says no amount, for
+ * the original reason: a balance is a human's to quote.
+ *
+ * The three order tools are frozen by
+ * docs/superpowers/specs/2026-08-27-phone-orders-design.md. Read it before
+ * changing a signature here.
  */
 import { startWave, supabaseStore, type VoiceStore } from '../telnyx/voice';
 import { telnyx, type TelnyxCommands } from '../telnyx/client';
@@ -25,10 +36,37 @@ import {
   type OpenInvoice,
 } from '../qbo/lookup';
 import { learnContactName, resolveTopic } from '../telegram/topics';
-import { matchTemplate, renderTemplate } from './templates';
+import { matchTemplate, renderRelayTemplate, renderTemplate } from './templates';
 import { recordQuoteRequest, type NewQuoteRequest, type QuoteRequestRow } from '../quote-requests';
 import { db } from '../db';
 import { toE164 } from '../env';
+import { isProductId, orderedProductIds, type ProductId } from '../orders/catalog';
+import { stockFor } from '../qbo/stock';
+import {
+  DELIVERY_OR_WILLCALL,
+  DID_NOT_CATCH,
+  WHICH_PRODUCTS,
+  orderSpeech,
+  parseFulfilment,
+  parseLines,
+  priceLines,
+  shortStockFor,
+  unitPriceSpeech,
+  type ShortStock,
+} from '../orders/pricing';
+import {
+  claimQuote as claimQuoteRow,
+  saveQuote as saveQuoteRow,
+  type NewQuote,
+  type QuoteVerdict,
+} from '../orders/quotes';
+import {
+  createDraft as createDraftRow,
+  orderLinkFor,
+  type NewDraft,
+  type PhoneOrderDraft,
+} from '../orders/drafts';
+import { refuseSendLink } from '../orders/refusals';
 import type { AkmeOrder } from '../types';
 import type { ToolName } from '../telnyx/assistant';
 
@@ -54,10 +92,34 @@ export interface ToolDeps {
    * Optional so a test can leave it out; production always supplies it.
    */
   learnName?(phone: string, displayName: string): Promise<void>;
+  /**
+   * How many of each product are on the shelf. Owned by lib/qbo/stock.ts, which
+   * validates the ids against the six id enum before QuickBooks sees them,
+   * caches for five minutes and returns integers and nothing else.
+   *
+   * Optional only so a test can hand in a fake. Production is the real function
+   * from lib/qbo/stock.ts and there is no other implementation anywhere.
+   */
+  stockFor?(ids: ProductId[]): Promise<Record<ProductId, number>>;
+  /** The quote store, lib/orders/quotes.ts. Optional so a test can hold it in memory. */
+  saveQuote?(input: NewQuote): Promise<{ token: string }>;
+  claimQuote?(token: string, callerPhone: string): Promise<QuoteVerdict>;
+  /** The draft store, lib/orders/drafts.ts. */
+  createDraft?(input: NewDraft): Promise<PhoneOrderDraft>;
+  /** Where the customer finishes. Injectable so a test does not need the env var. */
+  orderLink?(token: string): string;
 }
 
 export interface ToolResult {
   speech: string;
+  /**
+   * `price_order` only, and frozen by
+   * docs/superpowers/specs/2026-08-27-phone-orders-design.md. Ten minute life,
+   * single use, and the only thing `send_order_link` will accept.
+   */
+  quoteToken?: string;
+  subtotalCents?: number;
+  shortStock?: ShortStock[];
 }
 
 export function toolDeps(): ToolDeps {
@@ -79,6 +141,11 @@ export function toolDeps(): ToolDeps {
     },
     recordQuote: recordQuoteRequest,
     learnName: learnContactName,
+    stockFor,
+    saveQuote: saveQuoteRow,
+    claimQuote: claimQuoteRow,
+    createDraft: createDraftRow,
+    orderLink: orderLinkFor,
   };
 }
 
@@ -145,6 +212,12 @@ export async function runTool(name: ToolName, args: Args, deps: ToolDeps): Promi
       return textTheList(args, deps);
     case 'take_message':
       return takeMessage(args, deps);
+    case 'price_products':
+      return priceProducts(args);
+    case 'price_order':
+      return priceOrder(args, deps);
+    case 'send_order_link':
+      return sendOrderLink(args, deps);
   }
 }
 
@@ -433,4 +506,156 @@ async function takeMessage(args: Args, deps: ToolDeps): Promise<ToolResult> {
 
   const readback = callback ? ` We will call you back on ${callback}.` : '';
   return { speech: `I have got that down and it is in front of us now.${readback}` };
+}
+
+/**
+ * Rules 2 and 3: the price of what they named, per unit, nothing added up.
+ *
+ * Ungated, and the only tool here that is. It reads no customer record, sends
+ * nothing, and says only list prices that are on the website. There is no number
+ * to check because there is nothing a wrong number could reach.
+ *
+ * An id the model invented is DROPPED rather than refused, so "what do the tan
+ * tape and the pallet jack cost" answers the half we sell. Only when nothing in
+ * the list was ours does it ask, and the question carries its own next move.
+ */
+async function priceProducts(args: Args): Promise<ToolResult> {
+  const raw = args.products;
+  const named = Array.isArray(raw) ? raw : [];
+
+  const asked: ProductId[] = [];
+  for (const value of named) {
+    if (isProductId(value) && !asked.includes(value)) asked.push(value);
+  }
+
+  if (named.length > 0 && asked.length === 0) return { speech: WHICH_PRODUCTS };
+
+  // An empty list means the caller asked for the price list, which is the one
+  // case where this says a price nobody named. Rank order, film first.
+  return { speech: unitPriceSpeech(asked.length > 0 ? asked : orderedProductIds()) };
+}
+
+/**
+ * Rules 4, 5 and 8: the reading, the subtotal, the offer of the link, and short
+ * stock said professionally.
+ *
+ * GATED, because the token it hands back is what later opens the SMS door. The
+ * number is checked against the live call HERE, at mint time, as well as in
+ * `send_order_link` at send time. Checking only at send time would leave a token
+ * minted against a number nobody verified, and the whole reason this file gates
+ * anything is that `caller_phone` is an argument the model chooses.
+ *
+ * A stock read that fails does not cost the caller their price. QuickBooks being
+ * down is our problem, the subtotal is still correct, and the form is a second
+ * chance to catch a quantity we cannot fill.
+ */
+async function priceOrder(args: Args, deps: ToolDeps): Promise<ToolResult> {
+  const phone = callerPhone(args);
+  const flow = phone ? await deps.store.activeAssistantCall(phone) : null;
+  if (!phone || !flow) return { speech: NOT_THIS_CALLER };
+
+  const lines = parseLines(args.lines);
+  if (!lines) return { speech: DID_NOT_CATCH };
+
+  const fulfilment = parseFulfilment(args.fulfilment);
+  if (!fulfilment) return { speech: DELIVERY_OR_WILLCALL };
+
+  const priced = priceLines(lines);
+
+  let short: ShortStock[] = [];
+  try {
+    const onShelf = await (deps.stockFor ?? stockFor)(lines.map((l) => l.product));
+    short = shortStockFor(lines, onShelf);
+  } catch (err) {
+    console.error('[agent] price_order could not read stock, pricing without it:', err);
+  }
+
+  const quote = await (deps.saveQuote ?? saveQuoteRow)({
+    callId: flow.call_control_id,
+    callerPhone: phone,
+    lines,
+    fulfilment,
+    subtotalCents: priced.subtotalCents,
+    shortStock: short,
+  });
+
+  return {
+    speech: orderSpeech(lines, priced, short),
+    quoteToken: quote.token,
+    subtotalCents: priced.subtotalCents,
+    shortStock: short,
+  };
+}
+
+/**
+ * The only tool that turns a quote into an order, and the only new one that
+ * sends.
+ *
+ * FOUR REFUSALS AND EVERY ONE CARRIES ITS OWN NEXT MOVE, copied from Akme's
+ * start_order. See lib/orders/refusals.ts for the sentences and the 2026-08-24
+ * failure that made them necessary.
+ *
+ * Order of operations matters. The quote is CLAIMED first, in one conditional
+ * UPDATE, so two racing calls produce one draft and one text. The draft is
+ * written next, because the text has to contain its token. The send is last, and
+ * a send that fails leaves a spent quote and an unsent draft: that draft simply
+ * expires in forty-eight hours, and the caller is told to order on the site or
+ * have somebody follow it up. The alternative, releasing the claim on a failed
+ * send, would reopen the double text this claim exists to prevent.
+ */
+async function sendOrderLink(args: Args, deps: ToolDeps): Promise<ToolResult> {
+  // Both spellings. The frozen argument is `quoteToken`; a webhook tool schema
+  // written in snake case is the likelier thing to arrive, and a token dropped
+  // over a naming convention would refuse a caller who did everything right.
+  const token = str(args, 'quoteToken') || str(args, 'quote_token');
+  if (!token) return refuseSendLink('no_token');
+
+  const phone = callerPhone(args);
+  const flow = phone ? await deps.store.activeAssistantCall(phone) : null;
+  if (!phone || !flow) return refuseSendLink('not_this_caller');
+
+  const verdict = await (deps.claimQuote ?? claimQuoteRow)(token, phone);
+  if (!verdict.ok) return refuseSendLink(verdict.reason === 'used' ? 'already_used' : 'expired');
+
+  // The row is ours and was validated on the way in, so this is belt and braces.
+  // It costs one pass over at most six lines and it means a row that somehow got
+  // edited cannot become a draft, a text and a form.
+  const lines = parseLines(verdict.quote.lines);
+  const fulfilment = parseFulfilment(verdict.quote.fulfilment);
+  if (!lines || !fulfilment) {
+    console.error(`[agent] send_order_link found an unusable quote for ${phone}`);
+    return refuseSendLink('expired');
+  }
+
+  const draft = await (deps.createDraft ?? createDraftRow)({
+    callId: flow.call_control_id,
+    callerPhone: phone,
+    lines,
+    fulfilment,
+    subtotalCents: verdict.quote.subtotal_cents,
+  });
+
+  const body = renderRelayTemplate('order_link', {
+    url: (deps.orderLink ?? orderLinkFor)(draft.token),
+  });
+  if (!body) {
+    // A null render means AKME_ORDER_BASE_URL produced something that cannot go
+    // in a text. That is a configuration fault, not a caller fault, and it must
+    // be loud in the log even though the caller hears the ordinary sentence.
+    console.error('[agent] send_order_link could not render the link message; check AKME_ORDER_BASE_URL');
+    return refuseSendLink('sms_failed');
+  }
+
+  try {
+    await deps.sendText(phone, body);
+  } catch (err) {
+    console.error(`[agent] send_order_link send to ${phone} failed:`, err);
+    return refuseSendLink('sms_failed');
+  }
+
+  return {
+    speech:
+      'Sent, that should be on your phone now. Open the link, check the quantities and confirm it there. ' +
+      'It stays good for the next forty-eight hours.',
+  };
 }

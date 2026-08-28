@@ -37,8 +37,44 @@ describe('brief.ts: the business facts are one source', () => {
     expect(keyterms()).toContain('Akme');
   });
 
-  it('forbids quoting a price in the system prompt', () => {
-    expect(systemPrompt()).toMatch(/never quote|no prices|not quote a price/i);
+  it('carries the six ids Akme uses, in rank order', () => {
+    // The id is what a pricing tool is given. It is never spoken, which is why
+    // `machine-film` is allowed to sit on a film the prompt insists is
+    // hand-applied: two systems disagreeing about a key is the worse bug.
+    expect(BUSINESS.products.map((p) => p.id)).toEqual([
+      'machine-film',
+      'hand-film',
+      'tan-tape',
+      'clear-tape',
+      'newsprint',
+      'cushion-wrap',
+    ]);
+  });
+
+  it('pins all six unit prices, which is what the tools price from', () => {
+    // Dollars for one case or one bundle, duplicated from Akme's lib/catalog.ts
+    // so a call never waits on a network read. `pnpm preflight` catches drift
+    // against Akme's GET /api/catalog; this is the half that runs without a
+    // network, and a price changed by hand fails here first.
+    expect(Object.fromEntries(BUSINESS.products.map((p) => [p.id, p.unitPrice]))).toEqual({
+      'machine-film': 42.90,
+      'hand-film': 48.4,
+      'tan-tape': 24.42,
+      'clear-tape': 34.32,
+      newsprint: 17.38,
+      'cushion-wrap': 52.8,
+    });
+  });
+
+  it('keeps every price out of the prompt, so the model has nothing to multiply', () => {
+    // The whole no-arithmetic rule rests on the model never seeing a number it
+    // could work with. Prices live on the product rows and reach the caller only
+    // through price_products and price_order.
+    const prompt = systemPrompt();
+    for (const product of BUSINESS.products) {
+      expect(prompt).not.toContain(product.unitPrice.toFixed(2));
+      expect(prompt).not.toContain(`$${product.unitPrice.toFixed(2)}`);
+    }
   });
 
   it('tells the agent pallet counts are unconfirmed', () => {
@@ -124,13 +160,19 @@ describe('brief.ts: the prompt holds its guardrails', () => {
 describe('brief.ts: the agent routes quotes, it never produces one', () => {
   const prompt = systemPrompt();
 
-  it('forbids producing, pricing or sending a quote', () => {
-    expect(prompt).toMatch(/you do not produce a quote/i);
-    // Matched verb by verb rather than as one sentence, so rewording the prompt
-    // cannot quietly drop one of them the way a single exact-phrase match would.
-    for (const verb of [/never price one/i, /total one/i, /build one/i, /send one/i]) {
+  it('says every number out of a tool and works none of them out', () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and the inversion is the point.
+    // Until 2026-08-27 it pinned "you do not produce a quote. You never price
+    // one, total one, build one, or send one". Karim opened the line up to
+    // prices and orders that day, so what guards the caller now is not a ban on
+    // pricing, it is where the number came from.
+    expect(prompt).toMatch(/EVERY NUMBER YOU SAY CAME BACK FROM A TOOL, AND YOU NEVER DO ARITHMETIC/);
+    // Verb by verb rather than as one sentence, so rewording cannot quietly drop
+    // one of them the way a single exact-phrase match would.
+    for (const verb of [/do not add/i, /multiply/i, /round/i, /estimate/i]) {
       expect(prompt).toMatch(verb);
     }
+    expect(prompt).toMatch(/ONLY when a tool handed it to you on this call/i);
     // The old prompt told the agent to say "I will get a quote out to you today",
     // which is the agent promising to do the one thing it cannot do.
     expect(prompt).not.toMatch(/say: "I do not have pricing in front of me, but I will get a quote/i);
@@ -359,7 +401,22 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     expect(prompt).not.toMatch(/you are not a salesperson/i);
     expect(prompt).toMatch(/inside sales desk/i);
     expect(prompt).toMatch(/YOUR JOB, IN ONE SENTENCE/);
-    expect(prompt).toMatch(/exactly four places/i);
+    // Four until 2026-08-27, when the confirmation link became the fifth and the
+    // best of them. A call that ends in an order is no longer a call we lost.
+    expect(prompt).toMatch(/exactly five places/i);
+    expect(prompt).toMatch(/the confirmation link has gone out/i);
+  });
+
+  it('asks how many only of somebody who is ordering, never of somebody who asked a price', () => {
+    // The quantity half of the old order-taker ban came out on 2026-08-27 with
+    // the rest of the reversal: "how many cases do you need" was the defect on
+    // the 2026-07-29 call and it is the job now. What survives is the shape of
+    // it, one short question and never in place of a price.
+    expect(prompt).toMatch(/HOW MANY IS NOT ON THAT LIST ANY MORE/);
+    expect(prompt).toMatch(/NEVER ASK HOW MANY OF SOMEBODY WHO ASKED A PRICE/);
+    expect(prompt).toMatch(/one each and never two in a turn/i);
+    // The upsell half is untouched and still banned everywhere it was.
+    expect(prompt).toMatch(/Never "what else can I get you", never "anything else"/);
   });
 
   it('forbids taking the order item by item, which is what it actually did', () => {
@@ -368,9 +425,14 @@ describe('brief.ts: the agent routes quotes, it never produces one', () => {
     // "besides the hot melt, what else?". The website, a text and email were
     // never mentioned. The prompt had the routing rule; it was in section five of
     // eight, under a heading about pricing, so ordering never triggered it.
+    //
+    // THE RULE SURVIVED THE LINE LEARNING TO TAKE ORDERS, from 2026-08-27. What
+    // it always banned was the interview, not the order: the agent now takes
+    // what the caller gives it in one go and prices that. "your NEXT sentence is
+    // the route" came out with the ban it belonged to.
     expect(prompt).toMatch(/NEVER TAKE THE ORDER ITEM BY ITEM/);
     expect(prompt).toMatch(/do not ask "what else"/i);
-    expect(prompt).toMatch(/your NEXT sentence is the route/);
+    expect(prompt).toMatch(/Take what they give you, all at once, and price that/i);
   });
 
   it('answers a repeated statement instead of re-asking, but may clarify exactly once', () => {
@@ -888,5 +950,123 @@ describe('the phone agent knows where will call actually is', () => {
     const p = systemPrompt();
     expect(p).toMatch(/Tuesday/);
     expect(p).toMatch(/Thursday/);
+  });
+});
+
+describe('brief.ts: the line prices and takes orders, from 2026-08-27', () => {
+  const prompt = systemPrompt();
+
+  it('prices only what was asked about, and keeps prices out of the list', () => {
+    // Karim's rules 1, 2 and 3. The list is the single most-asked question on
+    // this line and it stays a list of names: a price inside it is the answer to
+    // a question nobody asked, and six prices inside it blows the turn budget.
+    expect(prompt).toMatch(/SAYING WHAT WE STOCK STILL CARRIES NO PRICES/);
+    expect(prompt).toMatch(/SAY THE LIST OUT LOUD/);
+    expect(prompt).toMatch(/ONLY THE ONES THEY ASKED ABOUT/);
+    expect(prompt).toMatch(/Two products named is two prices/i);
+    expect(prompt).toMatch(/NO QUANTITY MEANS NO TOTAL/);
+    // A pallet is not one either. PALLET_COUNTS_CONFIRMED is false, so turning
+    // "a pallet" into cases is both arithmetic and a guess, which is the one
+    // combination that puts a wrong number on a real order.
+    expect(prompt).toMatch(/A PALLET IS NOT A QUANTITY YOU CAN PRICE/);
+    // And it answers with the case price rather than with what it cannot do,
+    // which is what opensWithoutRefusing scores in the price-pressure rehearsal.
+    expect(prompt).toMatch(/SAY THE CASE PRICE, NOT WHAT A PALLET IS NOT/);
+    expect(prompt).toMatch(/never put a dollar figure on a pallet/i);
+    // And the other half of rule 2, which the rehearsal scores as
+    // order-prices-only-when-asked: a price question that names nothing is a
+    // question about all of them, answered, not handed back as a question.
+    expect(prompt).toMatch(/A PRICE QUESTION WITH NO PRODUCT IN IT IS A QUESTION ABOUT ALL OF THEM/);
+    expect(prompt).toMatch(/Do not ask them which ones they meant/i);
+    // The other direction, which the order-intent-replay rehearsal scores: a
+    // product named is not a price asked for, so nothing is priced on their
+    // behalf.
+    expect(prompt).toMatch(/A PRODUCT NAMED IS NOT A PRICE QUESTION/);
+    // And when something the tool needs is missing, the number still comes
+    // before the question. order-with-a-list gives one caller turn and requires
+    // a price inside it.
+    expect(prompt).toMatch(/NEVER MAKE THEM ANSWER A QUESTION BEFORE THEY HEAR A NUMBER/);
+  });
+
+  it('says the subtotal, then asks for the link in the words Karim wrote', () => {
+    expect(prompt).toContain('"Would you like me to send you the confirmation link?"');
+    expect(prompt).toMatch(/A YES IS send_order_link, ON THAT TURN/);
+    // Ask on one turn, send on the next. The same defect as offering a person
+    // and dialling in one breath, which cost a caller a silent line on
+    // 2026-08-15.
+    expect(prompt).toMatch(/ASKING AND SENDING ARE TWO TURNS/);
+    // The failure this pins is the one offer_human already had: saying it is on
+    // the way and calling nothing sends nothing.
+    expect(prompt).toMatch(/Tell them it is on the way and STOP THERE/i);
+  });
+
+  it('answers "email me the link" with the channels that actually exist', () => {
+    expect(prompt).toMatch(/THEY WANT IT BY EMAIL: SAY WHAT WE CAN DO, OUT LOUD/);
+    expect(prompt).toContain(BUSINESS.spoken.email);
+    expect(prompt).toMatch(/Never promise to email it/i);
+  });
+
+  it('holds the price under pushback and does not reach for a person', () => {
+    // Karim's rule 7, and the one place the standing "offer a human when they
+    // push" rule is switched off. Both halves have to be written or the model is
+    // choosing between two rules that disagree.
+    expect(prompt).toMatch(/PUSHBACK AFTER THE SUBTOTAL: THE NUMBER HOLDS/);
+    expect(prompt).toMatch(/DO NOT OFFER TO PUT THEM THROUGH TO A PERSON OVER THE PRICE/);
+    expect(prompt).toMatch(/THE ONE EXCEPTION IS PRICE PUSHBACK/);
+    expect(prompt).toMatch(/never invent a discount/i);
+    // Naming the discount it is not giving fails the same rehearsal check as
+    // giving one, because the caller hears the word either way.
+    expect(prompt).toMatch(/AND DO NOT NAME WHAT YOU ARE NOT DOING/);
+    // The trigger it replaces, gone from both places rather than left to argue
+    // with the exception.
+    expect(prompt).not.toMatch(/pushing for pricing today/i);
+  });
+
+  it('says we are short rather than inventing what is left', () => {
+    expect(prompt).toMatch(/IF IT COMES BACK SHORT/);
+    expect(prompt).toMatch(/Never invent a number for what is left/i);
+    expect(prompt).toMatch(/price it again at that quantity/i);
+    // Stock moves, so the shortfall is about today, and it is not an apology.
+    expect(prompt).toMatch(/say it is what we have RIGHT NOW/);
+    expect(prompt).toMatch(/DO NOT APOLOGISE FOR IT AND DO NOT OPEN ON THE SHORTFALL/);
+  });
+
+  it('reads a number of boxes as cases, and does not ask which', () => {
+    // Deliberately NOT Akme's `ambiguous_unit` refusal. On a form the question
+    // is right; on a call it costs a turn and the confirmation link shows them
+    // the answer anyway. Karim's call, 2026-08-27.
+    expect(prompt).toMatch(/"TWENTY FIVE BOXES OF TAPE" IS TWENTY FIVE CASES/);
+    expect(prompt).toMatch(/DO NOT ASK THEM WHICH THEY MEANT/);
+  });
+
+  it('asks exactly one question about shrink, because we carry both films', () => {
+    expect(prompt).toMatch(/"SHRINK" IS THE ONE THING YOU ASK ABOUT BEFORE YOU PRICE/);
+    expect(prompt).toMatch(/eighteen inch or five inch/i);
+    expect(prompt).toMatch(/ONE QUESTION, AND ONLY WHEN THEIR WORD COVERS TWO THINGS WE STOCK/);
+    // "Tape" needs the same question and the unit never does. Asking what is in
+    // a box is the interrogation the whole cases rule exists to avoid.
+    expect(prompt).toMatch(/AND NEVER A QUESTION ABOUT THE UNIT/);
+  });
+
+  it('gives the model an id per product and forbids ever saying one', () => {
+    for (const product of BUSINESS.products) {
+      expect(prompt).toContain(`To a tool it is ${product.id}.`);
+    }
+    expect(prompt).toMatch(/THE TOOL NAME AT THE END OF EACH BLOCK IS FOR TOOLS AND NOT FOR YOUR MOUTH/);
+    // The id that reads like a claim the product does not make.
+    expect(prompt).toMatch(/the eighteen inch goes on by hand whatever its tool name reads like/i);
+  });
+
+  it('names the three new tools and what each one is for', () => {
+    for (const tool of ['price_products', 'price_order', 'send_order_link']) {
+      expect(prompt).toContain(tool);
+    }
+    expect(prompt).toMatch(/- price_order: they said how many/);
+  });
+
+  it('has no $5,000 behaviour anywhere on the call', () => {
+    // The threshold flags the draft record for a human. It changes nothing the
+    // agent says, so there is nothing here for a model to act on.
+    expect(prompt).not.toMatch(/5,?000|five thousand/i);
   });
 });

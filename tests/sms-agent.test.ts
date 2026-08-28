@@ -2,7 +2,15 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { carrierIntent, draftCarrierReply, isBargaining, isCarrierKeyword } from '../lib/agent/sms';
-import { HELP_SMS, TEMPLATES, matchTemplate, nonGsm7, renderTemplate } from '../lib/agent/templates';
+import {
+  HELP_SMS,
+  RELAY_TEMPLATE_NAMES,
+  TEMPLATES,
+  matchTemplate,
+  nonGsm7,
+  renderRelayTemplate,
+  renderTemplate,
+} from '../lib/agent/templates';
 import type { TemplateKey } from '../lib/agent/templates';
 
 /**
@@ -66,11 +74,23 @@ describe('one writer: the carrier keeps its words, we keep none', () => {
     expect(authoredSentences('lib/telnyx/sms.ts')).toEqual([]);
   });
 
-  it('holds nothing in templates.ts outside those two strings', () => {
+  it('holds nothing in templates.ts outside the strings it is allowed to produce', () => {
     // The one file still allowed to carry a sentence, and every sentence in it
-    // has to end up inside one of the two things it is allowed to produce. A
-    // seventh template added here fails this the day it lands.
-    const rendered = `${renderTemplate('catalogue')}\n${renderTemplate('help')}`;
+    // has to end up inside something it is allowed to produce. A template added
+    // here without a name in one of these two lists fails this the day it lands.
+    //
+    // THE ALLOWED SET GREW ON 2026-08-27 and the rule did not. The order spec
+    // gives Akme an SMS sender at POST /api/relay/sms, because Akme has no
+    // number and a recognition code has to arrive from the 10DLC registered one.
+    // That endpoint takes a TEMPLATE NAME AND VARIABLES, never a body, so the
+    // three sentences it can produce have to live here, in the repo that holds
+    // the carrier obligation. Akme still decides whether to send and to whom;
+    // these are transactional strings with no opinion in them, not a second
+    // answer to a customer's question, which is what the deletion was about.
+    const relay = RELAY_TEMPLATE_NAMES.map(
+      (name) => renderRelayTemplate(name, { code: '000000', url: 'https://akmeusa.com/order/x' }) ?? '',
+    ).join('\n');
+    const rendered = `${renderTemplate('catalogue')}\n${renderTemplate('help')}\n${relay}`;
     const stray = authoredSentences('lib/agent/templates.ts')
       // The GSM 03.38 alphabet is a character set, not a sentence. It ends in a
       // question mark because the alphabet contains one.

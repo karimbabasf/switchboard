@@ -44,11 +44,16 @@ export type DrainFn = (limit: number) => Promise<{
   failed: number;
 }>;
 
+/** Mirrors sweepOrderDrafts in lib/worker/order-drafts.ts, kept structural for the same reason as DrainFn. */
+export type DraftSweepFn = (limit: number) => Promise<{ nudged: number; unsent: number }>;
+
 export interface RunWorkerOptions {
   /** Injectable for tests; production default lazily imports lib/telegram/cards.ts. */
   callCard?: CallCardFn;
   /** Injectable for tests; production default lazily imports lib/telegram/outbox.ts. */
   drain?: DrainFn;
+  /** Injectable for tests; production default lazily imports lib/worker/order-drafts.ts. */
+  sweepDrafts?: DraftSweepFn;
   /** Injectable clock for tests. */
   now?: () => Date;
 }
@@ -62,6 +67,10 @@ export interface RunWorkerResult {
   /** Zeroed when the drain itself threw; the tick still reports what the calls did. */
   sent: number;
   throttled: number;
+  /** Draft orders that crossed 24 hours this tick and got their single nudge. */
+  nudged: number;
+  /** Nudges that were stamped and did not go out. Never retried; one nudge means one. */
+  nudgeUnsent: number;
 }
 
 /** Per-step retry budget. Attempts reset to 0 whenever a step succeeds, so this is a budget per pipeline step, not a lifetime total. */
@@ -79,6 +88,8 @@ export async function runWorker(limit: number, options: RunWorkerOptions = {}): 
     failed: 0,
     sent: 0,
     throttled: 0,
+    nudged: 0,
+    nudgeUnsent: 0,
   };
 
   const candidates = await selectCandidates(limit);
@@ -90,6 +101,22 @@ export async function runWorker(limit: number, options: RunWorkerOptions = {}): 
 
     const outcome = await runStep(claimed, now(), options);
     result[outcome] += 1;
+  }
+
+  // The draft order lifecycle rides this tick for the reason the drain does:
+  // nothing else runs on a schedule here, and a second pg_cron job would be a
+  // second thing to keep alive. It runs BEFORE the drain, so a nudge and a card
+  // enqueued by the same tick both go out now rather than in two minutes.
+  //
+  // Wrapped like the drain, and for the same reason: a stock of unconfirmed
+  // orders must never be able to stop calls being transcribed and posted.
+  try {
+    const sweep = options.sweepDrafts ?? (await loadDraftSweep());
+    const swept = await sweep(limit);
+    result.nudged = swept.nudged;
+    result.nudgeUnsent = swept.unsent;
+  } catch (err) {
+    console.error(`[worker] order draft sweep failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // Draining is part of a tick, not a separate schedule: nothing else calls it,
@@ -229,6 +256,11 @@ async function runStep(call: Call, now: Date, options: RunWorkerOptions): Promis
 async function loadDrain(): Promise<DrainFn> {
   const { drainOutbox } = await import('../telegram/outbox');
   return drainOutbox;
+}
+
+async function loadDraftSweep(): Promise<DraftSweepFn> {
+  const { sweepOrderDrafts } = await import('./order-drafts');
+  return (limit) => sweepOrderDrafts(limit);
 }
 
 async function loadCallCard(): Promise<CallCardFn> {

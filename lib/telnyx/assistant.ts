@@ -21,12 +21,23 @@
 // runs under node directly, whose ESM resolver will not guess an extension.
 // Both of these are leaf modules, so the convention stops here.
 import { optionalEnv } from '../env.ts';
-import { keyterms, systemPrompt } from '../agent/brief.ts';
+import { BUSINESS, keyterms, systemPrompt } from '../agent/brief.ts';
 
-/** The six tools, in the order the prompt introduces them. */
+/**
+ * The nine tools, in the order the prompt introduces them.
+ *
+ * Six until 2026-08-27, when the line started saying prices and taking orders.
+ * The three new ones sit where the call now goes: price what they asked about,
+ * price the order once they say how many, text the link. text_me_the_list keeps
+ * its place after them because it is now what happens when the call CANNOT be
+ * finished, rather than the first move on every pricing question.
+ */
 export const TOOL_NAMES = [
   'lookup_invoice',
   'check_order',
+  'price_products',
+  'price_order',
+  'send_order_link',
   'text_me_the_list',
   'take_message',
   'offer_human',
@@ -226,6 +237,32 @@ export function voiceSpeed(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
 }
 
+/**
+ * One body parameter, which is JSON Schema and nothing else.
+ *
+ * `{ type, description }` covered every tool until the pricing tools landed on
+ * 2026-08-27. price_products takes a list of product ids and price_order takes a
+ * list of order lines, and an array with no `items` is an array of anything, so
+ * the model is free to send strings where objects belong. `items`, a nested
+ * `properties` and a nested `required` are ordinary JSON Schema rather than
+ * invented Telnyx fields, and `pnpm assistant:sync` reads the stored tool back,
+ * which is what proves the API kept the nesting instead of flattening it.
+ *
+ * NO `enum`, deliberately, for the reason written against escalate_to_human's
+ * `trigger` below: Telnyx documents body_parameters loosely, an unverified field
+ * is how a sync starts failing, and naming the allowed values in the description
+ * costs nothing and is read by the same model.
+ */
+export interface ToolParam {
+  type: string;
+  description: string;
+  /** The schema of one member, when `type` is 'array'. */
+  items?: ToolParam;
+  /** The members, when `type` is 'object'. */
+  properties?: Record<string, ToolParam>;
+  required?: string[];
+}
+
 export interface WebhookTool {
   type: 'webhook';
   webhook: {
@@ -236,7 +273,7 @@ export interface WebhookTool {
     headers: { name: string; value: string }[];
     body_parameters: {
       type: 'object';
-      properties: Record<string, { type: string; description: string }>;
+      properties: Record<string, ToolParam>;
       required: string[];
     };
   };
@@ -331,7 +368,7 @@ export interface AssistantConfigDeps {
 interface ToolSpec {
   name: ToolName;
   description: string;
-  properties: Record<string, { type: string; description: string }>;
+  properties: Record<string, ToolParam>;
   required: string[];
 }
 
@@ -355,6 +392,18 @@ const CALLER_PHONE = {
   },
 } as const;
 
+/**
+ * The six product ids, written into the pricing tools' descriptions off the same
+ * array the prompt's catalogue is built from.
+ *
+ * Typed out here instead, the day a seventh SKU lands the model would be told to
+ * pick from a list of six that no longer matches the one it was given upstairs.
+ * The ids are also the only product string these tools accept: caller text never
+ * reaches a price lookup, which is the property the whole pricing path is built
+ * around (see lib/qbo/stock.ts).
+ */
+const PRODUCT_IDS = BUSINESS.products.map((p) => p.id).join(', ');
+
 const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'lookup_invoice',
@@ -373,12 +422,86 @@ const TOOL_SPECS: ToolSpec[] = [
     required: ['caller_phone'],
   },
   {
+    name: 'price_products',
+    description:
+      // The WHEN is the whole risk on this one. A description that only said
+      // "get prices" would be read as permission to price the list, and the
+      // first rule Karim set is that saying what we stock carries no prices.
+      'Get the price of one case or one bundle of a product, to say out loud. Use the moment somebody asks what something costs and has not said how many of it they want. Pass ONLY the products they actually asked about: two products asked about is two prices back, never the other four, and never a price nobody asked for. Do not use it to answer what we stock, which is a list of names and carries no prices at all, and do not use it on somebody who merely NAMED a product: naming what they want is not asking what it costs.',
+    properties: {
+      ...CALLER_PHONE,
+      products: {
+        type: 'array',
+        description: `The products the caller asked about, by id, and nothing else they did not name. Leave this out entirely ONLY when they asked what everything we stock costs.`,
+        items: { type: 'string', description: `One product id. Exactly one of: ${PRODUCT_IDS}.` },
+      },
+    },
+    required: ['caller_phone'],
+  },
+  {
+    name: 'price_order',
+    description:
+      // "It does the arithmetic, so you never do" is the load-bearing sentence.
+      // The model can multiply, will offer to, and is wrong often enough that a
+      // subtotal it worked out lands on a real order at a real price.
+      'Price a whole order and get the subtotal to say out loud. Use as soon as the caller has said how many of something they want, including when they name several things at once. It does the arithmetic, so you never do: the subtotal it hands back is the only total you may say, and you say it exactly as it came back. It also tells you when we do not have that many, which you say plainly along with what we do have. A caller who says "boxes", "cartons" or "rolls" means that many cases or bundles: send the number as they said it and do not ask them which they meant. It hands back a token for send_order_link, which is for that tool and is never said out loud. If you are missing something it needs, the width of a film or whether it is delivery or will call, give the per unit prices with price_products first and ask for the missing piece after them, so the caller hears a number before they are asked a question.',
+    properties: {
+      ...CALLER_PHONE,
+      lines: {
+        type: 'array',
+        description: 'What they are ordering: one entry per product, with how many units of it.',
+        items: {
+          type: 'object',
+          description: 'One product and how many units of it.',
+          properties: {
+            product: { type: 'string', description: `The product id. Exactly one of: ${PRODUCT_IDS}.` },
+            units: {
+              type: 'number',
+              description: 'How many cases or bundles of it, as the caller said. Whole units only.',
+            },
+          },
+          required: ['product', 'units'],
+        },
+      },
+      fulfilment: {
+        type: 'string',
+        description:
+          'Exactly one of: "delivery" if we are sending it out to them, or "willcall" if they are collecting it. Ask them once, briefly, if they have not said.',
+      },
+    },
+    required: ['caller_phone', 'lines', 'fulfilment'],
+  },
+  {
+    name: 'send_order_link',
+    description:
+      'Text the caller the confirmation link for the order you have just priced, to the number they are calling from. Use the moment they say yes to being sent it, on that same turn: saying it is on the way without calling this sends nothing. It works only on the order price_order just came back with and only for a short while after, so a yes that arrives later means pricing it again first. If it comes back refusing, say what it tells you and give them the other routes instead.',
+    properties: {
+      ...CALLER_PHONE,
+      // camelCase in a file where every other argument is snake_case, and it
+      // stays that way: the tool signature is frozen in the 2026-08-27 spec and
+      // the handler destructures this exact key. Renaming it to match the house
+      // style breaks the link and looks like a tidy-up while it does it.
+      quoteToken: {
+        type: 'string',
+        description:
+          'The token price_order handed back for this order. Pass it back exactly as it came. Never say it out loud and never spell it to a caller.',
+      },
+    },
+    required: ['caller_phone', 'quoteToken'],
+  },
+  {
     name: 'text_me_the_list',
     description:
       // Deliberately NOT "asks what we stock" any more. The agent now answers that
       // out loud from the brief, in one sentence of product names, and texting the
       // list instead of answering a question it can answer is worse service.
-      'Text the caller our product list and how to get a quote, and put their request in front of the team. Use when the caller wants pricing, wants to order, or asks for something in writing.',
+      //
+      // AND NOT "wants pricing, wants to order" any more either, from 2026-08-27.
+      // Both of those are now answered on the call by price_products and
+      // price_order, and leaving the old sentence here would have left the model
+      // choosing between two tools for the same question: the same failure shape
+      // as take_message's "use at the end of any call" on 2026-08-11.
+      'Text the caller our product list and how to get a quote, and put their request in front of the team. Use when the caller wants a written quote, wants something in writing, or asks you to send them the list. Not for a price question, which price_products answers out loud, and not for an order you can price, which is price_order.',
     properties: {
       ...CALLER_PHONE,
       wants: {
@@ -428,7 +551,13 @@ const TOOL_SPECS: ToolSpec[] = [
       // that cannot be completed is a worse failure than the one this tool was
       // built to stop, so the follow-through is spelled out where the decision
       // is made.
-      'Ask the caller whether they would like to be put through to a person, and wait for their answer. This only ASKS: it never connects anyone, so it is always safe. Use it whenever you think a person would help but the caller has not asked for one: they are upset, disputing a charge or an amount, changing or cancelling an order, pushing for pricing you cannot give, or your answer has not landed twice. If they then say yes, you MUST call escalate_to_human with trigger "accepted": that is the only thing that connects anybody, and saying "one moment" on its own rings nobody.',
+      // "pushing for pricing you cannot give" came out on 2026-08-27, and the
+      // carve-out replacing it is Karim's rule, not a softening. The line can
+      // price now, so the caller who pushes is pushing on a number we have
+      // already said. Offering them a person there says the number moves if you
+      // ask the right person, which is the one thing it does not do. Stated in
+      // both places on purpose: the prompt carries the same exception.
+      'Ask the caller whether they would like to be put through to a person, and wait for their answer. This only ASKS: it never connects anyone, so it is always safe. Use it whenever you think a person would help but the caller has not asked for one: they are upset, disputing a charge or an amount, changing or cancelling an order, asking for terms or an account, or your answer has not landed twice. Do NOT use it because a caller thinks a price you have given them is too high: that number holds, said professionally, and a person is not offered over it. If they then say yes, you MUST call escalate_to_human with trigger "accepted": that is the only thing that connects anybody, and saying "one moment" on its own rings nobody.',
     properties: {
       ...CALLER_PHONE,
       reason: { type: 'string', description: 'Why you think they need a person, in a few words.' },
