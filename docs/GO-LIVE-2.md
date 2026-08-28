@@ -31,12 +31,28 @@ was caught and reverted, and that was luck rather than design. Two things now
 stop it: the assistant here is named `Akme line 2`, and `assistant-sync.mts`
 refuses outright if the id it is about to write is v1's.
 
-## The one step that changes the live line
+## LIVE since 2026-08-27
 
-```bash
-cd ../switchboard-2
-pnpm repoint https://switchboard.example.com
-```
+Karim said make it live. `pnpm repoint https://switchboard.example.com` and
+`pnpm assistant:sync` have both been run, and every pointer was read back from
+Telnyx and Telegram rather than trusted:
+
+    Call Control webhook   https://switchboard.example.com/api/voice
+    Messaging webhook      https://switchboard.example.com/api/sms
+    Telegram webhook       https://switchboard.example.com/api/telegram
+    Assistant in use       Akme line 2, 9 tools, ctx on switchboard-2
+    worker base url        https://switchboard.example.com
+
+`SMS_ALLOWLIST` was opened from Karim's cell to `*` at the same time. It had to
+be: the line could answer, price and take an order and then fail to text the
+confirmation link to anybody but him, which is the whole feature dead on the last
+step. 10DLC is provisioned for exactly this (assignmentStatus ASSIGNED, T-Mobile,
+AT&T and non-T-Mobile mapping all ADDED). Putting a number back in that variable
+closes it again.
+
+The v1 assistant, `Akme line` / `assistant-00000000-0000-4000-8000-000000000001`,
+is untouched with its six tools and its switchboard-v1 context URL. It is the
+rollback and nothing points at it.
 
 That is the only command left, and it is the one that moves real callers. It changes five things at once:
 the Call Control webhook, the messaging webhook, the assistant's tool URLs, the
