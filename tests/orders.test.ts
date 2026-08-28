@@ -230,15 +230,69 @@ describe('pricing', () => {
     expect(speech).toMatch(/confirmation link/);
   });
 
-  it('offers what we do have when stock is short, and still prices what they asked for (rule 8)', () => {
-    const lines = [{ product: 'tan-tape' as const, units: 20 }];
+  it('asks before it shortens the order, and prices nothing until they answer (rule 8)', () => {
+    // Karim, 2026-08-28, from a live call: 25 asked for, 21 on the shelf, and
+    // the link that arrived was for 21 without anybody agreeing to 21. The turn
+    // now carries the shortfall and the question and NOTHING ELSE, because the
+    // only question in it used to be the one about the link.
+    const lines = [{ product: 'tan-tape' as const, units: 25 }];
     const speech = orderSpeech(lines, priceLines(lines), [
-      { product: 'tan-tape', wanted: 20, available: 12 },
+      { product: 'tan-tape', wanted: 25, available: 21 },
     ]);
-    expect(speech).toMatch(/do not currently have/i);
-    expect(speech).toMatch(/twelve/);
-    // The price is still the one they asked for. They adjust on the form.
-    expect(speech).toMatch(/four hundred eighty-eight dollars and forty cents/);
+    expect(speech).toBe(
+      'We have twenty-one cases of tan hot melt tape right now, not twenty-five. ' +
+        'Do you want to go ahead with that?',
+    );
+    // No subtotal for an order nobody has agreed to, and no offer of the link.
+    expect(speech).not.toMatch(/dollars/);
+    expect(speech).not.toMatch(/confirmation link/);
+  });
+
+  it('says the subtotal and offers the link once the short line is gone', () => {
+    // The second turn: they said yes to twenty-one, the model re-prices at
+    // twenty-one, nothing is short, and the flow is the ordinary one again.
+    const lines = [{ product: 'tan-tape' as const, units: 21 }];
+    const speech = orderSpeech(lines, priceLines(lines), []);
+    expect(speech).toMatch(/five hundred twelve dollars and eighty-two cents/);
+    expect(speech).toMatch(/confirmation link/);
+  });
+
+  it('names every short line in one question when several are short', () => {
+    const lines = [
+      { product: 'tan-tape' as const, units: 25 },
+      { product: 'cushion-wrap' as const, units: 10 },
+    ];
+    const speech = orderSpeech(lines, priceLines(lines), [
+      { product: 'tan-tape', wanted: 25, available: 21 },
+      { product: 'cushion-wrap', wanted: 10, available: 4 },
+    ]);
+    expect(speech).toBe(
+      'We have twenty-one cases of tan hot melt tape, and four bundles of bubble cushion wrap right now. ' +
+        'Do you want to go ahead with those?',
+    );
+  });
+
+  it('offers to price the rest when a line is at zero', () => {
+    const lines = [
+      { product: 'tan-tape' as const, units: 5 },
+      { product: 'cushion-wrap' as const, units: 10 },
+    ];
+    const speech = orderSpeech(lines, priceLines(lines), [
+      { product: 'cushion-wrap', wanted: 10, available: 0 },
+    ]);
+    expect(speech).toBe(
+      'We are out of bubble cushion wrap right now. Do you want me to price the rest without it?',
+    );
+  });
+
+  it('asks no quantity question when the whole order is out', () => {
+    // There is no smaller order to agree to, so there is nothing to ask. The
+    // brief routes this caller the way it routes anything it cannot finish.
+    const lines = [{ product: 'cushion-wrap' as const, units: 10 }];
+    const speech = orderSpeech(lines, priceLines(lines), [
+      { product: 'cushion-wrap', wanted: 10, available: 0 },
+    ]);
+    expect(speech).toBe('We are out of bubble cushion wrap right now.');
   });
 
   it('produces the subtotal the rehearsal scenario expects', () => {

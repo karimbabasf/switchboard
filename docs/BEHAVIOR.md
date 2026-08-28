@@ -134,7 +134,16 @@ answer the one thing they rang about.
 2. **Take the order.** Item by item, quantities included, then text the
    confirmation link to the number they are on. What does NOT change: no
    invoicing, no discounting, and no pallet total while the pallet counts are
-   unconfirmed. On price pushback the number holds and nobody is transferred:
+   unconfirmed.
+
+   **A SHORT LINE IS A QUESTION, from 2026-08-28.** Karim, off a live call: the
+   agent asked for 25, heard we had 21, and the link that arrived was for 21
+   with nobody having agreed to it. It had spent a yes about the link on the
+   quantity. So a shortfall now ends the turn: what we have right now, the
+   question, and nothing else. No subtotal and no link offer ride along with it,
+   and `price_order` returns no token, so a link for an unagreed order cannot
+   physically go out. The subtotal arrives on the next turn at the number they
+   said yes to. Same rule as offering a person and dialling in one breath. On price pushback the number holds and nobody is transferred:
    Karim's call, because handing a price objection to a person teaches callers to
    push.
 3. **Listing is titles. Detail is a follow-up.** "What do you sell" gets six names

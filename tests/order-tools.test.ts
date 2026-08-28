@@ -262,16 +262,68 @@ describe('price_order', () => {
     expect(t.savedQuotes[0]).toMatchObject({ fulfilment: 'willcall' });
   });
 
-  it('says what we have when we are short, and still prices what they asked for (rule 8)', async () => {
+  it('asks about the shortfall and hands back nothing that could send a link (rule 8)', async () => {
+    // THE FIX OF 2026-08-28, at the level that makes it stick. The prompt half
+    // is a rule the model can talk itself past. This half is arithmetic it
+    // cannot: with no token there is nothing for send_order_link to spend, so a
+    // link for an order the caller never agreed to cannot physically go out.
     const t = testDeps({ stock: { 'tan-tape': 12 } });
     const out = await runTool(
       'price_order',
       { caller_phone: CALLER, lines: [{ product: 'tan-tape', units: 20 }], fulfilment: 'willcall' },
       t.deps,
     );
-    expect(out.speech).toMatch(/do not currently have twenty cases of the tan hot melt tape, we have twelve/i);
-    expect(out.speech).toMatch(/four hundred eighty-eight dollars and forty cents/);
+
+    expect(out.speech).toBe(
+      'We have twelve cases of tan hot melt tape right now, not twenty. Do you want to go ahead with that?',
+    );
     expect(out.shortStock).toEqual([{ product: 'tan-tape', wanted: 20, available: 12 }]);
+
+    // No token, and no number anywhere the model can reach for.
+    expect(out.quoteToken).toBeUndefined();
+    expect(out.subtotalCents).toBeUndefined();
+    expect(out.speech).not.toMatch(/dollars/);
+    expect(out.speech).not.toMatch(/confirmation link/);
+
+    // The row is still written: it is the record of what was asked for before
+    // it was cut, and it expires unspent.
+    expect(t.savedQuotes).toHaveLength(1);
+    expect(t.savedQuotes[0]).toMatchObject({ subtotalCents: 48840 });
+  });
+
+  it('prices and offers the link on the second call, at the quantity they agreed to', async () => {
+    // The turn after the caller says yes. Nothing is short at twelve, so this is
+    // the ordinary path again and the token comes back.
+    const t = testDeps({ stock: { 'tan-tape': 12 } });
+    const out = await runTool(
+      'price_order',
+      { caller_phone: CALLER, lines: [{ product: 'tan-tape', units: 12 }] },
+      t.deps,
+    );
+    expect(out.shortStock).toEqual([]);
+    expect(out.quoteToken).toBe('quote-1');
+    expect(out.subtotalCents).toBe(29304);
+    expect(out.speech).toMatch(/two hundred ninety-three dollars and four cents/);
+    expect(out.speech).toMatch(/confirmation link/);
+  });
+
+  it('cannot send a link off a short quote, because the token never leaves the tool', async () => {
+    // The end-to-end shape of the live failure, run forwards: price short, then
+    // try to send anyway. There is no token to pass, and send_order_link refuses
+    // an empty one.
+    const t = testDeps({ stock: { 'tan-tape': 12 } });
+    const short = await runTool(
+      'price_order',
+      { caller_phone: CALLER, lines: [{ product: 'tan-tape', units: 20 }] },
+      t.deps,
+    );
+    const sent = await runTool(
+      'send_order_link',
+      { caller_phone: CALLER, quoteToken: short.quoteToken ?? '' },
+      t.deps,
+    );
+    expect(t.texted).toHaveLength(0);
+    expect(sent.speech).toBeTruthy();
   });
 
   it('prices the order in full when the stock read fails, and says nothing about it', async () => {

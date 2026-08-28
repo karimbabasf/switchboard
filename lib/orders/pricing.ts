@@ -15,7 +15,7 @@
  *   3. No quantities means per unit prices only    -> unitPriceSpeech below
  *   4. Quantities means say the subtotal           -> orderSpeech below
  *   5. Then offer the confirmation link            -> orderSpeech below
- *   8. Short stock is said, and what we have offered -> orderSpeech below
+ *   8. Short stock is said, and CONFIRMED before it is priced -> orderSpeech below
  *   9. Nothing changes at five thousand dollars    -> nothing in this file reads it
  */
 
@@ -164,29 +164,81 @@ export function unitPriceSpeech(ids: readonly ProductId[]): string {
   return `${capitalise(joinSpoken(parts))}.`;
 }
 
-/** Rule 8, said professionally: what we cannot fill, and what we can. */
-export function shortStockSpeech(short: readonly ShortStock[]): string {
+/**
+ * Rule 8, and from 2026-08-28 the QUESTION that goes with it.
+ *
+ * A SHORTFALL IS A QUESTION, NOT AN ANNOUNCEMENT. This used to state the
+ * shortfall and then hand the turn back to `orderSpeech`, which followed it
+ * with a subtotal for the full ask and the offer of the link. Three things in
+ * one turn, and only the last one was a question, so the only thing a caller
+ * could answer was the link. On 2026-08-27 Karim asked for twenty five cases of
+ * tan tape, heard that we had twenty one, said yes to the link, and got a link
+ * for twenty one: the agent had quietly resized his order and read his yes as
+ * consent to it. Two quote rows forty three seconds apart record it exactly.
+ *
+ * So the shortfall now ends in the question the caller actually has to answer,
+ * and nothing else rides along with it. The subtotal comes on the next turn, at
+ * the quantity they agreed to, from the tool, as every subtotal does.
+ *
+ * `lineCount` is how many lines the whole order has. It is here for one case:
+ * when every line is out at zero there is no order left to resize, so there is
+ * no quantity question to ask and this says the fact and stops. The brief routes
+ * that caller the way it routes anything we cannot finish on the call.
+ */
+export function shortStockSpeech(short: readonly ShortStock[], lineCount = short.length): string {
   if (short.length === 0) return '';
-  return short
-    .map((s) => {
-      const wanted = `${countWords(s.wanted)} ${unitNamePlural(s.product, s.wanted)}`;
-      const have =
-        s.available === 0
-          ? 'we are out of those at the moment'
-          : `we have ${countWords(s.available)}`;
-      return `We do not currently have ${wanted} of the ${spokenName(s.product)}, ${have}.`;
-    })
-    .join(' ');
+
+  const partial = short.filter((s) => s.available > 0);
+  const none = short.filter((s) => s.available === 0);
+
+  const facts: string[] = [];
+  if (partial.length > 0) {
+    const parts = partial.map(
+      (s) =>
+        `${countWords(s.available)} ${unitNamePlural(s.product, s.available)} of ${spokenName(s.product)}`,
+    );
+    // The "not twenty five" tail only when there is one line to attach it to.
+    // Two of them and the sentence stops being something a caller can hold.
+    const tail =
+      partial.length === 1 && short.length === 1
+        ? `, not ${countWords(partial[0].wanted)}`
+        : '';
+    facts.push(`we have ${joinSpoken(parts)} right now${tail}`);
+  }
+  if (none.length > 0) {
+    facts.push(`we are out of ${joinSpoken(none.map((s) => spokenName(s.product)))} right now`);
+  }
+
+  const fact = `${capitalise(joinSpoken(facts))}.`;
+
+  // Nothing left to sell them: no quantity to agree to, so no question.
+  if (partial.length === 0 && none.length >= lineCount) return fact;
+
+  const ask =
+    partial.length > 0
+      ? `Do you want to go ahead with ${partial.length === 1 ? 'that' : 'those'}?`
+      : `Do you want me to price the rest without ${none.length === 1 ? 'it' : 'them'}?`;
+
+  return `${fact} ${ask}`;
 }
 
 /**
  * Rules 4 and 5: the reading, the subtotal, then the offer.
  *
- * The subtotal prices WHAT THEY ASKED FOR, even when a line is short. Quoting
- * the shortened order would quietly change somebody's order for them; saying
- * both numbers lets them decide, and the form they get shows the picks so they
- * can fix it there. Same reasoning as reading "25 boxes of tape" as 25 cases
- * and letting the form show it.
+ * A SHORT LINE STOPS HERE AND ASKS. Changed 2026-08-28, Karim, after a live
+ * call. This used to say the shortfall, then price the full ask anyway, then
+ * offer the link, on the reasoning that quoting the shortened order would
+ * quietly change somebody's order for them. The reasoning was right and the
+ * shape was wrong: the only QUESTION in that turn was the one about the link,
+ * so a caller who said yes to the link had their order resized for them by the
+ * model on the next turn, which is the exact thing the full price was there to
+ * prevent. Asking changes nobody's order. It is also two short sentences
+ * instead of five, which the three sentence cap has been losing to.
+ *
+ * So: short means the ask and nothing else. No reading, no subtotal, no link
+ * offer, and `priceOrder` hands back no token to send one with. The subtotal
+ * arrives on the next turn at the quantity they agreed to, from this same
+ * function, with nothing short in it.
  *
  * Nothing here reads the large order threshold. Rule 9: a five thousand dollar
  * order sounds exactly like a fifty dollar one on the call.
@@ -196,6 +248,8 @@ export function orderSpeech(
   priced: PricedOrder,
   short: readonly ShortStock[],
 ): string {
+  if (short.length > 0) return shortStockSpeech(short, lines.length);
+
   const readings = priced.perLine.map(
     (line) =>
       `${countWords(line.units)} ${unitNamePlural(line.product, line.units)} of ${spokenName(line.product)}`,
@@ -207,8 +261,7 @@ export function orderSpeech(
       : `${capitalise(joinSpoken(priced.perLine.map((line, i) => `${readings[i]} is ${centsToSpokenDollars(line.lineCents)}`)))}. ` +
         `That comes out to about ${centsToSpokenDollars(priced.subtotalCents)}.`;
 
-  const stock = shortStockSpeech(short);
-  return [stock, body, LINK_OFFER].filter(Boolean).join(' ');
+  return `${body} ${LINK_OFFER}`;
 }
 
 /** Rule 5, word for word. The one question that follows every subtotal. */

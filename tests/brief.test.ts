@@ -1048,12 +1048,22 @@ describe('brief.ts: the line prices and takes orders, from 2026-08-27', () => {
     expect(prompt).not.toMatch(/pushing for pricing today/i);
   });
 
-  it('says we are short rather than inventing what is left', () => {
-    expect(prompt).toMatch(/IF IT COMES BACK SHORT/);
+  it('asks about a shortfall rather than shrinking the order itself', () => {
+    // Karim, 2026-08-28, from a live call: asked for 25, told we had 21, said
+    // yes to the confirmation link, and the link arrived for 21. Nobody had
+    // agreed to 21. The tool half of the fix withholds the token; this is the
+    // prompt half, and it has to name the failure, not just the rule.
+    expect(prompt).toMatch(/IF IT COMES BACK SHORT, THE QUANTITY IS THE OPEN QUESTION AND YOU ASK IT/);
+    expect(prompt).toMatch(/STOP AND LET THEM ANSWER/);
+    expect(prompt).toMatch(/NEVER MOVE THE NUMBER YOURSELF/);
+    expect(prompt).toMatch(/A yes about the link is not a yes about the quantity/);
+    expect(prompt).toMatch(/A YES IS A NEW price_order AT THE NEW NUMBER/);
     expect(prompt).toMatch(/Never invent a number for what is left/i);
-    expect(prompt).toMatch(/price it again at that quantity/i);
+    // Wanting more than we have is a quote request, not a second attempt at the
+    // same price call, which would come back short again and stall the call.
+    expect(prompt).toMatch(/IF THEY WANT MORE THAN WE HAVE, THAT IS NOT SOMETHING TO PRICE AGAIN/);
     // Stock moves, so the shortfall is about today, and it is not an apology.
-    expect(prompt).toMatch(/say it is what we have RIGHT NOW/);
+    expect(prompt).toMatch(/what we have RIGHT NOW/);
     expect(prompt).toMatch(/DO NOT APOLOGISE FOR IT AND DO NOT OPEN ON THE SHORTFALL/);
   });
 

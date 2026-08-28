@@ -583,6 +583,29 @@ async function priceOrder(args: Args, deps: ToolDeps): Promise<ToolResult> {
     shortStock: short,
   });
 
+  // A SHORT LINE GETS NO TOKEN AND NO NUMBER. Karim, 2026-08-28, after a live
+  // call: asked for twenty five cases, told we had twenty one, said yes to the
+  // confirmation link, and the link came through for twenty one. The model had
+  // resized the order itself and read a yes about the link as a yes about the
+  // quantity. Rows quote 03:47:27 (25/25, short) and 03:48:10 (25/21, sent)
+  // record it forty three seconds apart.
+  //
+  // The prompt already said to say what we have, and it did say it. What it
+  // could not do was stop the model spending a caller's yes on the wrong
+  // question. So the tool stops: `orderSpeech` returns the confirmation
+  // question by itself, and nothing rides back with it that could be sent or
+  // said. No token, so `send_order_link` has nothing to spend and a link for an
+  // order nobody agreed to cannot physically go out. No subtotal, so there is
+  // no figure in scope for a model that has been told every number it says must
+  // have come from a tool.
+  //
+  // The row is still written. It is the record of what was asked for before it
+  // was cut, it is where the evidence for this fix came from, and it simply
+  // expires unspent.
+  if (short.length > 0) {
+    return { speech: orderSpeech(lines, priced, short), shortStock: short };
+  }
+
   return {
     speech: orderSpeech(lines, priced, short),
     quoteToken: quote.token,

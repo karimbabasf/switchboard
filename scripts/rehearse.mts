@@ -1175,13 +1175,51 @@ const SCENARIOS: Scenario[] = [
       'I need 40 cases of the tan tape.',
       'Yeah, tan hot melt.',
     ],
+    // The real tool returns the shortfall and the QUESTION, with no subtotal in
+    // it, because there is no order until the caller agrees to the number.
     toolResult: {
       price_order:
-        'We have 12 cases of tan hot melt tape available right now, not 40. Your subtotal for 12 is $293.04.',
+        'We have twelve cases of tan hot melt tape right now, not forty. Do you want to go ahead with that?',
     },
     checks: [
       mustSay(/12|twelve/i, 'how many we actually have'),
       mustSay(/right now|currently|at the moment|today/i, 'that the shortage is about now, not forever'),
+      mustNotSay(/sorry about that|unfortunately|afraid/i, 'an apology instead of an offer'),
+    ],
+  },
+  {
+    // THE LIVE FAILURE OF 2026-08-27, run as a scenario.
+    //
+    // Karim asked for 25 cases, was told we had 21, said yes to the
+    // confirmation link, and got a link for 21. A yes about the link was spent
+    // as a yes about the quantity. The tool half of the fix makes that
+    // impossible (no token comes back on a short line, so there is nothing for
+    // send_order_link to spend). This is the prompt half: the agent has to put
+    // the quantity question to the caller and wait, rather than deciding for
+    // them and moving on to the link.
+    name: 'order-short-stock-asks-before-it-shrinks-the-order',
+    why: 'Karim, 2026-08-28: "it automatically shifts over to 21 without confirming with the customer."',
+    caller: [
+      'Can I get 25 cases of the tan hot melt tape and 25 of the 18 inch film?',
+    ],
+    toolResult: {
+      price_order:
+        'We have twenty-one cases of tan hot melt tape right now, not twenty-five. Do you want to go ahead with that?',
+    },
+    checks: [
+      mustSay(/21|twenty[- ]?one/i, 'how many of the tape we actually have'),
+      mustSay(/\?/, 'a question, so the caller gets to decide the quantity'),
+      mustSay(
+        /do you want|would you like|shall i|is that ok|does that work|are you happy/i,
+        'the quantity put to the caller rather than chosen for them',
+      ),
+      // The whole failure in one check: it must not treat 21 as settled and
+      // move on to the link in the same breath.
+      mustNotCall('send_order_link', 'sending a link for a quantity nobody agreed to'),
+      mustNotSay(
+        /confirmation link|send you (?:a|the) link|text you (?:a|the) link/i,
+        'the link, which is a second question and belongs in a second turn',
+      ),
       mustNotSay(/sorry about that|unfortunately|afraid/i, 'an apology instead of an offer'),
     ],
   },
