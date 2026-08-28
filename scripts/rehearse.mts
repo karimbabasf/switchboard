@@ -677,7 +677,15 @@ const SCENARIOS: Scenario[] = [
     caller: ["I'd like to place an order.", "I'm looking for tape and a couple other things.", 'Hot melt tape.'],
     checks: [
       advances(),
-      mustNotSay(UPSELL_FILLER, 'upsell filler'),
+      // UPSELL_FILLER is NOT checked here, and this is the last piece of the
+      // 2026-08-27 reversal. "What else are you ordering?" tripped it, and that
+      // question is not a tic on this scenario: the caller has said they are
+      // placing an order and listing what they want IS the job now. The tic the
+      // ban exists for is "what else can I get you" offered after answering a
+      // question, and every scenario where that is the shape still checks it.
+      // Banning it here would be the same mistake as ORDER_TAKING: scoring the
+      // new behaviour as the old defect.
+      //
       // They named a product and never asked what it costs, so nothing is priced.
       mustNotSay(MONEY, 'a price nobody asked for'),
       mustNotCall('price_products', 'pricing a product on the caller\'s behalf'),
