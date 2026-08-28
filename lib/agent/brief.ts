@@ -182,7 +182,15 @@ export const BUSINESS: BusinessBrief = Object.freeze<BusinessBrief>({
   // "Akme USA is the only name the app uses anywhere" (Akme lib/ops/types.ts),
   // so it is the only name the phone line uses either.
   name: 'Akme USA',
-  phone: '(555) 555-0158',
+  // THE TELNYX NUMBER, the one this system actually answers on. Karim,
+  // 2026-08-27: "just make it all use the Telnyx number."
+  //
+  // It was (555) 555-0158 until then, which is the Google Voice number the
+  // website publishes and which has never been ported. So every SMS this line
+  // sent told the customer to call a number this line does not answer, and a
+  // caller who rang it got Google Voice instead of Robin. docs/ECOSYSTEM.md had
+  // the split written down as a known gotcha; nothing acted on it.
+  phone: '(555) 555-0124',
   email: 'sales@akmeusa.com',
   site: 'akmeusa.com',
   // See SpokenForms above. Karim, 2026-08-03, off a live call: the agent said the

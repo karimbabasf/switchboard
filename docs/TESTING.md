@@ -5,7 +5,8 @@ Written 2026-08-03, after the day-one build. Everything below is live right now.
 ## Before you start
 
 **Call and text +1 555 555 0124.** That is the Telnyx number this system answers.
-The published number, (555) 555-0158, is still on Google Voice and is not ported,
+The number in code is now the Telnyx one, +1 555 555 0124. The number the LIVE SITE
+still publishes, (555) 555-0158, is on Google Voice and is not ported,
 so nothing you do to it touches any of this.
 
 **Texts only reach your own phone.** `SMS_ALLOWLIST` is `+14155550142` and

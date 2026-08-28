@@ -273,6 +273,13 @@ actually building all seven.
 
 ## The number
 
-Calls are on the Telnyx test number **+1 555 555 0124**. Akme's real line,
-(555) 555-0158, is still on Google Voice and has not been ported. Nothing that
-customers dial today touches this system.
+Calls are on the Telnyx number **+1 555 555 0124**, and since 2026-08-27 that is
+also the number both repos print in code: `BUSINESS.phone` here and
+`CONTACT_PHONE` in Akme on `dev`. It stopped being a "test number" that day, on
+Karim's instruction to make everything use it.
+
+What has NOT moved is www.akmeusa.com, which runs off Akme `main` and still
+publishes (555) 555-0158, on Google Voice, unported. **So nothing a customer
+dials today touches this system.** Closing that needs two things shipped
+together: `lib/site.ts` onto `main`, and the 10DLC campaign copy, which names the
+old number as the published call to action.
