@@ -13,7 +13,8 @@
     "rehearse": "node --env-file=.env.local scripts/rehearse.mts",
     "voice:bakeoff": "node --env-file=.env.local scripts/voice-bakeoff.mts",
     "repoint": "node --env-file=.env.local scripts/repoint.mts",
-    "opener:render": "node --env-file=.env.local scripts/opener-render.mts"
+    "opener:render": "node --env-file=.env.local scripts/opener-render.mts",
+    "preflight:dev": "node --env-file=.env.dev.local scripts/preflight.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.9",
