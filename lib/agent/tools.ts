@@ -59,6 +59,7 @@ import {
   type NewQuote,
   type QuoteVerdict,
 } from '../orders/quotes';
+import { createDeskOrder } from '../desk-order';
 import {
   createDraft as createDraftRow,
   orderLinkFor,
@@ -661,16 +662,37 @@ async function sendOrderLink(args: Args, deps: ToolDeps): Promise<ToolResult> {
     return refuseSendLink('expired');
   }
 
-  const draft = await (deps.createDraft ?? createDraftRow)({
-    callId: flow.call_control_id,
+  // THE DESK IS THE ORDER SYSTEM. A phone order goes where a texted order and
+  // an emailed order go, so a caller who rings and then texts about it is
+  // talking to something that can see it. Added 2026-09-02.
+  //
+  // If the desk cannot be reached the local draft below still runs, so the
+  // caller gets a working link either way. That fallback is the whole reason
+  // this is safe to change while somebody is on the line.
+  // Mapped explicitly rather than passed through. This repo says {product,
+  // units} and the desk says {productId, quantity}; the two happen to share
+  // their product ids, and writing the mapping out is what makes that a checked
+  // fact instead of a coincidence that breaks silently.
+  const desk = await createDeskOrder({
     callerPhone: phone,
-    lines,
-    fulfilment,
-    subtotalCents: verdict.quote.subtotal_cents,
+    lines: lines.map((l) => ({ productId: l.product, quantity: l.units })),
   });
+  if (!desk) {
+    console.warn(`[agent] send_order_link fell back to the local draft for ${phone}; the desk did not take it`);
+  }
+
+  const draft = desk
+    ? null
+    : await (deps.createDraft ?? createDraftRow)({
+        callId: flow.call_control_id,
+        callerPhone: phone,
+        lines,
+        fulfilment,
+        subtotalCents: verdict.quote.subtotal_cents,
+      });
 
   const body = renderRelayTemplate('order_link', {
-    url: (deps.orderLink ?? orderLinkFor)(draft.token),
+    url: desk ? desk.url : (deps.orderLink ?? orderLinkFor)(draft!.token),
   });
   if (!body) {
     // A null render means AKME_ORDER_BASE_URL produced something that cannot go
