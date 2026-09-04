@@ -485,6 +485,29 @@ const asksWhatTheyNeedAtMost = (n: number): Check => (t) => {
 };
 
 /**
+ * Owning a mishear, counted rather than banned.
+ *
+ * Every other apology check in this file is a mustNotSay, because everywhere
+ * else an apology is an apology for the business. From 2026-09-04 there is one
+ * place a sorry is right, which is the agent's own mishear, and the failure
+ * there runs in both directions: zero is the silent switch Karim heard, and two
+ * is the line grovelling through a call. So this asserts a range.
+ */
+const APOLOGY = /\b(sorry|apolog\w+|my mistake|my fault|my bad)\b/i;
+const apologisesBetween = (min: number, max: number): Check => (t) => {
+  const hits = t.said.filter((s) => APOLOGY.test(s));
+  if (hits.length < min) return `never owned the mistake, and the caller had to say it twice`;
+  if (hits.length > max) {
+    return `apologised ${hits.length} times, cap is ${max}: ${hits.map((h) => `"${h.trim()}"`).join(' / ')}`;
+  }
+  return null;
+};
+
+/** The apology that spends the turn on itself instead of on the answer. */
+const EXPLAINING_APOLOGY =
+  /apologi[sz]e for (the|any) confusion|i misunderstood|i (thought|must have heard) you (said|meant|wanted)|my apologies for/i;
+
+/**
  * Filler and performed hesitation, which is what Karim heard as "too many
  * uhmms" on 2026-08-11. Bounded by word boundaries because "um" is inside
  * "number" and "uh" is inside "though".
@@ -1221,6 +1244,47 @@ const SCENARIOS: Scenario[] = [
         'the link, which is a second question and belongs in a second turn',
       ),
       mustNotSay(/sorry about that|unfortunately|afraid/i, 'an apology instead of an offer'),
+    ],
+  },
+  {
+    name: 'corrected-after-a-mishear',
+    why: 'Karim, 2026-09-04, off real calls: "I can say tape and it says paper", and when it is wrong it has no personality about it, it does not say sorry or anything. The mishear belongs to the STT. The silent switch belongs to us.',
+    // The harness cannot mangle a word the way a warehouse does, so the mishear
+    // is staged: the caller asks about the product the agent WOULD have landed
+    // on, then corrects it. Everything after that first turn is the real test.
+    caller: ['How much is the paper?', 'No, I said tape. Not paper.'],
+    checks: [
+      apologisesBetween(1, 1),
+      // Owning it is half. Being right in the same turn is the other half.
+      mustSay(/tan hot melt|clear carton sealing/i, 'the tapes by name on the turn that owns the mistake'),
+      mustNotSay(EXPLAINING_APOLOGY, 'an apology that explains itself instead of answering'),
+      // The reaction-word ban does not lapse because the turn opens on a sorry.
+      mustNotSay(
+        /^\s*(yeah|yep|sure|absolutely|of course|no problem|got it|gotcha|great|perfect)\b/i,
+        'a reaction word in front of the correction',
+      ),
+      advances(),
+    ],
+  },
+  {
+    name: 'names-the-product-back',
+    why: 'A mishear nobody says out loud runs for three turns. Naming the product inside the sentence that answers is what lets a caller stop it at the first beat, and it costs no turn at all.',
+    caller: ['What does the hot melt run?'],
+    checks: [
+      mustCall('price_products'),
+      pricedExactly(['tan-tape']),
+      mustSay(/tan hot melt/i, 'the product by name in the sentence that carries its price'),
+    ],
+  },
+  {
+    name: 'corrected-twice-hands-off',
+    why: 'Two failed turns on the same word is a handoff, not a third guess. And the second sorry is the one that turns owning a mistake into grovelling.',
+    caller: ['I need the tape.', 'No, not that one.', 'That is not what I said either.'],
+    checks: [
+      apologisesBetween(0, 1),
+      mustNotSay(EXPLAINING_APOLOGY, 'an apology that explains itself instead of answering'),
+      // A third guess is the failure. A person or the list in writing is the fix.
+      advances(),
     ],
   },
 ];
