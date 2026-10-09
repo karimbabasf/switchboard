@@ -7,8 +7,8 @@
  * not `eval`. A real-call eval places outbound legs
  * and costs about $2 a run; this is the gate you clear BEFORE spending that.
  *
- * WHAT IT IS: every behaviour rule in the prompt, checked mechanically, for about
- * a cent. It uses the same `systemPrompt()`, the same `GREETING`, the same tool
+ * WHAT IT IS: every behaviour rule in the prompt, checked mechanically, for cents
+ * a run (the script prints the exact cost). It uses the same `systemPrompt()`, the same `GREETING`, the same tool
  * names and descriptions from `assistantConfig()`, and the same model id the
  * assistant runs, over Telnyx's OpenAI-compatible chat completions endpoint. No
  * second copy of any of it, so a prompt edit is scored by this on the next run.

@@ -1,5 +1,10 @@
 # What the agent may say, on the phone and over text
 
+> Superseded in part on 2026-08-27: the phone line now says the price of a product the caller names,
+> totals an order the caller gives quantities for, and texts a link to confirm it. The order rules
+> live in [`docs/specs/2026-08-27-phone-orders-design.md`](specs/2026-08-27-phone-orders-design.md).
+> Everything else on this page still holds.
+
 Written 2026-08-03 from Karim's spec. This is the contract. The prompts implement
 it, the rehearsal scenarios check it, and anything not on this page is not a
 behavior the agent has.

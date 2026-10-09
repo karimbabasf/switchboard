@@ -22,7 +22,7 @@
  * the original reason: a balance is a human's to quote.
  *
  * The three order tools are frozen by
- * docs/superpowers/specs/2026-08-27-phone-orders-design.md. Read it before
+ * docs/specs/2026-08-27-phone-orders-design.md. Read it before
  * changing a signature here.
  */
 import { startWave, supabaseStore, type VoiceStore } from '../telnyx/voice';
@@ -114,7 +114,7 @@ export interface ToolResult {
   speech: string;
   /**
    * `price_order` only, and frozen by
-   * docs/superpowers/specs/2026-08-27-phone-orders-design.md. Ten minute life,
+   * docs/specs/2026-08-27-phone-orders-design.md. Ten minute life,
    * single use, and the only thing `send_order_link` will accept.
    */
   quoteToken?: string;

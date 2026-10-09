@@ -188,7 +188,7 @@ export const BUSINESS: BusinessBrief = Object.freeze<BusinessBrief>({
   // It was (555) 555-0158 until then, which is the Google Voice number the
   // website publishes and which has never been ported. So every SMS this line
   // sent told the customer to call a number this line does not answer, and a
-  // caller who rang it got Google Voice instead of Robin. The ops notes had
+  // caller who rang it got Google Voice instead of Robin. Akme's docs had
   // the split written down as a known gotcha; nothing acted on it.
   phone: '(555) 555-0124',
   email: 'sales@akmeusa.com',
@@ -625,7 +625,7 @@ export function systemPrompt(): string {
   //
   // Three passages below were a flat ban until today: never quote a price, you
   // do not produce a quote, you do not take orders. Karim opened the line up to
-  // all three (docs/superpowers/specs/2026-08-27-phone-orders-design.md), and
+  // all three (docs/specs/2026-08-27-phone-orders-design.md), and
   // the ban is inverted in exactly the places it was written and nowhere else.
   // What we stock is still said WITHOUT prices, which is his rule 1 and the one
   // most likely to be tidied away by somebody adding a price to the catalogue
