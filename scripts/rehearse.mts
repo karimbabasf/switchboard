@@ -4,7 +4,7 @@
  * WHAT THIS IS NOT: proof that the phone line sounds good. It cannot hear the
  * voice, it cannot be talked over, and it never touches Telnyx voice. A passing
  * rehearsal is not a passing system, which is why this is called `rehearse` and
- * not `eval`. Task 14's `eval` is the real-call harness that places outbound legs
+ * not `eval`. A real-call eval places outbound legs
  * and costs about $2 a run; this is the gate you clear BEFORE spending that.
  *
  * WHAT IT IS: every behaviour rule in the prompt, checked mechanically, for about
@@ -32,16 +32,17 @@ import { assistantConfig, TOOL_NAMES } from '../lib/telnyx/assistant.ts';
 /**
  * Where to score.
  *
- * Default is Telnyx direct, which is what the assistant used to call. Set
- * REHEARSE_API to the gateway instead and this scores the path the phone line
- * actually takes now, reasoning-markup strip included:
+ * Default is the model gateway of a running `pnpm dev`, which is the path the
+ * phone line actually takes, reasoning-markup strip included. Telnyx's public
+ * inference endpoint, the old default, now refuses these requests with error
+ * 10015 and scores nothing. REHEARSE_API overrides the target:
  *
- *   REHEARSE_API=http://localhost:3000/api/llm/v1/chat/completions pnpm rehearse
+ *   REHEARSE_API=https://api.telnyx.com/v2/ai/chat/completions pnpm rehearse
  *
  * That matters because the strip is the difference between 18/21 and a usable
  * line: scoring the model directly measures a model we do not ship.
  */
-const API = process.env.REHEARSE_API?.trim() || 'https://api.telnyx.com/v2/ai/chat/completions';
+const API = process.env.REHEARSE_API?.trim() || 'http://localhost:3000/api/llm/v1/chat/completions';
 const VIA_PROXY = !API.includes('api.telnyx.com');
 const TEMPERATURE = Number(process.env.REHEARSE_TEMPERATURE ?? '0.7');
 const MODEL = process.env.TELNYX_LLM_MODEL?.trim() || 'anthropic/claude-haiku-4-5';

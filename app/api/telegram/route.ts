@@ -151,10 +151,9 @@ export async function POST(request: Request): Promise<Response> {
 }
 
 /**
- * sendSms lives in lib/telnyx/sms.ts, owned and built in parallel by another
- * agent. A dynamic import (resolved at call time, not at module load) keeps
- * this route's other exports, and this file's unit tests, independent of
- * whether that module exists on disk yet.
+ * sendSms is imported lazily, at call time rather than at module load, so this
+ * route's pure exports (detectInboundReply, executeAction) and their unit tests
+ * do not pull in the SMS module and everything it depends on.
  */
 async function forwardSms(phone: string, text: string): Promise<Message> {
   const { sendSms } = await import('../../../lib/telnyx/sms');
@@ -278,10 +277,8 @@ export async function executeAction(row: CallbackAction, cq: TelegramCallbackQue
     case CALLBACK_ACTIONS.MARK_QUOTE_HANDLED: {
       const params = row.params as unknown as MarkQuoteHandledParams;
       const by = cq.from.username ?? cq.from.first_name ?? String(cq.from.id);
-      // lib/quote-requests.ts is Karim's, not built here; dynamic import for the
-      // same resilience-to-concurrent-editing reason as forwardSms above, and
-      // markQuoteRequestHandled is the one function that may write handled_at,
-      // per its own doc comment.
+      // Lazy for the same reason as forwardSms above. markQuoteRequestHandled is
+      // the one function that may write handled_at, per its own doc comment.
       const { markQuoteRequestHandled } = await import('../../../lib/quote-requests');
       const didHandle = await markQuoteRequestHandled(params.id, by);
       if (didHandle) {

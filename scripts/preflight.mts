@@ -37,6 +37,7 @@ async function tg(method: string, body: Record<string, unknown> = {}) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- raw Bot API JSON, read field by field below
   const json = (await res.json()) as { ok: boolean; result?: any; description?: string };
   if (!json.ok) throw new Error(`${method}: ${json.description ?? res.status}`);
   return json.result;
@@ -46,6 +47,7 @@ async function telnyx(path: string) {
   const res = await fetch(`https://api.telnyx.com/v2/${path}`, {
     headers: { authorization: `Bearer ${env('TELNYX_API_KEY')}` },
   });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- raw Telnyx JSON, read field by field below
   const json = (await res.json()) as { data?: any; errors?: { detail?: string; title?: string }[] };
   if (!res.ok) {
     const e = json.errors?.[0];
@@ -506,7 +508,7 @@ const checks: Check[] = [
     name: 'API key is valid and the model exists',
     run: async () => {
       const base = (process.env.NEAR_AI_BASE_URL?.trim() || 'https://cloud-api.near.ai/v1').replace(/\/$/, '');
-      const want = process.env.NEAR_AI_MODEL?.trim() || 'openai/gpt-oss-120b';
+      const want = process.env.NEAR_AI_MODEL?.trim() || 'anthropic/claude-haiku-4-5';
       const res = await fetch(`${base}/models`, {
         headers: { authorization: `Bearer ${env('NEAR_AI_API_KEY')}` },
       });

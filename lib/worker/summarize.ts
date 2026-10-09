@@ -8,10 +8,10 @@
  * malformed response fails loudly and gets retried instead of a half-formed
  * summary getting stored.
  *
- * Model choice is a config value, not a code change. Default is gpt-oss-120b:
- * this is structured extraction from a short transcript, not reasoning, so the
- * cheap tier is the right tier, and it is the same model already proven on
- * Akme's classifier.
+ * Model choice is a config value, not a code change. Default is Claude Haiku
+ * 4.5: this is structured extraction from a short transcript, not reasoning, so
+ * a small fast model is the right tier. It replaced openai/gpt-oss-120b, which
+ * NEAR AI stopped serving, and summaries failed quietly until it did.
  */
 
 import { env, optionalEnv } from '../env';
@@ -66,7 +66,7 @@ export async function summarizeCall(call: Call): Promise<CallSummary> {
   }
 
   const baseUrl = optionalEnv('NEAR_AI_BASE_URL', 'https://cloud-api.near.ai/v1').replace(/\/$/, '');
-  const model = optionalEnv('NEAR_AI_MODEL', 'openai/gpt-oss-120b');
+  const model = optionalEnv('NEAR_AI_MODEL', 'anthropic/claude-haiku-4-5');
 
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',

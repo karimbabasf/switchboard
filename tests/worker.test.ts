@@ -13,7 +13,7 @@ process.env.ASSEMBLYAI_API_KEY = 'test-assemblyai-key';
 process.env.ASSEMBLYAI_MODEL = 'universal-3-5-pro';
 process.env.NEAR_AI_API_KEY = 'test-near-ai-key';
 process.env.NEAR_AI_BASE_URL = 'https://cloud-api.near.ai/v1';
-process.env.NEAR_AI_MODEL = 'openai/gpt-oss-120b';
+process.env.NEAR_AI_MODEL = 'anthropic/claude-haiku-4-5';
 process.env.WORKER_SECRET = 'a'.repeat(32);
 
 // ---------------------------------------------------------------------------
@@ -395,7 +395,7 @@ describe('summarize.ts: summarizeCall', () => {
     expect(url).toBe('https://cloud-api.near.ai/v1/chat/completions');
     expect(init.headers.authorization).toBe('Bearer test-near-ai-key');
     const body = JSON.parse(init.body);
-    expect(body.model).toBe('openai/gpt-oss-120b');
+    expect(body.model).toBe('anthropic/claude-haiku-4-5');
     expect(body.tool_choice).toEqual({ type: 'function', function: { name: 'record_call_summary' } });
     vi.unstubAllGlobals();
   });
