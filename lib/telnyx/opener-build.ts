@@ -3,8 +3,11 @@
 // This is the disclosure that was actually rendered, and the runtime plays the
 // file this names. Editing OPENER, TELNYX_TTS or TELNYX_VOICE_SPEED without
 // re-running the script fails tests/opener.test.ts rather than going quiet.
+//
+// In this public copy the clip is a placeholder voiced locally, not the Telnyx
+// voice named below. `pnpm opener:render` replaces it with the real one.
 export const OPENER_BUILD = {
-  fingerprint: "7d371ba98f31ce9a",
+  fingerprint: "faab34c95b54c200",
   voice: "Telnyx.Ultra.f786b574-daa5-4673-aa0c-cbe3e8534c02",
   speed: 1,
   text: "Hi, you've reached Acme U S A. This is Robin, I'm an automated assistant, and this call is recorded. How can I help you today?",

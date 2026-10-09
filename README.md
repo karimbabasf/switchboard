@@ -1,8 +1,8 @@
 # Switchboard
 
-The phone line for [Akme](https://akmeusa.com), my moving supply company in Springfield, California. An AI agent answers every call, prices what the caller asks about, takes the order and texts a link to confirm it. Texts to the same number get answered. Every call and text lands in a Telegram group, one topic per customer, where a person can read the summary, play the recording, reply, or approve what the agent proposed.
+An AI phone line for a moving supply company. The agent answers every call, prices what the caller asks about, takes the order and texts a link to confirm it. Texts to the same number get answered. Every call and text lands in a Telegram group, one topic per customer, where a person can read the summary, play the recording, reply, or approve what the agent proposed.
 
-Live on real customer calls since July 2026.
+I built it for my own business, where it has answered real customer calls since July 2026. This public copy runs under a made-up name, Akme USA, with placeholder phone numbers and prices.
 
 ## What a call sounds like
 
@@ -12,11 +12,15 @@ Every agent line below is the exact string the code produces for this order.
 Robin   Hi, you've reached Acme U S A. This is Robin, I'm an automated
         assistant, and this call is recorded. How can I help you today?
 Caller  How much is the tan tape and the big stretch film?
-Robin   The tan hot melt tape is twenty-four dollars and forty-two cents
-        a case, and the eighteen inch stretch film is forty-two dollars and ninety cents a case.
+Robin   The tan hot melt tape is twenty-four dollars and forty-two cents a
+        case, and the eighteen inch stretch film is forty-two dollars and
+        ninety cents a case.
 Caller  Ten cases of tape and four of the film.
-Robin   Ten cases of tan hot melt tape is two hundred forty-four dollars and twenty cents, and four cases of eighteen inch stretch film is one hundred seventy-one dollars and sixty cents. That comes out to about four hundred fifteen dollars and eighty cents. Would you like me to send you
-        the confirmation link?
+Robin   Ten cases of tan hot melt tape is two hundred forty-four dollars and
+        twenty cents, and four cases of eighteen inch stretch film is one
+        hundred seventy-one dollars and sixty cents. That comes out to about
+        four hundred fifteen dollars and eighty cents. Would you like me to
+        send you the confirmation link?
 Caller  Yes please.
 SMS     Akme USA: your order is ready to confirm here: https://... The link
         works for 48 hours. Questions? Call (555) 555-0124.
@@ -68,7 +72,7 @@ flowchart LR
 
 **Calls.** `/api/voice` answers and plays the recording disclosure in the agent's own voice. The Telnyx AI Assistant boots behind that audio so the caller never waits on it, the dual-channel recording starts when the disclosure ends, and the assistant takes the call with the caller's context attached: whether they are a known customer and what they last ordered. The agent has nine tools: price products, price an order, text the confirmation link, text the product list, look up an invoice, check an order, take a message, offer a person, and ring the team. If nobody picks up, the caller gets voicemail.
 
-**Texts.** `/api/sms` files every message, posts it to the customer's topic, and asks Akme's order desk what to answer. With no desk configured, the text waits in Telegram for a person, and only HELP gets an automatic answer. STOP, START and HELP are carrier commands and are handled as such, with opt-outs kept in a ledger. A text asking to change an order becomes a card with an Apply button, never a change.
+**Texts.** `/api/sms` files every message, posts it to the customer's topic, and asks the store app's order desk what to answer. With no desk configured, the text waits in Telegram for a person, and only HELP gets an automatic answer. STOP, START and HELP are carrier commands and are handled as such, with opt-outs kept in a ledger. A text asking to change an order becomes a card with an Apply button, never a change.
 
 **Telegram.** Each customer gets one forum topic, titled with their name and number. Type in the topic and it goes out as a text to that customer. Buttons on the cards send a drafted reply, mark a quote handled, ask for a callback, or apply an order change.
 
@@ -80,9 +84,9 @@ flowchart LR
 - **Consent before the recorder.** California requires every party's consent to record. The disclosure plays first and `record_start` waits for it to finish.
 - **A model gateway built around caching.** The agent's prompt is resent on every turn, so caching decides the bill. The assistant talks to `/api/llm/v1/chat/completions`, which runs a cached model (96 to 97 percent of prompt tokens cached, measured), strips reasoning tags before they reach text to speech, and falls back to Claude Haiku 4.5 if the primary errors or misses a 6 second deadline. Measured on a 107 second call on 2026-08-15: $0.112 to $0.118 in model cost, against $0.179 uncached.
 - **The agent never does arithmetic.** `price_order` totals the order in integer cents and returns the sentence to say. It also returns a single-use quote token that lives 10 minutes, and `send_order_link` has to spend it, so a link for an order the caller never heard cannot be sent. Short stock ends the turn with a question about quantity, not a smaller order.
-- **Money moves on a human tap.** The phone path never touches the books: stock comes from Akme over a signed, read-only call, and the optional QuickBooks mirror ships turned off. Order changes by text become proposals that a person applies with a tap.
+- **Money moves on a human tap.** The phone path never touches the books: stock comes from the store app over a signed, read-only call, and the optional QuickBooks mirror ships turned off. Order changes by text become proposals that a person applies with a tap.
 - **One door for outbound texts.** The agent, the auto-reply, a button and a typed reply all go through `sendSms`. It fails closed: an empty allowlist texts nobody. An opt-out beats every caller, including a human. It records before it sends, and a carrier refusal posts an alarm card instead of a log line.
-- **Secrets are split by door.** The agent's tools, the Telegram webhook, the model gateway, the worker and each call into Akme carry their own shared secret, so one leak never opens the rest. Inbound Telnyx webhooks are checked against an Ed25519 signature. Row level security is on for every table with zero policies, so only the service role reads anything.
+- **Secrets are split by door.** The agent's tools, the Telegram webhook, the model gateway, the worker and each call into the store app carry their own shared secret, so one leak never opens the rest. Inbound Telnyx webhooks are checked against an Ed25519 signature. Row level security is on for every table with zero policies, so only the service role reads anything.
 - **The prompt has its own harness.** `pnpm rehearse` plays scripted callers against the live model and scores the transcript with mechanical checks, for cents a run. Unit tests cannot hear a prompt regress; this can.
 
 ## Stack
@@ -109,7 +113,7 @@ pnpm dev
 
 Then wire the outside world to it:
 
-1. **Supabase.** Switchboard runs inside Akme's database: it reads Akme's customers, orders and CRM tables, so it needs Akme's schema first, plus the `pg_cron` and `pg_net` extensions. Then apply `supabase/migrations/` in order, create a private Storage bucket named `recordings`, and add the people who should ring when a caller asks for one to the `responders` table. Schedule the worker with `select public.schedule_worker('<WORKER_SECRET>', 'https://<your-host>');`.
+1. **Supabase.** Switchboard shares a database with the business's store app, a separate codebase that is not in this repo. It reads that app's customers, orders and CRM tables, so it needs that schema first, plus the `pg_cron` and `pg_net` extensions. Then apply `supabase/migrations/` in order, create a private Storage bucket named `recordings`, and add the people who should ring when a caller asks for one to the `responders` table. Schedule the worker with `select public.schedule_worker('<WORKER_SECRET>', 'https://<your-host>');`.
 2. **A public URL.** Point a tunnel at port 3000 (or deploy) and set `PUBLIC_BASE_URL` to it.
 3. **Telnyx.** Send Call Control webhooks to `/api/voice` and messaging webhooks to `/api/sms`. Then `pnpm opener:render` renders the disclosure audio and `pnpm assistant:sync` creates the AI assistant and reads every field back.
 4. **Telegram.** Make a supergroup with topics on, add the bot as an admin, and register `/api/telegram` as its webhook with `TELEGRAM_WEBHOOK_SECRET`.
@@ -134,7 +138,7 @@ pnpm rehearse                         # with pnpm dev running: scripted callers,
 | `app/api/agent/tools/[tool]` | The agent's nine tools |
 | `app/api/llm/v1/chat/completions` | The model gateway: caching, tag stripping, fallback |
 | `app/api/sms` | Inbound texts and delivery receipts |
-| `app/api/relay/sms` | Template-only texts on Akme's behalf (codes, order links) |
+| `app/api/relay/sms` | Template-only texts on the store app's behalf (codes, order links) |
 | `app/api/telegram` | Replies typed in topics and card buttons |
 | `app/api/worker` | Recordings, transcripts, summaries, the Telegram outbox |
 | `lib/agent/brief.ts` | Everything the agent knows and how it should sound |
