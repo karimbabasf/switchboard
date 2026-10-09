@@ -188,7 +188,7 @@ export const BUSINESS: BusinessBrief = Object.freeze<BusinessBrief>({
   // It was (555) 555-0158 until then, which is the Google Voice number the
   // website publishes and which has never been ported. So every SMS this line
   // sent told the customer to call a number this line does not answer, and a
-  // caller who rang it got Google Voice instead of Robin. docs/ECOSYSTEM.md had
+  // caller who rang it got Google Voice instead of Robin. The ops notes had
   // the split written down as a known gotcha; nothing acted on it.
   phone: '(555) 555-0124',
   email: 'sales@akmeusa.com',

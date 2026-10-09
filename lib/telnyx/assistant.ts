@@ -14,7 +14,7 @@
  *    documented for non turn-taking models and would be inert here.
  *  - `interruption_settings.start_speaking_plan.wait_seconds` is the pause
  *    before the agent takes its turn. The default is 0.4. A receptionist comes
- *    back faster than that, so this is 0.3, and Task 14's eval is what says
+ *    back faster than that, so this is 0.3, and only a real-call eval can say
  *    whether 0.3 cuts real callers off.
  */
 // Explicit .ts extensions: scripts/assistant-sync.mts imports this module and
@@ -647,8 +647,8 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
   name: 'Akme line 2',
     // Latency is the product on a phone line, so this defaults to a native
     // Telnyx-hosted model with no external hop. NEAR AI Cloud stays the default
-    // everywhere latency is free (summaries, SMS drafting) and Task 11 measures
-    // it here as a custom LLM before this default changes.
+    // everywhere latency is free (summaries, SMS drafting) and has to be measured
+    // here as a custom LLM before this default changes.
     //
     // EMPTY STRING WHEN THE GATEWAY IS ON, AND THAT IS THE ONLY WAY TO SET ONE.
     // Telnyx rejects an assistant carrying both: "Assistant can not have both
@@ -761,7 +761,7 @@ export function assistantConfig(deps: AssistantConfigDeps): AssistantConfig {
       recording_settings: { enabled: false },
     },
     voice_settings: {
-      // Set by the bake-off in Task 6, and shared with the Call Control `speak`
+      // Set by the voice bake-off (scripts/voice-bakeoff.mts), and shared with the Call Control `speak`
       // that reads the disclosure, so the caller hears one person start to
       // finish. Format is <Provider>.<Model>.<VoiceId>, and the id must exist in
       // GET /v2/text-to-speech/voices.
